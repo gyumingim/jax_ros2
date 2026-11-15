@@ -56,7 +56,7 @@ private:
   double publish_rate_hz_{50.0};
   double diagnostics_rate_hz_{2.0};
   double command_resend_rate_hz_{10.0};
-  double max_command_deg_{15.0};
+  double max_command_deg_{360.0};
   double command_timeout_sec_{0.0};
   double max_temperature_c_{60.0};
   bool can_ready_{false};   // ak45_init() 성공 여부. 소멸자 가드에 사용 (부록 B C7)
@@ -90,7 +90,7 @@ Ak45Node::Ak45Node()
   joint_names_         = this->declare_parameter<std::vector<std::string>>(
     "joint_names", default_joint_names);
   command_resend_rate_hz_ = this->declare_parameter<double>("command_resend_rate_hz", 10.0);
-  max_command_deg_        = this->declare_parameter<double>("max_command_deg", 15.0);
+  max_command_deg_        = this->declare_parameter<double>("max_command_deg", 360.0);
   command_timeout_sec_    = this->declare_parameter<double>("command_timeout_sec", 0.0);
   max_temperature_c_      = this->declare_parameter<double>("max_temperature_c", 60.0);
 

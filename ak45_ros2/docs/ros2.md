@@ -966,7 +966,7 @@ ak45_deg --list                 # /joint_states 를 도 단위로 출력
 | 이름 | 타입 | 기본값 | 허용 범위 | 위반 시 |
 |---|---|---|---|---|
 | `command_resend_rate_hz` | `double` | `10.0` | `> 0.0` && `<= 50.0` | FATAL 후 `std::runtime_error` |
-| `max_command_deg` | `double` | `15.0` | `> 0.0` && `<= 360.0` | FATAL 후 `std::runtime_error` |
+| `max_command_deg` | `double` | `360.0` | `> 0.0` && `<= 360.0` | FATAL 후 `std::runtime_error` |
 | `command_timeout_sec` | `double` | `0.0` | `>= 0.0` | FATAL 후 `std::runtime_error` |
 | `max_temperature_c` | `double` | `60.0` | **범위 검증 없음** | — |
 

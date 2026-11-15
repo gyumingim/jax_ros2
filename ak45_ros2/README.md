@@ -205,7 +205,7 @@ colcon build --packages-select ak45_ros2   # config 를 install 로 복사
 
 | # | 조건 | 동작 |
 |---|---|---|
-| S1 | 목표각 절대값 > `max_command_deg` (기본 15°) | **그 관절만 거부.** 클램프 아님. WARN |
+| S1 | 목표각 절대값 > `max_command_deg` (기본 360°) | **그 관절만 거부.** 클램프 아님. WARN |
 | S2 | 온도 >= `max_temperature_c` (기본 60℃) | 그 모터 **영구 제외.** 온도가 내려가도 **자동 복귀 안 함 — 노드 재시작 필요.** ERROR |
 | S3 | 피드백 없음(`valid==0`) 또는 워치독 실패 | 그 모터 제외. 복귀 가능 |
 | S4 | `ak45_set_position()` 이 `-1` 반환 | ERROR 로그. 모터 `error_code != 0` 이면 라이브러리가 프레임을 막는다 |
@@ -234,7 +234,7 @@ Ctrl+C 시 `ak45_close()` → `ak45_emergency_stop()` 으로 **Current Brake 0A 
 | `diagnostics_rate_hz` | `double` | `2.0` | `> 0.0` && `<= 50.0` | FATAL 후 종료 코드 1 |
 | `joint_names` | `string[]` | `["ak45_1" ... "ak45_4"]` | 길이가 정확히 4 | FATAL 후 종료 코드 1 |
 | `command_resend_rate_hz` | `double` | `10.0` | `> 0.0` && `<= 50.0` | FATAL 후 종료 코드 1 |
-| `max_command_deg` | `double` | `15.0` | `> 0.0` && `<= 360.0` | FATAL 후 종료 코드 1 |
+| `max_command_deg` | `double` | `360.0` | `> 0.0` && `<= 360.0` | FATAL 후 종료 코드 1 |
 | `command_timeout_sec` | `double` | `0.0` | `>= 0.0` (0=타임아웃 없음) | FATAL 후 종료 코드 1 |
 | `max_temperature_c` | `double` | `60.0` | 검증 없음 | — |
 
