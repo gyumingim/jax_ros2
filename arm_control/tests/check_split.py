@@ -14,7 +14,7 @@ import argparse
 import random
 import sys
 import time
-from math import degrees, isnan, pi, radians
+from math import degrees, pi, radians
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

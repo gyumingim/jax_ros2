@@ -22,7 +22,7 @@ different rotation. Check the signs of what is typed, and check the result with 
 """
 import argparse
 import sys
-from math import atan2, degrees, hypot, isfinite
+from math import atan2, degrees, isfinite
 
 import numpy as np
 

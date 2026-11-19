@@ -7,7 +7,6 @@ Expected numbers come from IntergrateSim artifacts/deploy_2026-11-05/README.md, 
   and the ROS <-> deploy frame reference point in IntergrateSim/ROS2_INTEGRATION_PLAN.md section 3.
 """
 import sys
-from math import radians
 from pathlib import Path
 
 import numpy as np

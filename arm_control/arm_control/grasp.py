@@ -21,7 +21,7 @@ from math import cos, radians, sin
 
 import numpy as np
 
-from .model_tables import ARM, ARM_LIMITS, DEPLOY_JOINTS, DT, FINGERS, smooth
+from .model_tables import ARM, ARM_LIMITS, DEPLOY_JOINTS, DT, smooth
 
 ISAAC = ARM[:7] + ["hand_base_to_finger_1_1", "hand_base_to_finger_2_1", "hand_base_to_rotation_base",
                    "finger_1_1_to_finger_1_2", "finger_1_2_to_finger_2_2", "rotation_base_to_finger_3_1",

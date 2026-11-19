@@ -3,7 +3,7 @@
     python3 -B arm_control/tests/check_approach_plan.py
 """
 import sys
-from math import degrees, radians
+from math import degrees
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

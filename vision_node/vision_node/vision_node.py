@@ -51,7 +51,7 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
-from vision_node.camera_result import camera_to_robot, numbers, read_result, select_cube
+from vision_node.camera_result import numbers, read_result, select_cube
 
 FRAME_ID = "shoulder_roll_axis"
 CAMERA_FRAME_ID = "camera"
