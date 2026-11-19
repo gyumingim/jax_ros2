@@ -35,6 +35,11 @@ up() {   # $1 = sim ids, $2.. = approach_node params
     ros2 launch arm_control arm.launch.py > "$out/launch.log" 2>&1 & launchpid=$!
     ros2 run arm_control approach_node --ros-args -p hold_s:=1.0 "$@" > "$out/node.log" 2>&1 & nodepid=$!
     sleep 6
+    # like tools/go_zero.sh: approach_node assumes every sim angle is 0 at start. The simulated AK45s start at
+    # motor 0 deg, which is sim 0 only when zero_deg is 0 (calibration.json has e.g. upper_arm_roll 89.9).
+    timeout 20 ros2 topic pub --once --wait-matching-subscriptions 1 /arm_control/joint_command sensor_msgs/msg/JointState \
+        "{name: [shoulder_roll, shoulder_yaw, upper_arm_roll, elbow], position: [0.0, 0.0, 0.0, 0.0]}" > /dev/null 2>&1
+    sleep 5     # up to ~90 deg at max_speed_deg_s 30
 }
 down() {
     kill -INT "$nodepid" 2>/dev/null; kill -INT "$launchpid" 2>/dev/null; sleep 3
@@ -89,7 +94,12 @@ for j in cal.joints:
     else:
         want = str(servo_frame(j.id, m))
         got = re.findall(rf"005#{j.id:02X}[0-9A-F]{{4}}", dump)
-    ok(f"{j.joint}: last CAN frame {got[-1] if got else None} = plan end {want} ({m:.2f} motor deg)", bool(got) and got[-1] == want)
+    if j.motor == "ak45" and got:   # ak45_node sends float32 degrees: allow 1 count (0.0001 deg) of rounding
+        a32 = lambda fr: int(fr.split("#")[1], 16) - (1 << 32 if int(fr.split("#")[1], 16) >= 1 << 31 else 0)
+        same_end = abs(a32(got[-1]) - a32(want)) <= 1
+    else:
+        same_end = bool(got) and got[-1] == want
+    ok(f"{j.joint}: last CAN frame {got[-1] if got else None} = plan end {want} ({m:.2f} motor deg)", same_end)
 ok("finger_rotation (servo 6) never commanded", not re.search(r"005#06", dump))
 EOF
 cat "$out/b_checks.txt"

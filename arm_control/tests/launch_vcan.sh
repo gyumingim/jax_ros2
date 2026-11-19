@@ -52,7 +52,15 @@ sleep 3
 ak45="$(grep -ao '00000404#[0-9A-F]*' "$out/dump.txt" | tail -1)"
 servo="$(grep -ao '005#[0-9A-F]*' "$out/dump.txt" | tail -1)"
 echo "   last AK45 id 4 frame: $ak45   servo frames: $(grep -ac '005#' "$out/dump.txt")   last: $servo"
-check "AK45 id 4 ends at -10 deg: mode 4, int32 -100000 = FFFE7960" "$([ "$ak45" = "00000404#FFFE7960" ] && echo 1 || echo 0)"
+# sim -10 deg -> motor zero_deg + sign * (-10) from calibration.json (elbow), position frame int32 = motor deg * 10000
+want="$(python3 - "$here/../calibration.json" <<'PY'
+import json, sys
+j = next(r for r in json.load(open(sys.argv[1]))["joints"] if r["joint"] == "elbow")
+m = j["zero_deg"] + j["sign"] * j["scale"] * -10.0
+print(f"{m:g} 00000404#{round(m * 10000) & 0xFFFFFFFF:08X}")
+PY
+)"
+check "AK45 id 4 ends at sim -10 deg = motor ${want% *} deg (calibration.json): ${want#* }" "$([ "$ak45" = "${want#* }" ] && echo 1 || echo 0)"
 check "servo 9 (W_PITCH) at 90 + 20 deg: 005#09044C" "$([ "$servo" = "005#09044C" ] && echo 1 || echo 0)"
 check "the other AK45s were not commanded" \
     "$(grep -aE '0000040[123]#' "$out/dump.txt" | grep -q . && echo 0 || echo 1)"

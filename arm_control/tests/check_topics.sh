@@ -50,6 +50,8 @@ table() {
 /joint_states|sensor_msgs/msg/JointState|ak45_node|arm_control_node
 /servo/state|sensor_msgs/msg/JointState|stm_bridge|
 /diagnostics|diagnostic_msgs/msg/DiagnosticArray|ak45_node|
+/pressure_adc|std_msgs/msg/Float32MultiArray|stm_bridge|
+/pressure|std_msgs/msg/Float32MultiArray|stm_bridge|
 EOF
 }
 echo "== NODES.md section 4: type, publisher, subscriber"
@@ -62,7 +64,6 @@ while IFS='|' read -r topic want_type want_pub want_sub; do
         check "$topic: subscribed by $want_sub" "$(echo ",$got_sub," | grep -q ",$want_sub," && echo 1 || echo 0)" "got '$got_sub'"
     fi
 done < <(table)
-check "/pressure does not exist yet (NODES.md says: later)" "$(ros2 topic list 2>/dev/null | grep -qx /pressure && echo 0 || echo 1)"
 
 # ---- what the messages carry
 echo "== message contents"
@@ -107,8 +108,18 @@ print(names, [round(p, 6) for p in pos])
 PY
 }
 echo "   /ak45/command: $(nm "$out/ak45cmd.txt")   /servo/command: $(nm "$out/servocmd.txt")   /servo/state: $(nm "$out/servostate.txt")"
-check "/ak45/command: name ak45_4, motor angle in rad (first step of the ramp, -6 deg = -0.104720)" \
-    "$([ "$(nm "$out/ak45cmd.txt")" = "['ak45_4'] [-0.10472]" ] && echo 1 || echo 0)"
+# first step of the ramp from the simulated feedback 0 deg toward motor zero_deg + sign * (-10) (calibration.json),
+# 300 deg/s at 50 Hz = 6 deg per step
+want_ak45="$(python3 - "$here/../calibration.json" <<'PY'
+import json, sys
+from math import radians
+j = next(r for r in json.load(open(sys.argv[1]))["joints"] if r["joint"] == "elbow")
+target = j["zero_deg"] + j["sign"] * j["scale"] * -10.0
+print(['ak45_4'], [round(radians(max(-6.0, min(6.0, target))), 6)])
+PY
+)"
+check "/ak45/command: name ak45_4, motor angle in rad (first ramp step toward sim -10 deg): $want_ak45" \
+    "$([ "$(nm "$out/ak45cmd.txt")" = "$want_ak45" ] && echo 1 || echo 0)"
 check "/servo/command: name W_PITCH, MOTOR angle in rad (110 deg = 1.919862, not the sim 20 deg)" \
     "$([ "$(nm "$out/servocmd.txt")" = "['W_PITCH'] [1.919862]" ] && echo 1 || echo 0)"
 check "/servo/state: W_PITCH = the angle last sent (1.919862 rad)" \

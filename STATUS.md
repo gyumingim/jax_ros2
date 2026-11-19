@@ -171,6 +171,16 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 3. yaw를 로봇 기준으로 변환한다(지금은 카메라 기준 그대로).
 4. 모터 영점·부호를 실측한다.
 
+## 2026-11-19 전체 시험 (이 브랜치 코드, 격리 환경)
+- 빌드: 4개 패키지 `colcon build` 경고 0.
+- Python 시험 12개 통과: vision_node(check_camera_result, check_solve_camera_to_robot, check_node, check_camera_mode), stm_bridge(check_protocol, check_pressure, check_node), arm_control(check_protocol, check_node, check_approach, check_approach_plan, check_calibrate_wait).
+- vcan 통합 시험 5개 통과: launch_vcan, approach_vcan, check_topics, chain_vcan, calibrate_vcan. 별도 user/net/mount/pid 네임스페이스에서 이 브랜치로 빌드한 install을 `~/ros2_ws/install` 자리에 bind해 돌렸다(실제 can0·사용자 노드와 격리).
+- 고친 것(시험만, 노드 코드는 그대로): 실측 보정(`1098b98`과 작업 트리의 calibration.json: elbow sign -1, upper_arm_roll zero 89.9 등)에 맞지 않던 기대값.
+  - launch_vcan, check_topics: elbow 모터각을 zero 0 / sign +1로 가정 → calibration.json에서 계산.
+  - approach_vcan: 시뮬 AK45가 모터 0°에서 시작해 upper_arm_roll이 시뮬 -89.9°였고 watch가 정지시켰다(46.3° 벗어남). 실제 절차(`tools/go_zero.sh`)처럼 시작 전에 4관절을 시뮬 0으로 보내게 했다. AK45 끝 프레임 비교는 ak45_node가 float32로 보내므로 1카운트(0.0001°) 허용.
+  - check_topics: `/pressure`가 이제 있으므로 "없음" 검사 대신 `/pressure_adc`, `/pressure`의 타입·발행자를 표에 추가.
+- 못 한 것: `check_split.py`(SimToReal 원본 경로 `--original` 필요, 이 PC에 없음), 실물 모터·STM·카메라.
+
 ## 2026-11-19 bring-up 한 번에 (`tools/bringup.sh`, `BRINGUP.md`)
 - `tools/bringup.sh camera|fixed "[x, y, yaw]" [name:=value ...]`: AK45 보정 4줄 출력(수정 안 함) → y/N → 이전 프로세스 전부 종료(`ak45_node`, `stm_bridge_node`, `arm_control_node`, `vision_node`, `approach_node`, `calibrate`, `ros2 launch/run`; SIGINT, 5초 뒤 SIGKILL) → `/tmp/ak45_ctrl.lock` 해제 대기(10초, 안 풀리면 중단) → can0 down/up 1 Mbit/s → `ros2 launch arm_control approach.launch.py`. 사용자가 준 원본 파일 내용이 끝내 전달되지 않아 사용자가 적은 동작 명세대로 새로 작성.
 - `approach.launch.py` 변경: `fixed_pose`(카메라 없이) 추가, `result_json`과 둘 중 하나만. `camera_to_robot`은 비우면 `vision_node/config/camera.yaml`(이전에는 필수 인자). approach_node 파라미터 `max_z_error_m`, `table_e`, `rate_hz`를 launch 인자로 노출(기본값은 노드와 같음). approach_node 로직은 그대로.
