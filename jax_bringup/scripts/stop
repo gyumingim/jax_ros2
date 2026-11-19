@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stop the approach or grasp now: the AK45s are told to stay where they are, servos keep their last command.
+#   ros2 run jax_bringup stop
+ros2 service call /approach/stop std_srvs/srv/Trigger 2>&1 | grep -o "success=[A-Za-z]*, message='.*'"

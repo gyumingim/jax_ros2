@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Move the 4 AK45 joints to sim angle 0, the pose approach_node starts from.  THE ARM MOVES.
+#   ros2 run jax_bringup zero
+# Stops when an AK45 gives no feedback; asks y/N; sends all four 0.0 once on /arm_control/joint_command
+# (arm_control_node turns them into motor angles and keeps its speed limit); shows the angles after 5 s.
+set -u
+if ! ros2 pkg prefix jax_bringup >/dev/null 2>&1; then     # started outside a sourced terminal
+    set +u; source /opt/ros/jazzy/setup.bash; source "${JAX_SETUP:-$HOME/ros2_ws/install/setup.bash}"; set -u
+fi
+list() { ros2 run ak45_ros2 ak45_deg --list 2>&1; }
+now="$(list)"; echo "$now"
+missing=""
+for n in ak45_1 ak45_2 ak45_3 ak45_4; do echo "$now" | grep -qE "^${n}[[:space:]]" || missing="$missing $n"; done
+[ -n "$missing" ] && { echo "stop: no feedback from:$missing (is the robot up? ros2 run jax_bringup up)"; exit 1; }
+read -r -p "Move shoulder_roll, shoulder_yaw, upper_arm_roll, elbow to sim 0? THE ARM MOVES. [y/N] " ans
+case "$ans" in y|Y) ;; *) echo "cancelled, nothing sent"; exit 0 ;; esac
+ros2 topic pub --once /arm_control/joint_command sensor_msgs/msg/JointState \
+    "{name: [shoulder_roll, shoulder_yaw, upper_arm_roll, elbow], position: [0.0, 0.0, 0.0, 0.0]}" > /dev/null || exit 1
+echo "== sent; angles in 5 s"
+sleep 5
+list

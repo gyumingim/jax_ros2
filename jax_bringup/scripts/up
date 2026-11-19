@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Start the whole arm, always from a clean state.
+#
+#   ros2 run jax_bringup up                           # camera
+#   ros2 run jax_bringup up "[0.10, -0.30, 20.0]"     # no camera: fixed cube [x m, y m, yaw deg]
+#   ros2 run jax_bringup up force:=true               # name:=value goes to jax.launch.py
+#
+# 1. prints the AK45 calibration (sign, zero, verified)   2. asks y/N: old nodes stop, motor torque is released
+# 3. stops ak45_node, stm_bridge, arm_control_node, vision_node, approach_node, calibrate, every other
+#    `ros2 launch` / `ros2 run` (not this one)   4. waits for /tmp/ak45_ctrl.lock   5. can0 down/up 1 Mbit/s
+# 6. ros2 launch jax_bringup jax.launch.py. Moving the arm is separate: `zero`, then `start`.
+# Tests: JAX_YES=1 skips the question, JAX_CAN=skip leaves can0 alone, JAX_SETUP=<setup.bash> another install.
+set -u
+if ! ros2 pkg prefix jax_bringup >/dev/null 2>&1; then     # started outside a sourced terminal
+    set +u; source /opt/ros/jazzy/setup.bash; source "${JAX_SETUP:-$HOME/ros2_ws/install/setup.bash}"; set -u
+fi
+args=()
+if [ $# -gt 0 ] && [[ "$1" == \[* ]]; then args+=("pose:=$1"); shift; fi
+args+=("$@")
+
+cal="$(ros2 pkg prefix arm_control 2>/dev/null)/share/arm_control/calibration.json"
+echo "== AK45 calibration ($cal)"
+python3 - "$cal" <<'PY' || true
+import json, sys
+for j in json.load(open(sys.argv[1]))["joints"]:
+    if j["motor"] == "ak45":
+        print(f"  {j['name']:7} {j['joint']:15} sign {j['sign']:+d}  zero {j['zero_deg']:7.2f} deg  verified {j['verified']}")
+PY
+
+if [ "${JAX_YES:-}" != "1" ]; then
+    read -r -p "Old nodes stop: motor torque is released and the arm can drop. Hold the arm. Continue? [y/N] " ans
+    case "$ans" in y|Y) ;; *) echo "cancelled"; exit 0 ;; esac
+fi
+
+# old processes, minus this script and the processes that started it (e.g. `ros2 run jax_bringup up`)
+mine=" $$ "
+p=$$
+while [ "$p" -gt 1 ]; do p="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1)"; mine+="$p "; done
+PATTERN='lib/(ak45_ros2/ak45_node|stm_bridge/stm_bridge_node|arm_control/(arm_control_node|approach_node|calibrate)|vision_node/vision_node)|bin/ros2 (launch|run) '
+old() { pgrep -f "$PATTERN" | while read -r q; do [[ "$mine" == *" $q "* ]] || echo "$q"; done; }
+pids="$(old)"
+if [ -n "$pids" ]; then
+    echo "== stopping:"; for q in $pids; do echo "  $q $(tr '\0' ' ' < /proc/$q/cmdline 2>/dev/null | cut -c1-100)"; done
+    kill -INT $pids 2>/dev/null
+    for _ in $(seq 50); do [ -z "$(old)" ] && break; sleep 0.1; done
+    [ -n "$(old)" ] && { echo "  still running after 5 s: SIGKILL"; kill -KILL $(old) 2>/dev/null; sleep 0.5; }
+fi
+
+LOCK=/tmp/ak45_ctrl.lock
+for _ in $(seq 100); do [ -e "$LOCK" ] && fuser -s "$LOCK" 2>/dev/null || break; sleep 0.1; done
+if [ -e "$LOCK" ] && fuser -s "$LOCK" 2>/dev/null; then
+    echo "stop: $LOCK is still held:"; fuser -v "$LOCK"; exit 1
+fi
+
+if [ "${JAX_CAN:-}" != "skip" ]; then
+    echo "== can0 down/up, 1 Mbit/s (sudo)"
+    sudo ip link set can0 down 2>/dev/null
+    sudo ip link set can0 up type can bitrate 1000000 || { echo "stop: can0 did not come up"; exit 1; }
+fi
+
+echo "== ros2 launch jax_bringup jax.launch.py ${args[*]}"
+echo "   next (other terminal): ros2 run jax_bringup zero, then ros2 run jax_bringup start"
+exec ros2 launch jax_bringup jax.launch.py "${args[@]}"

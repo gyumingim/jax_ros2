@@ -1,0 +1,24 @@
+# JAX 팔: 자주 바꾸는 값을 여기 한 곳에 둔다. 고친 뒤: cd ~/ros2_ws && colcon build --packages-select jax_bringup
+# 그 밖의 값은 각 패키지 파일에 있다:
+#   camera_to_robot           vision_node/config/camera.yaml   (이 launch가 먼저 읽는다)
+#   AK45 온도·각도 상한        ak45_ros2/config/ak45_node.yaml
+#   관절 영점·부호·범위        arm_control/calibration.json
+
+vision_node:
+  ros__parameters:
+    result_json: /home/leajeajun/Desktop/StereoDepthSeg/phone_stereo/runs/my_view/inference.json
+
+arm_control_node:
+  ros__parameters:
+    max_speed_deg_s: 30.0          # 모든 관절 속도 상한
+    calibration_file: ""           # 빈 값 = arm_control/calibration.json
+
+stm_bridge:
+  ros__parameters:
+    servo_channel: can0
+
+approach_node:
+  ros__parameters:
+    grasp_timeout_s: 10.0          # 이 시간 안에 4 cm 못 들면 GRASP_TIMEOUT
+    cube_yaw_deg: 0.0              # 큐브 각도(카메라 yaw는 아직 로봇 기준이 아님)
+    table_e: 0.0                   # 책상 높이 보정(어깨축 → 책상 47.25 cm 기준)

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.8)
+project(jax_bringup NONE)
+find_package(ament_cmake REQUIRED)
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/up scripts/zero scripts/start scripts/stop DESTINATION lib/${PROJECT_NAME})
+ament_package()
