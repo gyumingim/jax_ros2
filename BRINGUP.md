@@ -3,6 +3,16 @@
 `tools/bringup.sh` 하나로 **이전 프로세스를 항상 끄고**, CAN을 다시 올리고, 전체 노드를 띄운다.
 팔을 실제로 움직이는 명령(`go_zero.sh`, `/approach/start`)은 따로, 사람이 직접 한다.
 
+
+> **가장 쉬운 방법은 `jax_bringup` 패키지다** (자세한 것: [jax_bringup/README.md](jax_bringup/README.md)).
+> ```bash
+> ros2 run jax_bringup up            # 켜기 (카메라)   /  up "[0.10, -0.30, 20.0]"  카메라 없이
+> ros2 run jax_bringup zero          # 시작 자세 (팔이 움직임)
+> ros2 run jax_bringup start         # 접근 → 쥐기 → 들기 → ㄴ자 (팔이 움직임)
+> ros2 run jax_bringup stop          # 멈춤
+> ```
+> 자주 바꾸는 값은 `jax_bringup/config/jax.yaml` 한 곳. 아래의 `tools/bringup.sh`, `tools/go_zero.sh`는 이제 `up`, `zero`를 부르는 옛 이름이다.
+
 ## 0. 처음 한 번: 빌드
 
 `~/ros2_ws/src` 아래에 같은 패키지 이름의 폴더가 두 개 있으면(예: 옛 `jax_ros`) 빌드가 충돌한다. 옛 폴더를 빼고 빌드한다.

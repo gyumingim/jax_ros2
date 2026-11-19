@@ -214,6 +214,13 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 - (같은 날 추가) `/pressure`(N, 6개): 사용자가 준 변환식을 `stm_bridge/pressure.py`에 넣었다. ADC = 바이트×4/1023, 센서 RA12P(데이터시트 곡선 gf↔kΩ 16점), 회로 공급전압–RA12P–출력–Rc 10 kΩ–접지 → R = Rc·(1−adc)/adc, 곡선 사이는 log-log 직선 보간. 5 gf 미만(R ≥ 60 kΩ) 0 N, 4000 gf 초과(R ≤ 2.5 kΩ) 끝값 39.2266 N. **센서별 보정 없음.** 받은 코드의 주석 `README section 3`은 이 레포에 없는 문서라 'RA12P 데이터시트 곡선(사용자 제공)'으로 바꿨다. 시험 `tests/check_pressure.py`(곡선 점 R 7.5 kΩ → 260 gf = 2.549729 N 등, log 중점, 단조 증가), `check_node.py`(바이트 128 → 130.37 gf = 1.2785 N 손계산).
 - 시험: `stm_bridge/tests/check_protocol.py`(손계산 255 → 1020/1023 = 0.997067 등, 잘못된 프레임 4종), `check_node.py`(python-can 가상 버스로 프레임 4개 → `/pressure_adc` 1개). 기존 서보 시험 그대로 통과. 실제 STM 보드로는 시험하지 않음.
 
+## 2026-11-20 `jax_bringup` 패키지 (쉬운 bring-up)
+- 명령 4개: `ros2 run jax_bringup up` (이전 노드 정리 → 락 대기 → can0 재시작 → `jax.launch.py`, 자기를 띄운 `ros2 run`은 끄지 않음), `zero`(시뮬 0 자세), `start`(접근·쥐기, 단계 출력), `stop`. 고정 위치는 `up "[x, y, yaw]"`.
+- 설정 한 곳: `jax_bringup/config/jax.yaml`(카메라 결과 파일, 속도 상한, 쥐기 시간, 큐브 각도, 책상 보정). `camera_to_robot`은 `vision_node/config/camera.yaml`, AK45 상한은 `ak45_node.yaml`, 보정은 `calibration.json`에 그대로.
+- `tools/bringup.sh`, `tools/go_zero.sh`는 `up`, `zero`를 부르는 얇은 래퍼로 바꿨다(구현 한 곳).
+- 고친 오류: 고정 위치(높이 0)로 쥐기까지 가면 정책이 큐브를 책상 45 cm 위로 보고 들지 않았다(GRASP_TIMEOUT). 높이 검사를 끈 경우(`max_z_error_m < 0`, 고정 위치 모드) 큐브를 책상 위(월드 z 0.760)로 둔다(`approach_plan.plan_from_pose`).
+- 시험: `jax_bringup/test/bringup_vcan.sh`(vcan, 격리) 12개 통과 — 노드 5개, 옛 노드 정리, 고정 위치 `/object_pose`, zero n/y, start → GRASP RETURN DONE(가짜 손), stop, 두 번째 up이 첫 번째를 대체(중복 없음). 전체 시험(Python 13개, vcan 6개)도 이 날 통과. 실물에서는 아직 실행하지 않음(can0 `sudo ip link` 단계 포함).
+
 ## 2026-11-20 AK45 온도 상한 75 → 100℃ (사용자 결정)
 - `ak45_ros2/config/ak45_node.yaml` `max_temperature_c` 75.0 → **100.0**. 코드 기본값 60.0은 그대로(`ros2 run`이면 60).
 - 로봇 로그에 `온도 상한=60.0도`로 켜진 기록이 있었다: yaml을 75로 바꾼 뒤 `~/ros2_ws`에서 ak45_ros2를 다시 빌드하지 않아, 설치된 yaml이 옛 값이었다. 이번에 다시 빌드했다.

@@ -3,7 +3,7 @@
 > 기준: 2026-10-22. 2026-11-07에 `jax_ros` 구현(1~5단계)에 맞춰 고쳤다. 원칙은 "간단하게". 노드는 담당자가 다르거나, 다른 기기에서 돌거나, 주기가 다를 때만 나눈다. 그 외는 한 노드 안의 함수로 둔다. [확정] 합치기로 정함 / [제안] 아직 승인 전 / [미확정] 정해지지 않음.
 
 > 쥐기: approach_node가 INSERT 뒤 학습 정책(`grasp_lift_25550`, `arm_control/grasp.py`)으로 GRASP → RETURN(ㄴ자) → DONE까지 간다. `/pressure`·`/pressure_adc`(stm_bridge)가 있어야 시작하고, 없으면 사전 파지에서 HOLD.
-> 실행: `tools/bringup.sh` → `arm_control/launch/approach.launch.py`(ak45_node, stm_bridge, arm_control_node, vision_node, approach_node 5개). `result_json`(카메라) 또는 `fixed_pose`(고정 위치) 중 하나. 자세한 것은 [BRINGUP.md](BRINGUP.md).
+> 실행: `ros2 run jax_bringup up` → `jax_bringup/launch/jax.launch.py`(설정 `jax_bringup/config/jax.yaml`). 옛 경로: `tools/bringup.sh` → `arm_control/launch/approach.launch.py`(ak45_node, stm_bridge, arm_control_node, vision_node, approach_node 5개). `result_json`(카메라) 또는 `fixed_pose`(고정 위치) 중 하나. 자세한 것은 [BRINGUP.md](BRINGUP.md).
 
 ## 1. 구성 한눈에
 
