@@ -46,4 +46,5 @@ def pressure_adc(arb_id: int, extended: bool, data: bytes):
     (other id, extended id, or not exactly 6 bytes)."""
     if arb_id != PRESSURE_STDID or extended or len(data) != PRESSURE_COUNT:
         return None
-    return [b * 4 / 1023 for b in data]
+    from .pressure import adc_from_byte
+    return [adc_from_byte(b) for b in data]

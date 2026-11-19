@@ -58,6 +58,8 @@ def main():
     peer.create_subscription(JointState, "/servo/state", lambda m: states.append(m), 10)
     pressures = []
     peer.create_subscription(Float32MultiArray, "/pressure_adc", lambda m: pressures.append(list(m.data)), 10)
+    forces = []
+    peer.create_subscription(Float32MultiArray, "/pressure", lambda m: forces.append(list(m.data)), 10)
     rx = can.Bus(interface="virtual", channel="t") if can else None
     ex = SingleThreadedExecutor()
     ex.add_node(node)
@@ -130,6 +132,10 @@ def main():
         check("pressure frame -> one /pressure_adc message of 6 values",
               [[round(v, 6) for v in p] for p in pressures],
               [[0.0, 0.997067, 0.500489, 0.00391, 0.00782, 0.01173]])
+        # by hand: 0 -> 0 N; 255 -> R 0.029 kOhm, past the curve end -> 4000 gf = 39.2266 N; 128 -> R 9.98 kOhm,
+        # between (100 gf, 11.5) and (165 gf, 8.8) in log: t = ln(9.9805/11.5)/ln(8.8/11.5) = 0.5296, gf = 100 * 1.65^t = 130.37 gf = 1.2785 N; 1, 2, 3 -> R > 60 kOhm, open -> 0 N
+        check("same frame -> one /pressure message in N", [[round(v, 4) for v in p] for p in forces],
+              [[0.0, 39.2266, 1.2785, 0.0, 0.0, 0.0]])
     else:
         print("SKIP  pressure frames: needs python-can")
 

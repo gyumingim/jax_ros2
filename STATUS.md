@@ -177,7 +177,7 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 
 ## 2026-11-19 stm_bridge 압력 수신 (`/pressure_adc`)
 - 패치 파일이 없어(`~/Downloads`에 없음) 사용자 명세대로 새로 구현: CAN StdId 6, 6바이트(센서 6개, 각 0~255, 100 ms) → `/pressure_adc`(Float32MultiArray 6개, 값 = 바이트×4/1023). 확장 id, 6바이트가 아닌 프레임, AK45 응답은 버림. 10 ms마다 수신 버퍼를 비운다.
-- `/pressure`(N)는 **만들지 않았다**: ADC → N 변환식을 코드·문서에서 찾지 못했다(추측 안 함). 변환식이 정해지면 추가.
+- (같은 날 추가) `/pressure`(N, 6개): 사용자가 준 변환식을 `stm_bridge/pressure.py`에 넣었다. ADC = 바이트×4/1023, 센서 RA12P(데이터시트 곡선 gf↔kΩ 16점), 회로 공급전압–RA12P–출력–Rc 10 kΩ–접지 → R = Rc·(1−adc)/adc, 곡선 사이는 log-log 직선 보간. 5 gf 미만(R ≥ 60 kΩ) 0 N, 4000 gf 초과(R ≤ 2.5 kΩ) 끝값 39.2266 N. **센서별 보정 없음.** 받은 코드의 주석 `README section 3`은 이 레포에 없는 문서라 'RA12P 데이터시트 곡선(사용자 제공)'으로 바꿨다. 시험 `tests/check_pressure.py`(곡선 점 R 7.5 kΩ → 260 gf = 2.549729 N 등, log 중점, 단조 증가), `check_node.py`(바이트 128 → 130.37 gf = 1.2785 N 손계산).
 - 시험: `stm_bridge/tests/check_protocol.py`(손계산 255 → 1020/1023 = 0.997067 등, 잘못된 프레임 4종), `check_node.py`(python-can 가상 버스로 프레임 4개 → `/pressure_adc` 1개). 기존 서보 시험 그대로 통과. 실제 STM 보드로는 시험하지 않음.
 
 ## 2026-11-19 AK45 온도 상한 75℃ (사용자 결정)
