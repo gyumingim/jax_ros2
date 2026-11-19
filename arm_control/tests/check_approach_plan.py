@@ -70,6 +70,8 @@ raises("cube height 10 cm off the table (bad camera_to_robot?)",
        lambda: plan_from_pose((REF_ROS[0], REF_ROS[1], REF_ROS[2] + 0.10), 0.0, TABLES))
 check("max_z_error_m < 0 skips the height check",
       len(plan_from_pose((REF_ROS[0], REF_ROS[1], REF_ROS[2] + 0.10), 0.0, TABLES, max_z_error_m=-1).frames), 565)
+check("max_z_error_m < 0 puts the cube on the table: world z 0.760 (the grasp uses it)",
+      round(float(plan_from_pose((REF_ROS[0], REF_ROS[1], 0.0), 0.0, TABLES, max_z_error_m=-1).world[2]), 6), 0.76)
 
 # --- check_plan against calibration.json ------------------------------------------------------------
 cal = calibration.load(ROOT / "calibration.json")

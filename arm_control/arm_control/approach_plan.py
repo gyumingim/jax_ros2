@@ -64,13 +64,16 @@ class Plan:
 
 def plan_from_pose(ros_xyz, yaw_deg, tables_dir, send_finger_rotation=False, e=0.0,
                    max_z_error_m=0.05, handover_s=mt.HANDOVER_S):
-    """ValueError when the cube is off the reachable table or its height says the frame is wrong."""
+    """ValueError when the cube is off the reachable table or its height says the frame is wrong.
+    max_z_error_m < 0 turns the height check off and puts the cube on the table (its z is not used)."""
     ros_xyz = np.asarray(ros_xyz, dtype=float)
     world = mf.ros_to_world(ros_xyz)
     want_z = TABLE_TOP_Z + CUBE_HALF
     if max_z_error_m >= 0 and abs(world[2] - want_z) > max_z_error_m:
         raise ValueError(f"cube centre z {world[2]:.3f} m in the deploy world, the table puts it at {want_z:.3f} "
                          f"(+-{max_z_error_m:g}): check camera_to_robot")
+    if max_z_error_m < 0:      # height check off (a fixed test pose has no height): the cube is on the table
+        world[2] = want_z
     offset = world[:2] - mt.TABLE_ORIGIN
     tables = mt.ApproachTables(tables_dir, offset, e=e)
     run = mt.Approach(tables, handover_s)
