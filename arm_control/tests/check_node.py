@@ -47,6 +47,19 @@ def main():
     ex.add_node(fake)
 
     feedback_deg = {"ak45_1": 0.0, "ak45_2": 0.0, "ak45_3": 0.0, "ak45_4": 2.0}
+    # expected motor angles follow calibration.json (motor = zero_deg + sign * sim), not a fixed zero 0 / sign +1
+    from arm_control import calibration
+    elbow_cal = calibration.load()["elbow"]
+
+    def motor(sim_deg):
+        return elbow_cal.to_motor(sim_deg)[0]
+
+    def first_steps(start, target, step=6.0, n=2):
+        out, v = [], start
+        for _ in range(n):
+            v = v + max(-step, min(step, target - v))
+            out.append(v)
+        return out
 
     def run(seconds):
         frames = []
@@ -81,8 +94,8 @@ def main():
     elbow = [m.position[list(m.name).index("ak45_4")] for m in got if "ak45_4" in m.name]
     check("AK45 commands use ak45_N names", sorted({n for m in got for n in m.name}), ["ak45_4"])
     check("elbow starts from its feedback (2 deg) and steps 6 deg at 300 deg/s, 50 Hz",
-          [round(v, 4) for v in elbow[:2]], [round(radians(-4.0), 4), round(radians(-10.0), 4)])
-    check("elbow ends at -10 deg in rad", round(elbow[-1], 6), round(radians(-10.0), 6))
+          [round(v, 4) for v in elbow[:2]], [round(radians(v), 4) for v in first_steps(2.0, motor(-10.0))])
+    check("elbow ends at sim -10 deg (motor angle) in rad", round(elbow[-1], 6), round(radians(motor(-10.0)), 6))
     check("/servo/command uses servo names", sorted({n for m in servo_cmds for n in m.name}), ["W_PITCH"])
     check("/servo/command is the servo MOTOR angle in rad (90 + 20 deg)",
           [round(p, 9) for m in servo_cmds for p in m.position], [round(radians(110.0), 9)])
@@ -91,10 +104,10 @@ def main():
 
     send(["elbow"], [30.0])
     run(1.0)
-    check("elbow 30 deg passes (limit covers the sim range)", round(got[-1].position[0], 6), round(radians(30.0), 6))
+    check("elbow 30 deg passes (limit covers the sim range)", round(got[-1].position[0], 6), round(radians(motor(30.0)), 6))
     send(["elbow"], [120.0])
     run(1.0)
-    check("elbow 120 deg is clipped to the sim range, 105", round(got[-1].position[0], 6), round(radians(105.0), 6))
+    check("elbow 120 deg is clipped to the sim range, 105", round(got[-1].position[0], 6), round(radians(motor(105.0)), 6))
 
     # play_trajectory's frames go through arm_control_node to the motors
     from arm_control.play import play
@@ -113,7 +126,7 @@ def main():
     frames = run(1.5)
     t.join()
     check("play: all frames published", len(sent), 3 + 1)
-    check("play: elbow ends at -13 deg", round(got[-1].position[0], 6), round(radians(-13.0), 6))
+    check("play: elbow ends at -13 deg", round(got[-1].position[0], 6), round(radians(motor(-13.0)), 6))
     check("play: wrist_pitch servo ends at 90 + 12 deg", frames[-1], "005#0903FC")
 
     node.destroy_node()

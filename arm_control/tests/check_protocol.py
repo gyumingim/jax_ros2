@@ -95,10 +95,11 @@ def main():
     check("servo sim 0 -> zero_deg", j.to_motor(0), (90.0, False))
     check("servo sim 120 clipped to the sim range", j.to_motor(120), (180.0, True))
     e = cal["elbow"]
-    check("AK45 sim 120 clipped to the sim range (limit covers it)", e.to_motor(120), (105.0, True))
+    check("AK45 sim 120 clipped to the sim range (limit covers it)", e.to_motor(120),
+          (e.zero_deg + e.sign * e.scale * 105.0, True))    # follows calibration.json (zero, sign)
     check("AK45 limits cover each sim range", {j.joint: j.limit_deg for j in cal.joints if j.motor == "ak45"},
           {j.joint: max(abs(v) for v in j.sim_range_deg) for j in cal.joints if j.motor == "ak45"})
-    check("AK45 sim -10", e.to_motor(-10), (-10.0, False))
+    check("AK45 sim -10", e.to_motor(-10), (e.zero_deg + e.sign * e.scale * -10.0, False))
     check("ramp ends on target", ramp(0, 10, 30, 50)[-1], 10)
     check("ramp step <= rate / 50 Hz", max(abs(b - a) for a, b in zip([0] + ramp(0, 10, 30, 50), ramp(0, 10, 30, 50))) <= 0.6 + 1e-9, True)
 
@@ -120,10 +121,11 @@ def main():
     n = len(out.sent)
     s.handle("m 181")
     check("session refuses a servo angle over 180", len(out.sent), n)
-    s.handle("j elbow"); s.handle("m 106")
+    s.handle("j elbow"); s.handle(f"m {cal['elbow'].zero_deg + cal['elbow'].limit_deg + 1:g}")   # 1 deg past the motor bound
     check("session refuses an AK45 angle past the limit", len(out.sent), n)
     s.handle("m -10")
-    check("session AK45 goes to /ak45/command in rad", out.sent[-1], "/ak45/command ak45_4 -0.17453 rad (-10 deg)")
+    z = cal["elbow"].zero_deg - 10         # m -10 = 10 deg back from the start position (the joint's zero_deg)
+    check("session AK45 goes to /ak45/command in rad", out.sent[-1], f"/ak45/command ak45_4 {radians(z):.5f} rad ({z:g} deg)")
 
     # trajectory playback: slowed so the fastest joint keeps to the speed limit
     from arm_control.play import schedule, play
@@ -164,7 +166,9 @@ def main():
     for j in verified.joints:
         j.verified = True
     check("checks: clean, verified", check_trajectory(good, verified), (None, []))
-    check("checks: unverified named", check_trajectory(good, cal)[1],
+    unverified = calibration.load()
+    unverified["elbow"].verified = False      # calibration.json may have all AK45 verified: make the case explicit
+    check("checks: unverified named", check_trajectory(good, unverified)[1],
           ["calibration not verified (zero and direction are assumptions): elbow"])
     check("checks: failed run is fatal", check_trajectory({**good, "status": "not delivered", "playable": False,
           "delivered_in_sim": False, "reason": "x"}, verified)[0], "not delivered: x")
