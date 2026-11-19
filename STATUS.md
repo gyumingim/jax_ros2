@@ -171,6 +171,24 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 3. yaw를 로봇 기준으로 변환한다(지금은 카메라 기준 그대로).
 4. 모터 영점·부호를 실측한다.
 
+## 2026-11-19 학습 정책으로 쥐고 들기 (`grasp.py`, approach_node에 연결)
+- 사용자 요청: "집는 것까지". 근거: JaxIsaacLab `main` `artifacts/deploy_2026-11-05/README.md` 7.4–8.2절(`grasp_lift_25550`). INSERT가 끝나면 approach_node가 이어서 GRASP → RETURN → DONE을 60 Hz로 보낸다(`/approach/phase`).
+  - 7.4 넘기기: 필터·이전 행동 0, 손 펼침(0, 0, −30°), 0.5 s 섞기(모터로 가는 값만), RotationBody −170°.
+  - 7.5 손가락 닫기: `/pressure`(N) 힘 제어, 닿음 0.3 N, S_f = 1.2 + 0.8·a7, S_t = 1.2 + 0.8·a9, 0.0012 rad/N, 0.15 rad/s, 첫 관절 0–30° / 엄지 −30–0°, 끝마디 60°·clamp(a8/a10).
+  - 7.6 들기 IK: 보낸 목표각으로 robot_v3 순운동학(손끝 중점, 손 방향), 6관절 DLS(λ 0.02), ±0.6 rad/s, 오프셋 ±1 rad.
+  - 7.7 ㄴ자 복귀: 들림 4 cm가 0.5 s → 2.5 s 동안 (0, 0, 7.2, 90, 0, −2.6, 0)°, 행동 7은 +1, 8–10은 고정.
+  - 7.8 완료: 복귀 끝, 팔 정지, 들림 ≥ 4 cm, 엄지와 손가락 1 또는 2가 0.3 N 이상이 0.5 s → DONE(그 자세 유지).
+  - 관측 45개(8.1): 보낸 목표각(V2 한계 정규화), 변화율, 큐브 위치·속도·손끝 차(기준점 (0, 0, 0.3575), 29번 −0.115, 30번 −dz), `/pressure_adc`, sin/cos(4ψ).
+- **실물이 시뮬과 다른 점(추정으로 메운 것)**:
+  - 큐브는 손 안에 들어가면 카메라로 안 보인다. 시작 때 카메라 위치를 쓰고, 엄지와 손가락 하나가 0.3 N 이상 닿은 뒤로는 "손끝 중점 + 닿을 때의 차이"로 큐브가 따라간다고 본다. 들림·완료 판정과 관측 28–36번이 이 추정을 쓴다.
+  - 엄지 패드는 시뮬 관측에서 힘 크기, 실물 FSR은 수직 성분만 잰다(README 6.2). 그대로 넣는다.
+  - 큐브 각도 43–44번: 카메라 yaw가 로봇 기준이 아니라서 `cube_yaw_deg`(기본 0)를 쓴다.
+- 정책 파일: onnx 가중치를 numpy로 옮긴 `arm_control/model/grasp_lift_25550.npz`(onnxruntime과 최대 4.3e-4 차이). 로봇 모델 `model/robot_v3.urdf`. torch·onnxruntime 설치 불필요.
+- 안전: `/pressure`, `/pressure_adc`가 없거나 0.5 s 넘게 끊기면 쥐기를 시작하지 않거나(HOLD) 멈춘다(STOPPED). 들지 못하면 `grasp_timeout_s`(10 s) 뒤 GRASP_TIMEOUT(그 자리 유지). AK45 추적 감시는 그대로. `grasp:=false`면 전처럼 HOLD.
+- 시험: `tests/check_grasp.py`(순운동학이 README 넘겨주기 예와 0.1 mm 안 일치, 야코비안, 정책 출력이 onnxruntime과 같음, 가짜 손으로 GRASP → RETURN → DONE 5.4 s·들림 14.8 cm(시뮬 중앙값 5.15 s·15.6 cm), 접촉 없음 → 10 s 타임아웃, 다른 큐브 위치 2곳) 통과. `tests/grasp_vcan.sh`(vcan, `fake_hand.py`): 가짜 손 → DONE·마지막 명령 = ㄴ자, 압력 없음 → HOLD, 닿지 않음 → GRASP_TIMEOUT 모두 한 번 통과.
+  - 같은 시각 사용자가 실물 노드를 다시 켜면서 호스트에서 보낸 종료 신호가 격리된 시험 프로세스에도 닿아, 두 번째 실행에서 일부 시나리오가 중간에 끊겼다(코드 문제 아님, 노드 로그에 ExternalShutdownException).
+- **확인 안 된 것**: 실물 압력센서 값(보정 없음), 실물 손가락 서보의 영점·방향(`calibration.json` verified false), 큐브 추정이 실물에서 맞는지, 실제로 쥐고 드는지. 가짜 손은 물리 모델이 아니다.
+
 ## 2026-11-19 전체 시험 (이 브랜치 코드, 격리 환경)
 - 빌드: 4개 패키지 `colcon build` 경고 0.
 - Python 시험 12개 통과: vision_node(check_camera_result, check_solve_camera_to_robot, check_node, check_camera_mode), stm_bridge(check_protocol, check_pressure, check_node), arm_control(check_protocol, check_node, check_approach, check_approach_plan, check_calibrate_wait).

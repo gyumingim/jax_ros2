@@ -63,6 +63,8 @@ ros2 service call /approach/start std_srvs/srv/Trigger        # 접근 시작
 ros2 service call /approach/stop  std_srvs/srv/Trigger        # 멈춤
 ```
 
+- `/approach/start` 한 번으로 접근(약 10 s) → **쥐고 들기(학습 정책) → ㄴ자 복귀 → DONE**까지 간다. 진행은 `ros2 topic echo /approach/phase`. 압력 토픽(`/pressure`, `/pressure_adc`)이 없으면 사전 파지에서 멈춘다(HOLD). 쥐기 없이 접근만 하려면 `tools/bringup.sh ... grasp:=false`.
+- 10 s 안에 4 cm를 못 들면 GRASP_TIMEOUT(그 자리 유지). 압력이 0.5 s 넘게 끊기면 멈춤(STOPPED).
 - `approach_node`는 시작할 때 모든 시뮬 각도가 0인 자세라고 가정한다. **`go_zero.sh`를 먼저** 한다.
 - AK45가 명령에서 15° 넘게 0.5초 벗어나면 `approach_node`가 멈춘다.
 - `fixed` 모드는 z가 0이라 `/approach/start`가 책상 높이 검사(`max_z_error_m`)에서 거부한다. 켜지는지 확인용이다.
@@ -79,6 +81,8 @@ ros2 service call /approach/stop  std_srvs/srv/Trigger        # 멈춤
 | `max_z_error_m` | `0.05` | 큐브 z 허용 오차 |
 | `table_e` | `0.0` | 책상 오프셋 |
 | `rate_hz` | `60.0` | 명령 주기 |
+| `grasp` | `true` | INSERT 뒤 학습 정책으로 쥐고 들기(`/pressure` 필요) |
+| `grasp_timeout_s` | `10.0` | 이 시간 안에 4 cm를 못 들면 GRASP_TIMEOUT |
 | `servo_channel` | `can0` | 서보 CAN 인터페이스 |
 | `max_speed_deg_s` | `30.0` | 모든 관절 속도 상한 |
 | `calibration_file` | 빈 값 = 패키지의 `calibration.json` | 보정 파일 |
