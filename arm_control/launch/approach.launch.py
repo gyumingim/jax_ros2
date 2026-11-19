@@ -52,7 +52,8 @@ def nodes(context):
              emulate_tty=True,
              parameters=[{"force": bool(parsed("force")), "send_finger_rotation": bool(parsed("send_finger_rotation")),
                           "max_z_error_m": float(parsed("max_z_error_m")), "table_e": float(parsed("table_e")),
-                          "rate_hz": float(parsed("rate_hz")), "calibration_file": val("calibration_file")}]),
+                          "rate_hz": float(parsed("rate_hz")), "calibration_file": val("calibration_file"),
+                          "grasp": bool(parsed("grasp")), "grasp_timeout_s": float(parsed("grasp_timeout_s"))}]),
     ]
 
 
@@ -71,6 +72,9 @@ def generate_launch_description():
         DeclareLaunchArgument("max_z_error_m", default_value="0.05", description="approach_node: allowed cube z error"),
         DeclareLaunchArgument("table_e", default_value="0.0", description="approach_node: table offset"),
         DeclareLaunchArgument("rate_hz", default_value="60.0", description="approach_node: command rate"),
+        DeclareLaunchArgument("grasp", default_value="true",
+                              description="after INSERT, grasp and lift with the learned policy (needs /pressure)"),
+        DeclareLaunchArgument("grasp_timeout_s", default_value="10.0", description="no 4 cm lift within this: GRASP_TIMEOUT"),
         DeclareLaunchArgument("servo_channel", default_value="can0"),
         DeclareLaunchArgument("max_speed_deg_s", default_value="30.0"),
         DeclareLaunchArgument("calibration_file", default_value=""),

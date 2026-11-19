@@ -74,7 +74,7 @@ def main():
             rclpy.spin_until_future_complete(node, fut, timeout_sec=5.0)
             out["stop"] = {"success": fut.result().success, "message": fut.result().message}
             stopped = True
-        if out["phases"] and out["phases"][-1][1] in ("HOLD", "STOPPED"):
+        if out["phases"] and out["phases"][-1][1] in ("HOLD", "STOPPED", "DONE", "GRASP_TIMEOUT"):
             break
     for _ in range(20):          # the last messages in flight
         rclpy.spin_once(node, timeout_sec=0.02)

@@ -15,13 +15,18 @@ problem is never forced). The plan is the whole approach, computed and checked b
 
 The first frame is held hold_s seconds (the arm gets there at arm_control_node's speed limit), then one
 frame per 1/rate_hz. The AK45s are watched as in play_trajectory (watch.TrackingWatch): one more than
-max_error_deg from its command for 0.5 s stops the run. At the end the arm holds the pregrasp pose
-(phase HOLD on /approach/phase). The learned grasp starts from there once /pressure exists.
+max_error_deg from its command for 0.5 s stops the run. After INSERT the learned grasp follows (grasp.py,
+deploy README 7.4-7.8, policy grasp_lift_25550): fingers close on /pressure, the hand lifts the cube (IK on
+the sent targets), the arm returns to the L pose; phases GRASP -> RETURN -> DONE on /approach/phase. It needs
+fresh /pressure and /pressure_adc (stm_bridge); without them, or with grasp:=false, the arm holds the
+pregrasp pose (phase HOLD) as before. GRASP_TIMEOUT: no 4 cm lift within grasp_timeout_s (the arm holds).
 
 finger_rotation is left out unless send_finger_rotation:=true: calibration.json allows it [0, 0] deg
 (the old IK pose) and the model turns it 0 -> -170 deg; set its zero, sign and range on the robot first.
 """
 import time
+
+import numpy as np
 from math import atan2, degrees, radians
 from pathlib import Path
 
@@ -30,11 +35,15 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Float32MultiArray, String
 from std_srvs.srv import Trigger
 
 from . import calibration
+from . import model_frames as mf
 from .approach_plan import PoseGate, check_plan, plan_from_pose
+from .grasp import OPEN_HAND, GraspController, MlpPolicy
+from .model_tables import DEPLOY_JOINTS
+from .robot_v3 import RobotV3
 from .ros_io import Ak45Topics, ak45_topic_name
 from .watch import TrackingWatch
 
@@ -65,6 +74,14 @@ class ApproachNode(Node):
         self.force = p("force", False).value
         self.max_error = p("max_error_deg", 15.0).value
         self.cal = calibration.load(p("calibration_file", "").value or None)
+        self.grasp_on = p("grasp", True).value
+        self.grasp_timeout = p("grasp_timeout_s", 10.0).value
+        self.cube_yaw = p("cube_yaw_deg", 0.0).value
+        self.max_pressure_age = p("max_pressure_age_s", 0.5).value
+        self.pressure = {"/pressure": None, "/pressure_adc": None}     # topic -> (values, time)
+        for topic in self.pressure:
+            self.create_subscription(Float32MultiArray, topic, lambda m, t=topic: self.on_pressure(t, m), 10)
+        self.grasp = None
         self.gate = PoseGate(p("stable_poses", 2).value, p("stable_tol_m", 0.01).value, p("max_pose_age_s", 3.0).value)
 
         self.pub = self.create_publisher(JointState, COMMAND_TOPIC, 10)
@@ -93,6 +110,20 @@ class ApproachNode(Node):
             self.get_logger().info(f"/object_pose x {p.x:.3f} y {p.y:.3f} z {p.z:.3f} m, yaw {yaw:.1f} deg",
                                    throttle_duration_sec=2.0)
 
+    def on_pressure(self, topic, msg):
+        if len(msg.data) == 6:
+            self.pressure[topic] = (list(msg.data), time.monotonic())
+
+    def fresh_pressure(self):
+        """(pad N, pad ADC) when both topics are fresh, else (None, why)."""
+        now = time.monotonic()
+        for topic, got in self.pressure.items():
+            if got is None:
+                return None, f"no {topic} (stm_bridge, STM pressure frames)"
+            if now - got[1] > self.max_pressure_age:
+                return None, f"{topic} is {now - got[1]:.1f} s old (max {self.max_pressure_age:g} s)"
+        return (self.pressure["/pressure"][0], self.pressure["/pressure_adc"][0]), None
+
     def set_phase(self, phase):
         self.phase = phase
         self.phase_pub.publish(String(data=phase))
@@ -100,12 +131,16 @@ class ApproachNode(Node):
     # --- services -------------------------------------------------------------------------------
     def on_start(self, _req, res):
         res.success, res.message = self._start()
-        (self.get_logger().info if res.success else self.get_logger().error)(f"start: {res.message}")
+        if res.success:
+            self.get_logger().info(f"start: {res.message}")
+        else:
+            self.get_logger().error(f"start: {res.message}")
         return res
 
     def _start(self):
         if self.timer is not None:
             return False, f"already running ({self.phase})"
+        self.grasp = None
         pose, why = self.gate.ready(time.monotonic())
         if pose is None:
             return False, why
@@ -153,18 +188,61 @@ class ApproachNode(Node):
             self.i += 1
             return
         k = self.i - self.hold_ticks
+        if self.grasp is not None:
+            self.grasp_tick()
+            return
         if k >= len(self.plan.frames):
-            self.timer.cancel()
-            self.timer = None
-            self.set_phase("HOLD")
-            self.get_logger().info("approach done: holding the pregrasp pose. The learned grasp needs /pressure "
-                                   "(not on the STM yet), so it does not start.")
+            self.start_grasp()
             return
         phase, frame = self.plan.frames[k]
         if phase != self.phase:
             self.set_phase(phase)
         self.publish(frame)
         self.i += 1
+        expected = {ak45_topic_name(j): j.to_motor(degrees(frame[j.joint]))[0] for j in self.motors}
+        feedback = {ak45_topic_name(j): self.ak45.feedback_deg(j) for j in self.motors}
+        reason = self.watch.check(expected, feedback, time.monotonic())
+        if reason:
+            self._halt(reason)
+
+    def start_grasp(self):
+        pads, why = self.fresh_pressure()
+        if not self.grasp_on or pads is None:
+            self.timer.cancel()
+            self.timer = None
+            self.set_phase("HOLD")
+            self.get_logger().info("approach done: holding the pregrasp pose; the grasp does not start: "
+                                   + ("grasp:=false" if not self.grasp_on else why))
+            return
+        model = Path(self.tables_dir)
+        self.grasp = GraspController(RobotV3(model / "robot_v3.urdf"), MlpPolicy(model / "grasp_lift_25550.npz"),
+                                     np.r_[self.plan.final_deploy, OPEN_HAND], self.plan.world, self.plan.theta_deg,
+                                     self.cube_yaw, self.table_e, self.grasp_timeout)
+        self.set_phase("GRASP")
+        self.get_logger().info(f"approach done: grasp starts (grasp_lift_25550, cube yaw {self.cube_yaw:g} deg, "
+                               f"hand theta {self.plan.theta_deg:.1f} deg)")
+
+    def grasp_tick(self):
+        pads, why = self.fresh_pressure()
+        if pads is None:
+            self._halt(f"grasp: {why}")
+            return
+        try:
+            out = self.grasp.step(*pads)
+        except (ValueError, np.linalg.LinAlgError) as e:
+            self._halt(f"grasp: {e}")
+            return
+        frame = mf.to_ros_command(dict(zip(DEPLOY_JOINTS, out)))
+        if not self.send_frot:
+            frame.pop("finger_rotation")
+        self.publish(frame)
+        if self.grasp.phase != self.phase:
+            self.set_phase({"TIMEOUT": "GRASP_TIMEOUT"}.get(self.grasp.phase, self.grasp.phase))
+            self.get_logger().info(f"grasp: {self.phase} {self.grasp.reason}".rstrip())
+        if self.grasp.phase in ("DONE", "TIMEOUT"):
+            self.timer.cancel()
+            self.timer = None
+            return
         expected = {ak45_topic_name(j): j.to_motor(degrees(frame[j.joint]))[0] for j in self.motors}
         feedback = {ak45_topic_name(j): self.ak45.feedback_deg(j) for j in self.motors}
         reason = self.watch.check(expected, feedback, time.monotonic())
