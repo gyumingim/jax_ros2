@@ -17,6 +17,9 @@ vision_node ─/object_pose─▶ arm_control ─┬─/ak45/command──▶ ak
 
 각 복사본 폴더의 `SOURCE.md`에 원본 URL과 커밋 SHA가 있다. 원본 레포(`SimToReal`, `ak45_ros2`, `ak45_can`)는 건드리지 않았다.
 
+
+> **로봇 켜기: [BRINGUP.md](BRINGUP.md)** — `tools/bringup.sh camera` 또는 `tools/bringup.sh fixed "[x, y, yaw]"`. 이전 프로세스를 항상 끄고, can0를 다시 올린 뒤 전체를 띄운다.
+
 ## 토픽
 
 | 토픽 | 형식 | 방향 | 규칙 |

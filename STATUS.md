@@ -171,6 +171,12 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 3. yaw를 로봇 기준으로 변환한다(지금은 카메라 기준 그대로).
 4. 모터 영점·부호를 실측한다.
 
+## 2026-11-19 bring-up 한 번에 (`tools/bringup.sh`, `BRINGUP.md`)
+- `tools/bringup.sh camera|fixed "[x, y, yaw]" [name:=value ...]`: AK45 보정 4줄 출력(수정 안 함) → y/N → 이전 프로세스 전부 종료(`ak45_node`, `stm_bridge_node`, `arm_control_node`, `vision_node`, `approach_node`, `calibrate`, `ros2 launch/run`; SIGINT, 5초 뒤 SIGKILL) → `/tmp/ak45_ctrl.lock` 해제 대기(10초, 안 풀리면 중단) → can0 down/up 1 Mbit/s → `ros2 launch arm_control approach.launch.py`. 사용자가 준 원본 파일 내용이 끝내 전달되지 않아 사용자가 적은 동작 명세대로 새로 작성.
+- `approach.launch.py` 변경: `fixed_pose`(카메라 없이) 추가, `result_json`과 둘 중 하나만. `camera_to_robot`은 비우면 `vision_node/config/camera.yaml`(이전에는 필수 인자). approach_node 파라미터 `max_z_error_m`, `table_e`, `rate_hz`를 launch 인자로 노출(기본값은 노드와 같음). approach_node 로직은 그대로.
+- 확인(격리: 별도 user/net/mount/pid 네임스페이스, vcan can0 + `ak45_vcan_sim.py`, `BRINGUP_CAN=skip`): `bringup.sh fixed "[0.10, -0.30, 20.0]"` → 노드 5개(`/ak45_node`, `/approach_node`, `/arm_control_node`, `/stm_bridge`, `/vision_node`), `/object_pose` x 0.1, y -0.3, z 0.0, `shoulder_roll_axis`. 미리 띄워 둔 옛 `vision_node`(pose 0.5, 0.5)는 꺼짐. 두 번째 실행이 첫 번째를 끄고 노드가 각각 1개씩만 남음. `/approach/start`는 호출하지 않음.
+- **못 한 것**: 실제 can0의 `sudo ip link` 단계, 실물 모터, 카메라 모드 실행. 끌 때 노드마다 `KeyboardInterrupt` Traceback이 찍힌다(종료 신호 처리, 동작 영향 없음; 노드 코드는 고치지 않음).
+
 ## 2026-11-19 tools/go_zero.sh
 - AK45 4개를 시뮬 각도 0으로 보내는 스크립트(approach_node는 시작 시 모든 시뮬 각도가 0이라고 가정). `ak45_deg --list`로 `ak45_1..4` 피드백을 확인하고 하나라도 없으면 중단, 현재 값 표시 → y/N → `/arm_control/joint_command`에 네 관절 0.0을 한 번 발행 → 5초 뒤 다시 `--list`.
 - 시험(가상 CAN + `ak45_vcan_sim.py` + `arm.launch.py`, 사용자 실물 노드와 격리): 노드 없음 → 중단(종료 1), n → 발행 안 함, y → 5초 뒤 모터각 ak45_1 -10.20, ak45_2 -3.90, ak45_3 89.90, ak45_4 2.60 = 작업 트리의 `calibration.json` zero_deg(시뮬 0 = 모터 zero_deg). 실물 팔로는 실행하지 않음.
