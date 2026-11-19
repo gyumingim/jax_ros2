@@ -171,6 +171,10 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 3. yaw를 로봇 기준으로 변환한다(지금은 카메라 기준 그대로).
 4. 모터 영점·부호를 실측한다.
 
+## 2026-11-19 tools/go_zero.sh
+- AK45 4개를 시뮬 각도 0으로 보내는 스크립트(approach_node는 시작 시 모든 시뮬 각도가 0이라고 가정). `ak45_deg --list`로 `ak45_1..4` 피드백을 확인하고 하나라도 없으면 중단, 현재 값 표시 → y/N → `/arm_control/joint_command`에 네 관절 0.0을 한 번 발행 → 5초 뒤 다시 `--list`.
+- 시험(가상 CAN + `ak45_vcan_sim.py` + `arm.launch.py`, 사용자 실물 노드와 격리): 노드 없음 → 중단(종료 1), n → 발행 안 함, y → 5초 뒤 모터각 ak45_1 -10.20, ak45_2 -3.90, ak45_3 89.90, ak45_4 2.60 = 작업 트리의 `calibration.json` zero_deg(시뮬 0 = 모터 zero_deg). 실물 팔로는 실행하지 않음.
+
 ## 2026-11-19 stm_bridge 압력 수신 (`/pressure_adc`)
 - 패치 파일이 없어(`~/Downloads`에 없음) 사용자 명세대로 새로 구현: CAN StdId 6, 6바이트(센서 6개, 각 0~255, 100 ms) → `/pressure_adc`(Float32MultiArray 6개, 값 = 바이트×4/1023). 확장 id, 6바이트가 아닌 프레임, AK45 응답은 버림. 10 ms마다 수신 버퍼를 비운다.
 - `/pressure`(N)는 **만들지 않았다**: ADC → N 변환식을 코드·문서에서 찾지 못했다(추측 안 함). 변환식이 정해지면 추가.
