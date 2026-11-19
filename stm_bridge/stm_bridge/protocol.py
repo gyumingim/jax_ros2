@@ -33,3 +33,17 @@ def servo_frame(motor_id: int, angle_deg: float) -> Frame:
         raise ValueError(f"servo motor_id {motor_id} is not 0..{SERVO_COUNT - 1}")
     x10 = min(max(round(angle_deg * 10), 0), SERVO_X10_MAX)
     return Frame(SERVO_STDID, False, bytes([motor_id, x10 >> 8, x10 & 0xFF]))
+
+
+# Pressure frame from the STM32 (user spec, 2026-11-19): standard id 6, 6 data bytes = 6 sensors, each
+# 0..255, every 100 ms. A byte is the top 8 bits of a 10-bit ADC, so the ADC fraction is byte * 4 / 1023.
+PRESSURE_STDID = 6
+PRESSURE_COUNT = 6
+
+
+def pressure_adc(arb_id: int, extended: bool, data: bytes):
+    """The 6 ADC values (byte * 4 / 1023, 0..~0.997) of a pressure frame, or None if it is not one
+    (other id, extended id, or not exactly 6 bytes)."""
+    if arb_id != PRESSURE_STDID or extended or len(data) != PRESSURE_COUNT:
+        return None
+    return [b * 4 / 1023 for b in data]

@@ -9,19 +9,26 @@
 Rules, like ak45_node: nothing is sent before the first command; a message with a length mismatch,
 an unknown name, a non-finite value or an angle outside 0..180 deg is dropped whole (arm_control has
 already clipped to the servo range, so a value outside it is a bug of the sender).
+
+    /pressure_adc   std_msgs/Float32MultiArray, 6 values: the STM32 pressure frame (standard id 6, 6 bytes,
+                    every 100 ms) as byte * 4 / 1023 (see protocol.py). One message per frame received.
+                    No /pressure in newtons yet: the ADC -> N conversion is not known.
 """
 from math import degrees, isfinite, radians
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float32MultiArray
 
 from .can_io import ServoCan
-from .protocol import servo_frame
+from .protocol import pressure_adc, servo_frame
 from .servo_names import SERVO_IDS
 
 COMMAND_TOPIC = "/servo/command"
 STATE_TOPIC = "/servo/state"
+PRESSURE_ADC_TOPIC = "/pressure_adc"
+RX_PERIOD_S = 0.01      # how often received frames are read (pressure frames come every 100 ms)
 RANGE_SLACK_DEG = 0.05    # float noise of rad -> deg at the ends (0 and 180 deg)
 
 
@@ -34,6 +41,8 @@ class StmBridgeNode(Node):
         self.sent_deg = {}    # name -> angle of the last frame sent
         self.state_pub = self.create_publisher(JointState, STATE_TOPIC, 10)
         self.create_subscription(JointState, COMMAND_TOPIC, self.on_command, 10)
+        self.pressure_pub = self.create_publisher(Float32MultiArray, PRESSURE_ADC_TOPIC, 10)
+        self.create_timer(RX_PERIOD_S, self.on_rx)
         self.get_logger().info(f"{COMMAND_TOPIC} -> servo frames on {interface} {channel}")
 
     def on_command(self, msg):
@@ -59,6 +68,14 @@ class StmBridgeNode(Node):
             self.servo.send(frame)
             self.sent_deg[n] = ((frame.data[1] << 8) | frame.data[2]) / 10.0
         self.publish_state()
+
+    def on_rx(self):
+        """Reads every waiting frame; pressure frames go to /pressure_adc, others (AK45 replies on the
+        same bus) are dropped."""
+        while (f := self.servo.recv()) is not None:
+            values = pressure_adc(*f)
+            if values is not None:
+                self.pressure_pub.publish(Float32MultiArray(data=values))
 
     def publish_state(self):
         state = JointState()

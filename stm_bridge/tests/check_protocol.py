@@ -62,6 +62,16 @@ def main():
     else:
         print(f"SKIP  names vs calibration.json: {cal} not found")
 
+    from stm_bridge.protocol import PRESSURE_STDID, pressure_adc
+    check("pressure id is standard 6", PRESSURE_STDID, 6)
+    check("pressure 6 bytes: byte * 4 / 1023 (255 -> 1020/1023)",
+          [round(v, 6) for v in pressure_adc(6, False, bytes([0, 255, 128, 1, 2, 3]))],
+          [0.0, 0.997067, 0.500489, 0.00391, 0.00782, 0.01173])
+    check("pressure: other id -> None", pressure_adc(5, False, bytes(6)), None)
+    check("pressure: extended id 6 -> None", pressure_adc(6, True, bytes(6)), None)
+    check("pressure: 5 bytes -> None", pressure_adc(6, False, bytes(5)), None)
+    check("pressure: 8 bytes -> None", pressure_adc(6, False, bytes(8)), None)
+
     print(f"\n{'all passed' if not failures else f'{len(failures)} failed: ' + ', '.join(failures)}")
     sys.exit(1 if failures else 0)
 

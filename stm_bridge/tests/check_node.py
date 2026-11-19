@@ -10,6 +10,7 @@ from math import radians
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float32MultiArray
 
 from stm_bridge import stm_bridge_node
 
@@ -37,6 +38,9 @@ class FakeCan:
     def send(self, frame):
         FakeCan.sent.append(str(frame))
 
+    def recv(self):
+        return None
+
     def close(self):
         pass
 
@@ -52,6 +56,8 @@ def main():
     commands = peer.create_publisher(JointState, "/servo/command", 10)
     states = []
     peer.create_subscription(JointState, "/servo/state", lambda m: states.append(m), 10)
+    pressures = []
+    peer.create_subscription(Float32MultiArray, "/pressure_adc", lambda m: pressures.append(list(m.data)), 10)
     rx = can.Bus(interface="virtual", channel="t") if can else None
     ex = SingleThreadedExecutor()
     ex.add_node(node)
@@ -112,6 +118,20 @@ def main():
     check("the ends 180 and 0 deg pass", sorted(frames), ["005#000000", "005#090708"])
     check("state follows the last frames",
           [round(p, 6) for p in states[-1].position], [0.0, round(radians(180.0), 6)])
+
+    # pressure frames: standard id 6, 6 bytes -> /pressure_adc = byte * 4 / 1023
+    if rx:
+        rx.send(can.Message(arbitration_id=6, is_extended_id=False, data=bytes([0, 255, 128, 1, 2, 3])))
+        rx.send(can.Message(arbitration_id=6, is_extended_id=True, data=bytes(6)))           # extended: not ours
+        rx.send(can.Message(arbitration_id=6, is_extended_id=False, data=bytes(5)))          # 5 bytes: dropped
+        rx.send(can.Message(arbitration_id=0x2901, is_extended_id=True, data=bytes(8)))      # AK45 reply: dropped
+        run(0.5)
+        # by hand: 255*4/1023 = 1020/1023 = 0.997067; 128*4/1023 = 0.500489; 1*4/1023 = 0.003910
+        check("pressure frame -> one /pressure_adc message of 6 values",
+              [[round(v, 6) for v in p] for p in pressures],
+              [[0.0, 0.997067, 0.500489, 0.00391, 0.00782, 0.01173]])
+    else:
+        print("SKIP  pressure frames: needs python-can")
 
     node.destroy_node()
     peer.destroy_node()
