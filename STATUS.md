@@ -171,6 +171,13 @@ SteroDepthSeg 수치(레포 문서 기준, 직접 측정하지 않음): 처리 �
 3. yaw를 로봇 기준으로 변환한다(지금은 카메라 기준 그대로).
 4. 모터 영점·부호를 실측한다.
 
+## 2026-11-19 AK45 온도 상한 75℃ (사용자 결정)
+- `ak45_ros2/config/ak45_node.yaml`의 `max_temperature_c` 60.0 → **75.0**. 이유: 시연 중 너무 자주 멈춤(사용자 결정). 코드 기본값은 그대로 60.0.
+- 주의(yaml 주석에도 기록): CAN 온도는 **구동 보드 온도**이고 **권선 온도는 측정되지 않는다**. 상한을 올려도 열이 나는 원인은 그대로다. 선풍기로 식히고 쓰지 않을 때는 노드를 종료할 것. 2026-08-27 기준 기록(무부하에서도 26 → 53℃, 원인 미상)과 모순되지 않는다: 원인이 해결된 것이 아니라 멈춤 기준만 올렸다.
+- **⚠️ `ros2 launch ak45_ros2 ak45_node.launch.py`로 켜야 yaml이 적용된다. `ros2 run ak45_ros2 ak45_node`는 yaml을 읽지 않아 `max_temperature_c`가 코드 기본 60.0이다.** `max_command_deg`의 코드 기본값은 `a8990d9`(2026-11-15) 이후 360.0, 그 전 빌드는 15.0.
+- 확인(실제 실행, 가상 CAN `vcan` + `ak45_vcan_sim.py`, 사용자의 실물 노드와 격리): launch → `ros2 param get` `max_temperature_c` 75.0, `max_command_deg` 360.0. `ros2 run` → 60.0, 360.0. `colcon build --packages-select ak45_ros2` 성공.
+- **하지 않은 것(이 항목)**: 실물 모터로 시험, 이 PC에서 돌고 있는 사용자의 `ak45_node`(pid 98804)는 건드리지 않았다.
+
 ## 2026-11-06 sim-to-real(정우) 비교 검토
 - 읽은 것: README, DEPLOYMENT_SPEC, ARCHITECTURE, deploy/{controller,run,observations,policies,trajectory}.py, sim_validation/scene.py (미확인: tests, ISAAC_COMPARISON, MODEL_VALIDATION, .pt 조회표 - JaxIsaacLab/ 는 레포에 없음)
 - 결론: MuJoCo 전용(CAN/실물 어댑터 없음), 파지 완료 미달성(DEPLOYMENT_SPEC 명시). 1단계(큐브 위 2~3cm 접근)는 기존 방침 A(IK 웨이포인트) 유지, 이쪽은 3단계 이후 후보.

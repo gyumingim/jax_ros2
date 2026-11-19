@@ -84,6 +84,11 @@ source install/setup.bash
 ros2 launch ak45_ros2 ak45_node.launch.py
 ```
 
+> ⚠️ **반드시 `ros2 launch`로 켠다. `ros2 run ak45_ros2 ak45_node`는 `config/ak45_node.yaml`을 읽지 않는다.**
+> yaml로 켜면 `max_temperature_c` 75.0, `max_command_deg` 360.0이다(2026-11-19 `ros2 param get`으로 확인).
+> `ros2 run`으로 켜면 코드 기본값이 적용된다: `max_temperature_c` **60.0**(yaml과 다름), `max_command_deg` 360.0.
+> `max_command_deg` 기본값은 2026-11-15(`a8990d9`) 전 빌드에서는 **15.0**이었다. 그 전 빌드를 쓰면 `ros2 run`으로는 15°를 넘는 명령이 거부된다.
+
 ## 4. 터미널 2개로 쓰는 법
 
 **[터미널 1] 노드**
@@ -206,7 +211,7 @@ colcon build --packages-select ak45_ros2   # config 를 install 로 복사
 | # | 조건 | 동작 |
 |---|---|---|
 | S1 | 목표각 절대값 > `max_command_deg` (기본 360°) | **그 관절만 거부.** 클램프 아님. WARN |
-| S2 | 온도 >= `max_temperature_c` (기본 60℃) | 그 모터 **영구 제외.** 온도가 내려가도 **자동 복귀 안 함 — 노드 재시작 필요.** ERROR |
+| S2 | 온도 >= `max_temperature_c` (코드 기본 60℃, `config/ak45_node.yaml` 은 75℃) | 그 모터 **영구 제외.** 온도가 내려가도 **자동 복귀 안 함 — 노드 재시작 필요.** ERROR |
 | S3 | 피드백 없음(`valid==0`) 또는 워치독 실패 | 그 모터 제외. 복귀 가능 |
 | S4 | `ak45_set_position()` 이 `-1` 반환 | ERROR 로그. 모터 `error_code != 0` 이면 라이브러리가 프레임을 막는다 |
 
@@ -236,7 +241,7 @@ Ctrl+C 시 `ak45_close()` → `ak45_emergency_stop()` 으로 **Current Brake 0A 
 | `command_resend_rate_hz` | `double` | `10.0` | `> 0.0` && `<= 50.0` | FATAL 후 종료 코드 1 |
 | `max_command_deg` | `double` | `360.0` | `> 0.0` && `<= 360.0` | FATAL 후 종료 코드 1 |
 | `command_timeout_sec` | `double` | `0.0` | `>= 0.0` (0=타임아웃 없음) | FATAL 후 종료 코드 1 |
-| `max_temperature_c` | `double` | `60.0` | 검증 없음 | — |
+| `max_temperature_c` | `double` | `60.0` (yaml: `75.0`) | 검증 없음 | — |
 
 **런타임 변경 불가.** 값은 `config/ak45_node.yaml` 에서 바꾸고 재시작한다.
 
