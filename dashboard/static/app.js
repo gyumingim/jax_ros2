@@ -523,7 +523,10 @@ function pickSummary(s) {
       if (m) reasons.push(m[1]);
     }
     const unv = lines.find((l) => /^check: calibration not verified/.test(l));
-    if (unv) { const n = unv.split(":").pop().split(",").filter((x) => x.trim()).length; reasons.push(`보정 미확인 관절 ${n}개`); }
+    const nUnv = unv ? unv.split(":").pop().split(",").filter((x) => x.trim()).length : 0;
+    // 계획 자체는 통과, 남은 건 AK45 보정뿐 → 가상 재생은 되므로 통과로 보여 줌 (실물 재생 때만 보정 필요, 2026-11-21)
+    if (!reasons.length && nUnv) return [`✅ 계획 OK${extra}` + (VIRT() ? "" : ` — 실물 재생 전 AK45 보정 확인 필요 (${nUnv}개)`), "ok"];
+    if (nUnv) reasons.push(`AK45 보정 미확인 ${nUnv}개`);
     return ["⛔ 거절: " + (reasons.join(" · ") || "출력 보기 참고") + (t ? " — 궤적은 오른쪽 3D 에서 볼 수 있음" : ""), "bad"];
   }
   if (s.exit_code === 5) return ["■ 중간에 멈춤", "warn"];

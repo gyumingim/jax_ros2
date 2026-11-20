@@ -64,7 +64,8 @@ def check_trajectory(traj, cal):
     for name, lo, hi, allowed in clipped_joints(traj, cal):
         problems.append(f"{name} goes {lo:.1f}..{hi:.1f} deg but the calibration allows "
                         f"{allowed[0]:.1f}..{allowed[1]:.1f}: it would be cut short")
-    unverified = [n for n in traj["joint_names"] if not cal[n].verified]
+    # AK45 만: 서보는 절대 위치(원점을 스스로 앎)라 보정 확인 대상이 아님 (사용자 2026-11-21)
+    unverified = [n for n in traj["joint_names"] if cal[n].motor == "ak45" and not cal[n].verified]
     if unverified:
         problems.append("calibration not verified (zero and direction are assumptions): " + ", ".join(unverified))
     return None, problems
