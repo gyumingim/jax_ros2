@@ -23,10 +23,11 @@ import numpy as np
 
 
 def rot(a, t, v):
-    """축 a(단위) 둘레 t 만큼 v 회전 (v 는 (3,) 또는 (n, 3))."""
+    """축 a(단위) 둘레 t 만큼 v 회전 (v 는 (3,))."""
     c, s = math.cos(t), math.sin(t)
-    av = v @ a
-    return np.outer(av, a).reshape(v.shape) * (1 - c) + c * v + s * np.cross(a, v)
+    av = float(v @ a)
+    x = np.array([a[1] * v[2] - a[2] * v[1], a[2] * v[0] - a[0] * v[2], a[0] * v[1] - a[1] * v[0]])
+    return a * (av * (1 - c)) + c * v + s * x
 
 
 def fk3(g, q1, q3, q4):
@@ -109,7 +110,7 @@ def solve3(g, p, tol_unit=2e-3, newton=8, tol_pos=1e-5):
                 continue
             for _ in range(newton):      # 근 오차 다듬기 (3 x 3, 수치 자코비안)
                 e = p - x0
-                if np.linalg.norm(e) < 1e-12:
+                if np.linalg.norm(e) < 1e-10:
                     break
                 J = np.empty((3, 3))
                 for i in range(3):
