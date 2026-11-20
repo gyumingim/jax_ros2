@@ -225,6 +225,37 @@ details.card.fold > summary + * { margin-top: 10px; }
 .minirow { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
 .minirow .field { width: 84px; }
 
+
+/* 2D 지도 (역기구학 ①) */
+.mctl { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; margin-bottom: 10px; }
+.mctl input[type=range] { flex: 1; min-width: 140px; }
+.mctl .num { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; color: var(--sub); min-width: 46px; }
+.mlabel { font-size: 14px; font-weight: 600; color: var(--sub); }
+.modesw.seg button { font-size: 14.5px; padding: 8px 14px; display: inline-flex; align-items: center; gap: 6px; color: var(--sub); }
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--sub); cursor: pointer; }
+.mlegend { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--sub); margin-bottom: 8px; }
+.mlegend span { display: inline-flex; align-items: center; gap: 5px; }
+i.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; flex: none; }
+i.sw.ok { background: var(--blue); } i.sw.half { background: #b5d4ff; } i.sw.no { background: var(--fill-d); }
+i.sw.cube { background: #f97316; } i.sw.tgt { border: 2px dashed var(--green); width: 12px; height: 12px; }
+i.sw.vis { border: 2px solid var(--violet); }
+.mwrap { background: #fff; border-radius: 12px; }
+svg.rmap { display: block; width: 100%; height: auto; cursor: crosshair; touch-action: manipulation; user-select: none; }
+.rmap .mg { stroke: var(--line); stroke-width: 1; }
+.rmap .mt { font-size: 15px; fill: var(--muted); }
+.rmap .mlab { font-size: 16px; font-weight: 700; fill: var(--sub); }
+.rmap .rc.ok { fill: var(--blue); } .rmap .rc.half { fill: #b5d4ff; } .rmap .rc.no { fill: var(--fill-d); }
+.rmap .mbody { fill: var(--fill); stroke: var(--fill-d); }
+.rmap .msh { fill: var(--text); }
+.rmap .mfront { stroke: var(--muted); stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.rmap .mhl { fill: none; stroke: var(--text); stroke-width: 2; pointer-events: none; }
+.rmap .mcube { fill: #f97316; fill-opacity: .88; stroke: #c2410c; stroke-width: 2; }
+.rmap .mcubeax { stroke: #fff; stroke-width: 3; stroke-linecap: round; }
+.rmap .mtgt { fill: rgba(3, 178, 108, .10); stroke: var(--green); stroke-width: 3; stroke-dasharray: 7 5; }
+.rmap .mvis { fill: none; stroke: var(--violet); stroke-width: 2.5; }
+.rmap .marrow { stroke: #4e5968; stroke-width: 2.5; }
+.rmap g, .rmap rect, .rmap line { pointer-events: none; }
+.mhover { font-size: 13px; color: var(--sub); margin-top: 6px; min-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* ---------- 좁은 화면 ---------- */
 @media (max-width: 980px) {
   .split { grid-template-columns: minmax(0, 1fr); }
@@ -248,4 +279,5 @@ details.card.fold > summary + * { margin-top: 10px; }
   .jrow .btn { grid-column: 3; grid-row: 2; }
   .frow > b { width: 100%; padding-bottom: 0; }
   .frow .field { width: calc(33% - 8px); min-width: 80px; }
+  .rmap .mt { font-size: 21px; } .rmap .mlab { font-size: 21px; }
 }

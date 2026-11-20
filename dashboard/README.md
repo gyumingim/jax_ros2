@@ -33,7 +33,7 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 |---|---|
 | **연결** | ROS 연결 카드(상태 + 'ROS 연결(source)') 또는 가상 팔 카드(가상 전원 끄기/켜기), 노드 켜기/끄기 전부(can0 올리기, arm.launch / arm_homed.launch / ak45 / stm_bridge / arm_control / vision, vcan 시험), AK45 진단 카드 4개 + CAN 버스, 로그, 보정 안내 |
 | **각도 제어** | 원점(homing) 패널, 관절 14개 슬라이더 + 숫자칸(**시뮬 관절각 °**) + 관절마다 '보내기' / '바뀐 것 전부 보내기' / '현재 자세로 슬라이더 맞추기' / '바꾼 것 되돌리기'. 손가락은 묶어서(손가락 1·2·3 같이 움직이기 체크). 오른쪽 3D: **불투명 = 실제 현재 자세**, **파란 반투명 = 슬라이더 목표** |
-| **역기구학** | `pick_place --dry-run` 폼(+ `/object_pose` 값을 cube 칸에 넣기, vision_node 상태 작게, 가상 모드면 가상 큐브 칸). 오른쪽 3D: 계획한 궤적 재생(재생/일시정지/프레임 슬라이더/속도) + 큐브(주황)·놓을 자리(초록)·/object_pose(보라). 가상 모드면 **가상 팔로 재생** |
+| **역기구학** | **2D 지도**(위에서 본 책상, 로봇 위·앞 아래·로봇 왼쪽 = 화면 오른쪽): [큐브 놓기]·[놓을 자리 고르기] 로 눌러 고르고 yaw 슬라이더, 칸 색 = 그 yaw 의 도달 맵(team-jax/IK `reachmap_real_yaw.npz`), 고를 때마다 `realcoords.plan` 판정 한 줄(안 돼도 계획은 돌릴 수 있음). 숫자칸은 '숫자로 입력' 안(양방향). `pick_place --dry-run` 폼(+ `/object_pose` 값을 cube 칸에 넣기, vision_node 상태 작게, 가상 모드면 가상 큐브 칸). 오른쪽 3D: 계획한 궤적 재생(재생/일시정지/프레임 슬라이더/속도) + 큐브(주황)·놓을 자리(초록)·/object_pose(보라). 가상 모드면 **가상 팔로 재생** |
 
 ### 각도 제어 — 안전장치 (모터가 실제로 움직인다)
 
@@ -92,7 +92,7 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 - 대시보드 서버를 꺼도 노드는 그대로 둔다(끄면 팔이 떨어질 수 있음). 다시 켜면 `logs/pids.json` 으로 다시 붙잡는다(Linux).
 - 보정(`calibrate --ros`)은 키보드 대화형이라 웹에서 안 돌린다(안내 + 준비 버튼만).
 - 원점: `POST /api/homing/home|release {"joint": "<관절>" | "all"}` → homing_guard 서비스(가상 모드면 가상 guard).
-- 기타 API: `POST /api/mode {"virtual": bool}`, `POST /api/virtual/power {"on": bool}`, `POST /api/virtual/cube {x,y,z,yaw}`, `GET /api/ik/trajectory`, `POST /api/ik/play_virtual`, `POST /api/ik/stop_virtual`.
+- 기타 API: `POST /api/mode {"virtual": bool}`, `POST /api/virtual/power {"on": bool}`, `POST /api/virtual/cube {x,y,z,yaw}`, `GET /api/reachmap?yaw=<실 yaw °>`(칸 중심 실좌표 + grasp/place/feasible/되는 손 돌림, `JAX_IK_DIR` 의 motion1/src/humanoid_grasp_rl), `POST /api/reachmap/check {"cube":[x,y,yaw],"target":[x,y]}`(realcoords.plan 결과 + 큐브·놓을 자리 따로 판정), `GET /api/ik/trajectory`, `POST /api/ik/play_virtual`, `POST /api/ik/stop_virtual`.
 
 ## 항목 추가
 

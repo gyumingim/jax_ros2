@@ -448,6 +448,20 @@ def api_ik_traj():
     return JSONResponse(_trajectory())
 
 
+@app.get("/api/reachmap")
+def api_reachmap(yaw: float = 0.0):
+    import reachmap
+    r = reachmap.reachmap(_ik_dir(), yaw if math.isfinite(yaw) else 0.0)
+    return JSONResponse(r, status_code=200 if r["ok"] else 404)
+
+
+@app.post("/api/reachmap/check")
+async def api_reachmap_check(req: Request):
+    import reachmap
+    r = reachmap.check(_ik_dir(), await _body(req))
+    return JSONResponse(r, status_code=200 if r["ok"] else (404 if "없음" in r["error"] else 400))
+
+
 @app.post("/api/ik/play_virtual")
 def api_ik_play():
     return JSONResponse(_play_virtual())

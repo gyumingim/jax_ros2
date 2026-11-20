@@ -451,9 +451,11 @@ function buildPick(s) {
   c.root = el("div", {},
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브와 놓을 자리"),
     el("div", { class: "card" },
-      el("div", { class: "frow" }, el("b", {}, "큐브"), fld("cube_x", "x", "m"), fld("cube_y", "y", "m"), fld("cube_yaw", "yaw", "°")),
-      el("div", { class: "frow" }, el("b", {}, "놓을 자리"), fld("target_x", "x", "m"), fld("target_y", "y", "m")),
-      el("div", { class: "help", style: "margin:8px 0 0" }, "로봇 좌표: +x = 로봇 왼쪽, 앞 = −y, yaw = 위에서 반시계"),
+      buildMap(c),
+      el("details", { class: "log" }, el("summary", {}, "숫자로 입력"),
+        el("div", { class: "frow" }, el("b", {}, "큐브"), fld("cube_x", "x", "m"), fld("cube_y", "y", "m"), fld("cube_yaw", "yaw", "°")),
+        el("div", { class: "frow" }, el("b", {}, "놓을 자리"), fld("target_x", "x", "m"), fld("target_y", "y", "m")),
+        el("div", { class: "help", style: "margin:8px 0 0" }, "로봇 좌표: 원점 = 어깨, +x = 로봇 왼쪽, 앞 = −y, yaw = 위에서 반시계")),
       el("div", { id: "objpose" }),
       el("details", { class: "log" }, el("summary", {}, "고급"),
         el("div", { class: "frow" }, fld("max_speed", "max_speed", "°/s"), fld("d", "d 어깨~책상", "m")),
@@ -464,6 +466,8 @@ function buildPick(s) {
       el("div", { class: "row", style: "align-items:center;margin-top:0" }, c.bStart, c.bStop, c.vb, c.chip),
       el("div", { class: "help", style: "margin:8px 0 0" }, "시뮬에서만 계획·검사한다 — 모터는 안 움직인다."),
       c.result, c.status, c.note, c.logbox));
+  for (const k of ["cube_x", "cube_y", "cube_yaw", "target_x", "target_y", "d"]) c.fields[k].addEventListener("input", () => mapUpdate());
+  setTimeout(() => mapUpdate(), 0);
   c.updateExtra = (sv) => {
     c.bStop.hidden = !sv.alive;
     c.chip.hidden = !sv.alive && sv.available;   // 끝난 뒤엔 결과 줄이 대신 말한다 (코드 1 = 거절이지 고장이 아님)
@@ -514,6 +518,212 @@ function pickSummary(s) {
   if (s.exit_code === 5) return ["■ 중간에 멈춤", "warn"];
   const err = [...lines].reverse().find((l) => /Error|error|Traceback/.test(l));
   return [`⚠ 실행 실패 (코드 ${s.exit_code})${err ? ": " + err.slice(0, 160) : ""} — 출력 보기`, "bad"];
+}
+
+// ---------- 역기구학 탭: 2D 지도 (위에서 본 책상: 로봇 = 위, 앞(책상) = 아래, 로봇 왼쪽 = 화면 오른쪽) ----------
+// 칸 색 = GET /api/reachmap?yaw= (team-jax/IK reachmap_real_yaw.npz, 큐브 yaw 마다), 판정 = POST /api/reachmap/check (realcoords.plan).
+// 지도는 cube_x/y/yaw·target_x/y 칸을 쓰고 읽는다(양방향). '계획 돌려 보기'는 그 칸 값 그대로.
+const M = { mode: "cube", snap: true, data: null, yawKey: null, seq: 0, chkSeq: 0, c: null };
+const MS = 1000, MX0 = -0.28, MX1 = 0.38, MY0 = -0.45, MY1 = 0.075, ML = 36, MT = 8, MR = 10, MB = 52;   // 1 m = 1000 단위
+const MW = ML + (MX1 - MX0) * MS + MR, MH = MT + (MY1 - MY0) * MS + MB;
+const msx = (x) => ML + (x - MX0) * MS, msy = (y) => MT + (MY1 - y) * MS;
+const SVGNS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs = {}, ...kids) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v !== undefined && v !== null) e.setAttribute(k, v);
+  for (const k of kids) e.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return e;
+}
+const foldYaw = (d) => ((((d + 45) % 90) + 90) % 90) - 45;
+const cm = (m) => { const v = Math.round(m * 1000) / 10; return (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(1); };
+const degS = (d) => `${d > 0 ? "+" : d < 0 ? "−" : ""}${Math.abs(Math.round(d))}°`;
+function mapVals() {
+  const c = M.c; if (!c) return {};
+  const n = (k) => { const v = parseFloat(c.fields[k] && c.fields[k].value); return Number.isFinite(v) ? v : null; };
+  const cube = n("cube_x") != null && n("cube_y") != null ? { x: n("cube_x"), y: n("cube_y"), yaw: n("cube_yaw") ?? 0 } : null;
+  const target = n("target_x") != null && n("target_y") != null ? { x: n("target_x"), y: n("target_y") } : null;
+  return { cube, target, d: n("d") };
+}
+function buildMap(c) {
+  M.c = c;
+  const seg = el("div", { class: "modesw seg", role: "group", "aria-label": "고르는 것" });
+  M.bCube = el("button", { onclick: () => mapMode("cube") }, el("i", { class: "sw cube" }), "큐브 놓기");
+  M.bTarget = el("button", { onclick: () => mapMode("target") }, el("i", { class: "sw tgt" }), "놓을 자리 고르기");
+  seg.append(M.bCube, M.bTarget);
+  const snap = el("input", { type: "checkbox", checked: "" });
+  snap.addEventListener("change", () => { M.snap = snap.checked; });
+  M.yaw = el("input", { type: "range", min: -45, max: 45, step: 1, value: 0 });
+  M.yawNum = el("span", { class: "num" });
+  M.yaw.addEventListener("input", () => {
+    if (c.fields.cube_yaw.disabled) return;
+    c.fields.cube_yaw.value = M.yaw.value; mapUpdate();
+  });
+  // 정적 그림: 눈금, 로봇
+  const g0 = sv("g");
+  for (let x = -0.2; x <= 0.301; x += 0.1) {
+    const X = msx(x).toFixed(1);
+    g0.append(sv("line", { x1: X, y1: MT, x2: X, y2: MH - MB, class: "mg" }), sv("text", { x: X, y: MH - MB + 22, "text-anchor": "middle", class: "mt" }, cm(x).replace(".0", "")));
+  }
+  for (let y = -0.4; y <= 0.001; y += 0.1) {
+    const Y = msy(y).toFixed(1);
+    g0.append(sv("line", { x1: ML, y1: Y, x2: MW - MR, y2: Y, class: "mg" }), sv("text", { x: ML - 5, y: (+Y + 4).toFixed(1), "text-anchor": "end", class: "mt" }, cm(y).replace(".0", "")));
+  }
+  g0.append(sv("text", { x: ML, y: MH - 6, class: "mt" }, "cm  ·  ← 로봇 오른쪽"), sv("text", { x: MW - MR, y: MH - 6, "text-anchor": "end", class: "mt" }, "로봇 왼쪽 →"));
+  const ox = msx(0), oy = msy(0);
+  const gR = sv("g", { class: "mrobot" },
+    sv("rect", { x: ox - 70, y: MT, width: 140, height: oy - MT + 6, rx: 10, class: "mbody" }),
+    sv("circle", { cx: ox, cy: oy, r: 8, class: "msh" }),
+    sv("text", { x: ox, y: MT + 22, "text-anchor": "middle", class: "mlab" }, "로봇"),
+    sv("text", { x: ox + 14, y: oy + 4, class: "mt" }, "어깨 (0,0)"),
+    sv("path", { d: `M${ox - 92},${oy - 22} v30 m-6,-8 l6,9 l6,-9`, class: "mfront" }),
+    sv("text", { x: ox - 104, y: oy - 2, "text-anchor": "end", class: "mt" }, "앞 (책상)"));
+  M.gCells = sv("g");
+  M.gHover = sv("rect", { class: "mhl", visibility: "hidden", rx: 3 });
+  M.gVis = sv("rect", { class: "mvis", width: 50, height: 50, x: -25, y: -25, rx: 4, visibility: "hidden" });
+  M.gArrow = sv("line", { class: "marrow", "marker-end": "url(#marr)", visibility: "hidden" });
+  M.gTgt = sv("rect", { class: "mtgt", width: 50, height: 50, x: -25, y: -25, rx: 4, visibility: "hidden" });
+  M.gCube = sv("g", { visibility: "hidden" }, sv("rect", { class: "mcube", width: 50, height: 50, x: -25, y: -25, rx: 5 }),
+    sv("line", { x1: 0, y1: 0, x2: 25, y2: 0, class: "mcubeax" }));
+  const defs = sv("defs", {}, sv("marker", { id: "marr", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
+    sv("path", { d: "M0,0 L10,5 L0,10 z", fill: "#4e5968" })));
+  M.svg = sv("svg", { viewBox: `0 0 ${MW.toFixed(0)} ${MH.toFixed(0)}`, class: "rmap", role: "img", "aria-label": "책상 위에서 본 도달 지도" },
+    defs, g0, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube);
+  M.svg.addEventListener("mousemove", (e) => mapHover(mapPt(e)));
+  M.svg.addEventListener("mouseleave", () => mapHover(null));
+  M.svg.addEventListener("click", (e) => mapClick(mapPt(e)));
+  M.hover = el("div", { class: "mhover" }, " ");
+  M.res = el("div", { class: "result" }, "지도 읽는 중…");
+  M.err = el("div", { class: "note warn", hidden: true });
+  mapMode("cube");
+  return el("div", { class: "mapbox" },
+    el("div", { class: "lead", style: "margin:0 0 10px" }, "지도에서 ", el("b", {}, "큐브"), " → ", el("b", {}, "놓을 자리"), " 순서로 누르세요."),
+    el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기")),
+    el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
+    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "집고 놓기 됨"), el("span", {}, el("i", { class: "sw half" }), "한쪽만·가장자리"),
+      el("span", {}, el("i", { class: "sw no" }), "안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
+      el("span", {}, el("i", { class: "sw vis" }), "비전")),
+    el("div", { class: "mwrap" }, M.svg), M.hover, M.res, M.err);
+}
+function mapMode(m) {
+  M.mode = m;
+  M.bCube.className = m === "cube" ? "on" : ""; M.bTarget.className = m === "target" ? "on" : "";
+}
+function mapPt(e) {
+  const p = M.svg.createSVGPoint(); p.x = e.clientX; p.y = e.clientY;
+  const q = p.matrixTransform(M.svg.getScreenCTM().inverse());
+  return { x: MX0 + (q.x - ML) / MS, y: MY1 - (q.y - MT) / MS };
+}
+function mapCell(p) {
+  const d = M.data; if (!d || !p) return null;
+  const hx = d.cell.dx / 2 + 1e-9, hy = d.cell.dy / 2 + 1e-9;
+  return d.cells.find((c) => Math.abs(c.x - p.x) <= hx && Math.abs(c.y - p.y) <= hy) || null;
+}
+function cellText(c) {
+  if (!c) return "지도 밖 (판정 칸 없음)";
+  const t = c.turns.length ? ` (손 ${c.turns.map(degS).join(" 또는 ")})` : "";
+  return c.feasible ? "집고 놓기 됨" + t : c.grasp && c.place ? "가장자리 — 집기·놓기는 되지만 옆 칸이 안 돼 여유 없음" :
+    c.grasp ? "집기만 됨 (놓기 안 됨)" : c.place ? "놓기만 됨 (집기 안 됨)" : "안 됨 — 팔이 못 감";
+}
+function mapHover(p) {
+  if (!p) { M.gHover.setAttribute("visibility", "hidden"); M.hover.textContent = " "; return; }
+  const c = mapCell(p);
+  if (c) {
+    const w = M.data.cell.dx * MS, h = M.data.cell.dy * MS;
+    M.gHover.setAttribute("x", msx(c.x) - w / 2); M.gHover.setAttribute("y", msy(c.y) - h / 2);
+    M.gHover.setAttribute("width", w); M.gHover.setAttribute("height", h); M.gHover.setAttribute("visibility", "visible");
+  } else M.gHover.setAttribute("visibility", "hidden");
+  M.hover.textContent = `x ${cm(p.x)} cm · y ${cm(p.y)} cm — ${p.y < 0 ? `앞으로 ${Math.abs(p.y * 100).toFixed(0)} cm` : "어깨 뒤"}, ` +
+    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm · ${cellText(c)}`;
+}
+function mapClick(p) {
+  const c = M.c;
+  if (!p || !c) return;
+  if (c.fields.cube_x.disabled) { toast("계획 중에는 못 바꿈", "error"); return; }
+  const cell = mapCell(p);
+  const at = M.snap && cell ? { x: cell.x, y: cell.y } : p;
+  const k = M.mode === "cube" ? ["cube_x", "cube_y"] : ["target_x", "target_y"];
+  c.fields[k[0]].value = at.x.toFixed(3); c.fields[k[1]].value = at.y.toFixed(3);
+  if (!cell || !cell.feasible) toast(`⚠ 그 자리는 지도상 ${cell ? "안 되는 칸" : "지도 밖"} — 그래도 계획 돌려 보기는 됨`, "warn");
+  if (M.mode === "cube") mapMode("target");
+  mapUpdate();
+}
+function mapVision(o) {
+  if (!M.gVis) return;
+  if (!o) { M.gVis.setAttribute("visibility", "hidden"); return; }
+  M.gVis.setAttribute("transform", `translate(${msx(o.x).toFixed(1)},${msy(o.y).toFixed(1)}) rotate(${(-o.yaw_deg).toFixed(1)})`);
+  M.gVis.setAttribute("visibility", "visible");
+}
+async function mapLoad(yaw) {
+  const my = ++M.seq;
+  try {
+    const r = await fetch(`/api/reachmap?yaw=${encodeURIComponent(yaw)}`);
+    const d = await r.json();
+    if (my !== M.seq) return;
+    if (!d.ok) { M.data = null; M.gCells.replaceChildren(); M.err.hidden = false; M.err.textContent = "⚠ " + (d.error || "도달 맵 없음") + " — 지도 색 없이 고를 수만 있음"; return; }
+    M.err.hidden = true;
+    M.data = d;
+    const w = d.cell.dx * MS - 2, h = d.cell.dy * MS - 2;
+    M.gCells.replaceChildren(...d.cells.map((c) => sv("rect", {
+      x: (msx(c.x) - w / 2).toFixed(1), y: (msy(c.y) - h / 2).toFixed(1), width: w.toFixed(1), height: h.toFixed(1), rx: 3,
+      class: "rc " + (c.feasible ? "ok" : c.grasp || c.place ? "half" : "no") })));
+  } catch (e) { if (my === M.seq) { M.err.hidden = false; M.err.textContent = "⚠ 도달 맵을 못 받음 (서버)"; } }
+}
+function mapUpdate() {
+  const v = mapVals();
+  if (!M.svg) return;
+  const place = (g, p, yaw) => {
+    if (!p) { g.setAttribute("visibility", "hidden"); return; }
+    g.setAttribute("transform", `translate(${msx(p.x).toFixed(1)},${msy(p.y).toFixed(1)})` + (yaw ? ` rotate(${(-yaw).toFixed(1)})` : ""));
+    g.setAttribute("visibility", "visible");
+  };
+  place(M.gCube, v.cube, v.cube && v.cube.yaw);
+  place(M.gTgt, v.target, v.cube && v.cube.yaw);
+  if (v.cube && v.target) {
+    const x1 = msx(v.cube.x), y1 = msy(v.cube.y), x2 = msx(v.target.x), y2 = msy(v.target.y), L = Math.hypot(x2 - x1, y2 - y1);
+    if (L > 40) {
+      const ux = (x2 - x1) / L, uy = (y2 - y1) / L, a = 30, b = 30;
+      for (const [k, val] of [["x1", x1 + ux * a], ["y1", y1 + uy * a], ["x2", x2 - ux * b], ["y2", y2 - uy * b]]) M.gArrow.setAttribute(k, val.toFixed(1));
+      M.gArrow.setAttribute("visibility", "visible");
+    } else M.gArrow.setAttribute("visibility", "hidden");
+  } else M.gArrow.setAttribute("visibility", "hidden");
+  const yaw = v.cube ? v.cube.yaw : 0, fy = foldYaw(yaw);
+  if (document.activeElement !== M.yaw) { M.yaw.value = Math.round(fy); rangeFill(M.yaw); }
+  M.yawNum.textContent = `${degS(yaw)}${Math.abs(yaw - fy) > 0.05 ? ` (= ${degS(fy)}, 큐브는 90° 마다 같음)` : ""}`;
+  M.yaw.disabled = M.c.fields.cube_yaw.disabled;
+  const key = (Math.round(yaw * 2) / 2).toFixed(1);
+  if (key !== M.yawKey) {
+    M.yawKey = key;
+    clearTimeout(M.tLoad); M.tLoad = setTimeout(() => mapLoad(yaw), 80);
+  }
+  clearTimeout(M.tChk); M.tChk = setTimeout(mapCheck, 150);
+}
+async function mapCheck() {
+  const v = mapVals();
+  if (!v.cube || !v.target) { M.res.textContent = "큐브와 놓을 자리를 지도에서 누르세요"; M.res.className = "result"; return; }
+  const my = ++M.chkSeq;
+  let r;
+  try {
+    r = await (await fetch("/api/reachmap/check", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cube: [v.cube.x, v.cube.y, v.cube.yaw], target: [v.target.x, v.target.y], d: v.d }) })).json();
+  } catch (e) { r = { ok: false, error: "서버 연결 실패" }; }
+  if (my !== M.chkSeq) return;
+  const [txt, cls] = checkText(r);
+  M.res.textContent = txt; M.res.className = "result " + cls;
+  M.res.title = r.ok ? `realcoords.plan: ${r.reason} · sim 큐브 (${r.cube.slice(0, 2).map((x) => x.toFixed(3)).join(", ")}) yaw ${degS(r.yaw)} → 놓을 자리 (${r.target.map((x) => x.toFixed(3)).join(", ")})` : "";
+}
+function checkText(r) {
+  if (!r.ok) return ["⚠ 판정 못 함: " + (r.error || "?"), "warn"];
+  if (r.reachable) return [`✅ 됨 (손 ${degS(r.hand_yaw)} 돌림) — 이제 ② 계획 돌려 보기`, "ok"];
+  const tail = " — 그래도 계획 돌려 보기는 됨 (시뮬이 다시 확인)";
+  if (/no reach map for D/.test(r.reason)) return [`⚠ d(어깨~책상) ${r.d} m 가 지도(${r.map_d} m)와 달라 판정 못 함` + tail, "warn"];
+  const a = r.alone || {}, cu = a.cube || {}, tg = a.target || {};
+  const out = (x) => /outside/.test(x.reason || "");
+  let why;
+  if (!cu.reachable && !tg.reachable) why = out(cu) && out(tg) ? "둘 다 지도 밖" : "팔이 큐브 자리·놓을 자리 둘 다 못 감";
+  else if (!cu.reachable) why = out(cu) ? "큐브가 지도 밖" : "팔이 큐브 자리에 못 감";
+  else if (!tg.reachable) why = out(tg) ? "놓을 자리가 지도 밖" : "팔이 놓을 자리에 못 감";
+  else why = `집을 때(손 ${degS(cu.hand_yaw)})와 놓을 때(손 ${degS(tg.hand_yaw)}) 손 돌림이 달라야 함`;
+  return [`⛔ 안 됨: ${why} (큐브 yaw ${degS(foldYaw(r.input.cube[2]))} 기준)` + tail, "bad"];
 }
 
 // ---------- 보정 안내 ----------
@@ -785,7 +995,13 @@ function renderPose() {
     P.virt = el("details", { class: "log", hidden: true }, el("summary", {}, "가상 큐브 놓기"),
       el("div", { class: "help", style: "margin-top:6px" }, el("span", { class: "vbadge" }, "가상"), " 가상 vision_node 가 이 값을 /object_pose 로 1 Hz 발행"),
       el("div", { class: "minirow" }, fld("x", "0.10", "x m"), fld("y", "-0.30", "y m"), fld("z", "-0.4525", "z m"), fld("yaw", "20", "yaw °"),
-        el("button", { class: "btn line", onclick: () => post("/api/virtual/cube", Object.fromEntries(Object.entries(P.vin).map(([k, i]) => [k, parseFloat(i.value)]))) }, "놓기")));
+        el("button", { class: "btn line", onclick: () => post("/api/virtual/cube", Object.fromEntries(Object.entries(P.vin).map(([k, i]) => [k, parseFloat(i.value)]))) }, "놓기"),
+        el("button", { class: "btn line", title: "지도의 주황 큐브 자리·yaw 로 가상 큐브를 놓는다 (z 는 위 칸)", onclick: () => {
+          const v = mapVals();
+          if (!v.cube) { toast("지도에 큐브가 없음", "error"); return; }
+          P.vin.x.value = v.cube.x.toFixed(3); P.vin.y.value = v.cube.y.toFixed(3); P.vin.yaw.value = v.cube.yaw.toFixed(1);
+          post("/api/virtual/cube", Object.fromEntries(Object.entries(P.vin).map(([k, i]) => [k, parseFloat(i.value)])));
+        } }, "지도 큐브 자리에 놓기")));
     P.root = el("div", { class: "vline" }, el("b", {}, "비전"), P.chip, P.val, el("span", { class: "spacer" }), P.bUse);
     box.replaceChildren(P.root, P.virt);
   }
@@ -798,13 +1014,15 @@ function renderPose() {
   P.val.textContent = o ? `x ${o.x.toFixed(3)} · y ${o.y.toFixed(3)} · yaw ${o.yaw_deg.toFixed(0)}°${o.frame_id !== "shoulder_roll_axis" ? ` (${o.frame_id || "빈 frame"})` : ""}` : "";
   P.val.title = o ? `z ${o.z.toFixed(3)} · frame ${o.frame_id || "(빈)"}` : "";
   P.bUse.disabled = !o || o.frame_id !== "shoulder_roll_axis";
+  mapVision(o && o.frame_id === "shoulder_roll_axis" && !stale ? o : null);
 }
 function usePose() {
   const o = S.ros.object_pose, c = cards.pick_dry;
   if (!o || !c) return;
   const set = (k, v) => { if (c.fields[k] && !c.fields[k].disabled) c.fields[k].value = v; };
   set("cube_x", o.x.toFixed(3)); set("cube_y", o.y.toFixed(3)); set("cube_yaw", o.yaw_deg.toFixed(1));
-  toast("큐브 칸을 채웠다. 이제 ▶ 계획 돌려 보기");
+  mapUpdate();
+  toast("비전 값을 큐브 자리로 넣었다 (지도 주황). 이제 ▶ 계획 돌려 보기");
 }
 
 // ---------- 역기구학 탭: 궤적 재생 ----------
@@ -854,11 +1072,13 @@ function stepTraj() {
   updateIkView();
 }
 function trajScene() {
-  // 큐브·놓을 자리: 궤적의 real(계획에 쓴 값), 없으면 마지막 실행 칸
+  // 큐브·놓을 자리: 지금 칸 값, 없으면 궤적의 real(계획에 쓴 값), 그것도 없으면 마지막 실행 칸
   const t = T.traj, p = (T.info && T.info.params) || {};
   const num = (x) => { const v = parseFloat(x); return Number.isFinite(v) ? v : null; };
   let cube = null, target = null, d = num(p.d) ?? 0.4775;
-  if (t && t.real) { cube = { x: t.real.cube[0], y: t.real.cube[1], yaw: t.real.cube[2] }; target = { x: t.real.target[0], y: t.real.target[1] }; d = t.real.d ?? d; }
+  const v = mapVals();   // 지금 지도·숫자칸 값이 먼저 (고르는 중에도 3D 가 따라오게)
+  if (v.cube && v.target) { cube = v.cube; target = v.target; d = v.d ?? (t && t.real && t.real.d) ?? d; }
+  else if (t && t.real) { cube = { x: t.real.cube[0], y: t.real.cube[1], yaw: t.real.cube[2] }; target = { x: t.real.target[0], y: t.real.target[1] }; d = t.real.d ?? d; }
   else if (num(p.cube_x) != null) { cube = { x: num(p.cube_x), y: num(p.cube_y), yaw: num(p.cube_yaw) || 0 }; target = { x: num(p.target_x), y: num(p.target_y) }; }
   return { cube, target, d };
 }
