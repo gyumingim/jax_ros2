@@ -29,7 +29,7 @@ SUB = Path("motion1") / "src"
 TOL_POS = 0.005               # 풀림 판정: 위치 5 mm (env.reachable 의 position_tolerance)
 TOL_ROT = math.radians(1.5)   # 손 방향 1.5°
 FAST_ITERS = 80               # 드래그 중 빠른 풀이의 반복 수 (직전 해에서 시작)
-MODES = ("auto", "grasp", "vertical", "position")   # position = 손 각도 무시: 기준점 위치만, 손목 3 관절은 지금 값 그대로
+MODES = ("auto", "grasp", "vertical", "position")   # position = 기준점 위치만 풀고, 손목 기준이면 손목 2 관절로 손이 최대한 아래 (hand_roll 은 지금 값)
 TILT_MAX_DEFAULT = 60.0       # auto 의 기울기 상한 (°)
 AUTO_TILT_INITS = (0.0, -40.0, 40.0)   # auto: 시작 기울기(처음 120 번 묶음) — 가지 고르기
 TIE_DEG = 2.0                 # 해 고르기: 최소 회전에서 이 각 안이면 동률 → 손 기울기 수직에 가까운 것
@@ -337,7 +337,7 @@ class _Solver:
                 d.qpos[self.qadr] = q
                 mj.mj_kinematics(m, d)
                 if float(np.linalg.norm(self.wrist_pos() - point)) < TOL_ANALYTIC:
-                    out.append(q)
+                    out.append(self.point_down(q, lim))
         return out, len(raw)
 
     def solve_position(self, seed, point, ref, its=300):
@@ -397,6 +397,9 @@ class _Solver:
             for s0 in ([near] if near is not None else []) + self.seeds(current):
                 s0 = np.array(s0, dtype=float); s0[wi] = hold[wi]
                 q, pe = self.solve_position(np.clip(s0, lim[:, 0], lim[:, 1]), point_sim, ref)
+                if ref == "wrist":
+                    q = self.point_down(q, lim)
+                    self.fk(q); pe = float(np.linalg.norm(self.wrist_pos() - point_sim))
                 _, rot = self.fk(q)
                 out.append({"q": q, "pe": pe, "re": 0.0, "turn": 0.0, "flip": False, "rot": rot, "tilt": self.axis_tilt(rot)})
             return out, lim
@@ -623,11 +626,14 @@ class _Solver:
                 q, pe = bc["q"], bc["pe"]
             else:   # 안 닿음: 가장 가까운 자세(수치)만 보여 줌
                 q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
+                q = self.point_down(q, lim)
             re_ = 0.0
             tilt = self.axis_tilt(self.fk(q)[1])
             an = {"method": "analytic", "n_solutions": len(qs), "n_raw": n_raw}
-        elif mode == "position":   # 손목 3 관절은 seed(직전 해) 값 그대로
+        elif mode == "position":   # 손목 기준이면 손목 2 관절 = 손이 최대한 아래 (아니면 seed 값 그대로)
             q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
+            if ref == "wrist":
+                q = self.point_down(q, lim)
             re_ = 0.0
             tilt = self.axis_tilt(self.fk(q)[1])
         elif ref == "wrist" and mode != "auto":
@@ -782,8 +788,22 @@ class _Solver:
         for k in (-2, 0, 2):
             c = ph + k * math.pi
             cands.append(np.where((c >= lo5) & (c <= hi5), c, lo5))
-        best = max(float(np.max(A + B * np.cos(c) + C * np.sin(c))) for c in cands)
+        best, b5, b6 = -2.0, 0.0, 0.0
+        for c in cands:
+            val = A + B * np.cos(c) + C * np.sin(c)
+            j = int(np.argmax(val))
+            if float(val[j]) > best:
+                best, b5, b6 = float(val[j]), float(c[j]), float(t6[j, 0])
+        self._down_q56 = (b5, b6)
         return math.degrees(math.acos(max(-1.0, min(1.0, best))))
+
+    def point_down(self, q, lim):
+        """손목 중앙 기준 위치 풀이 뒤: wrist_pitch·wrist_yaw(한계 안)를 손이 최대한 아래를 보게 (사용자 2026-11-20).
+        손목 중앙은 이 두 관절에 안 움직이므로 위치는 그대로. hand_roll 은 손 축 둘레라 그대로 둔다."""
+        q = q.copy()
+        self.hand_down_tilt(q, lim)
+        q[self.arm.index("wrist_pitch")], q[self.arm.index("wrist_yaw")] = self._down_q56
+        return q
 
     def grasp_eval(self, S, x, y, verify):
         """(x, y) 실좌표 -> (코드, 최소 기울기 °, 해 수). 코드 2 = 집을 수 있음, 1 = 손목은 닿지만 손을 수직으로 못 내림, 0 = 안 닿음."""
