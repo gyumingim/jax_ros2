@@ -8,8 +8,8 @@ setup(
     packages=[package_name],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
-        ("share/" + package_name, ["package.xml", "calibration.json"]),
-        ("share/" + package_name + "/launch", ["launch/arm.launch.py"]),
+        ("share/" + package_name, ["package.xml", "calibration.json", "homing.json"]),
+        ("share/" + package_name + "/launch", ["launch/arm.launch.py", "launch/arm_homed.launch.py"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -23,6 +23,7 @@ setup(
             "calibrate = arm_control.calibrate:main",
             "play_trajectory = arm_control.play:main",
             "pick_place = arm_control.pick_place:main",
+            "homing_guard = arm_control.homing_guard:main",
         ],
     },
 )
