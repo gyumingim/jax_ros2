@@ -1,0 +1,31 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>작업 상자</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<style>
+:root{--bg:#F2F4F6;--card:#fff;--fg:#191F28;--sub:#4E5968;--mute:#8B95A1;--blue:#3182F6;--red:#F04452}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:Pretendard,"Malgun Gothic",system-ui,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 16px 48px;display:flex;flex-direction:column;gap:14px}
+h1{font-size:26px;margin:0} h2{font-size:18px;margin:0 0 8px} .lead{color:var(--sub);margin:0;line-height:1.6}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.card{background:var(--card);border-radius:18px;padding:22px;min-width:0}
+svg{width:100%;height:auto;display:block}
+.table{fill:#EEF1F4} .tablef{fill:#D9DEE4} .box{fill:rgba(49,130,246,.10);stroke:var(--blue);stroke-width:2}
+.cube{fill:rgba(49,130,246,.10)} .cubeline{stroke:var(--red);stroke-width:2;stroke-dasharray:6 4}
+.reach{fill:none;stroke:#B0B8C1;stroke-width:1.5;stroke-dasharray:4 4} .sh{fill:var(--fg)}
+.lab{font-size:12.5px;fill:var(--fg);font-weight:600} .lab.mute{fill:var(--mute);font-weight:500} .lab.blue{fill:var(--blue)} .lab.red{fill:var(--red)}
+.tick{font-size:11px;fill:var(--mute)} ul{margin:0;padding-left:18px;color:var(--sub);line-height:1.7}
+</style></head><body><div class="wrap">
+<h1>작업 상자</h1>
+<p class="lead">팀 IK(motion1)가 "손(집는 점)은 이 상자 안에서만" 이라고 정한 범위. 팔이 물리적으로 못 가서가 아니라 코드 규칙이다. 상자 밖이면 계획이 "안 됨". 출처: <code>env.py</code> WORKSPACE_LOW/HIGH, CUBE_X_MAX (실물 셋업, 실좌표로 바꿈).</p>
+<div class="grid">
+<section class="card"><h2>위에서 본 모습 (역기구학 지도와 같은 방향)</h2><svg viewBox="0 0 520 420"><rect x="20" y="82" width="480" height="300" class="table"/><text x="458" y="370" class="lab mute" text-anchor="end">책상</text><rect x="99" y="106" width="384" height="216" class="box"/><rect x="99" y="175" width="384" height="147" class="cube"/><line x1="99" y1="175" x2="483" y2="175" class="cubeline"/><text x="477" y="169" class="lab red" text-anchor="end">여기보다 어깨 쪽엔 큐브 못 둠 (앞 17.5 cm)</text><circle cx="260" cy="70" r="7" class="sh"/><text x="272" y="74" class="lab">어깨 (0,0)</text><text x="105" y="122" class="lab blue">작업 상자 (손이 갈 수 있게 허락한 곳)</text><text x="140" y="412" class="tick" text-anchor="middle">-20</text><text x="200" y="412" class="tick" text-anchor="middle">-10</text><text x="260" y="412" class="tick" text-anchor="middle">+0</text><text x="320" y="412" class="tick" text-anchor="middle">+10</text><text x="380" y="412" class="tick" text-anchor="middle">+20</text><text x="440" y="412" class="tick" text-anchor="middle">+30</text><text x="18" y="134" class="tick">-10</text><text x="18" y="194" class="tick">-20</text><text x="18" y="254" class="tick">-30</text><text x="18" y="314" class="tick">-40</text><text x="260" y="396" class="tick" text-anchor="middle">x (cm) · ← 로봇 오른쪽 · 로봇 왼쪽 → · 세로 y (cm) 앞쪽 −</text></svg></section>
+<section class="card"><h2>옆에서 본 모습</h2><svg viewBox="0 0 520 420"><clipPath id="c"><rect width="520" height="420"/></clipPath><g clip-path="url(#c)"><rect x="68" y="346" width="312" height="14" class="tablef"/><text x="380" y="376" class="lab mute" text-anchor="end">책상 면 (어깨 아래 47.75 cm)</text><rect x="116" y="244" width="216" height="108" class="box"/><text x="122" y="236" class="lab blue">작업 상자: 책상 위 −1 ~ +17 cm</text><line x1="185" y1="240" x2="185" y2="346" class="cubeline"/><circle cx="80" cy="60" r="7" class="sh"/><text x="92" y="64" class="lab">어깨</text><path d="M80,60 m-416,0 a416,416 0 0,0 833,0" class="reach" transform="rotate(0)"/><text x="476" y="132" class="lab mute" text-anchor="end">팔 쭉 폈을 때 끝 (69 cm)</text><text x="80" y="412" class="tick" text-anchor="middle">0</text><text x="140" y="412" class="tick" text-anchor="middle">-10</text><text x="200" y="412" class="tick" text-anchor="middle">-20</text><text x="260" y="412" class="tick" text-anchor="middle">-30</text><text x="320" y="412" class="tick" text-anchor="middle">-40</text><text x="380" y="412" class="tick" text-anchor="middle">-50</text><text x="260" y="396" class="tick" text-anchor="middle">옆에서 본 모습 · 가로 y (cm, 오른쪽으로 갈수록 앞) · 세로 = 높이</text></g></svg></section>
+</div>
+<section class="card"><h2>숫자로</h2><ul>
+<li>좌우: 로봇 오른쪽 26.8 cm ~ 왼쪽 37.2 cm</li>
+<li>앞뒤: 어깨 앞 6 cm ~ 42 cm (큐브는 앞 17.5 cm ~ 42 cm 만, 빨간 점선)</li>
+<li>높이: 책상 위 −1 cm ~ +17 cm — 손은 책상 위 17 cm 보다 높이 못 감</li>
+<li>역기구학 지도의 칸들은 이 상자 바닥과 같은 범위만 계산한다(그 밖은 회색으로도 안 그려짐).</li>
+<li>팔을 쭉 폈을 때 어깨에서 69 cm 까지 닿으므로, 상자 바깥에도 팔이 갈 수 있는 곳이 있다.</li>
+</ul></section>
+</div></body></html>
