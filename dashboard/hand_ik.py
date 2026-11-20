@@ -42,7 +42,14 @@ MAP_PARTS = max(1, min(8, (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸�
 # 패드: 손가락 판 안쪽 면은 집는 점 −16 ~ +34 mm (손 축 따라). 닿는 곳(판 끝, 큐브 면 1 mm 안) −16 ~ +2 mm → 책상 위 19~37 mm, 큐브 면(0~50) 안.
 GRIP_ABOVE_CENTER = 0.010
 MAP_TIMEOUT_S = 1500.0        # 지도 계산 시간 상한 (집는 점 +1 cm 뒤 이 PC 약 400 초 — 지나는 칸이 많아 판정이 길어짐. 예전 120 s 면 시간 초과)
-GRASP_TILT_TOL = 3.0          # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
+TABLE_XY_MARGIN = 0.01        # 책상 발자국 둘레 여유 (m): 손가락 상자가 발자국 + 이만큼 안에 걸치면 책상 높이 검사 (2026-11-21)
+ARM_RADIUS = 0.03             # 팔 기준점(팔꿈치·손목) 둘레 링크 반지름 가정 (m) — 책상 발자국 위에서 책상 면 + 이만큼 위여야
+GRASP_TILT_TOL = 3.0         # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
+
+
+def _low_mm(low):
+    """손가락 책상 위 높이(m) → 화면용 mm. 손가락이 책상 발자국 위에 없으면(lowest_finger_z 9.0) None (화면에 안 보임)."""
+    return None if low > 5.0 else round(low * 1000, 1)
 
 
 # ============================================================ worker (자식 프로세스)
@@ -76,6 +83,16 @@ class _Solver:
         self.hand_roll = self.arm.index("hand_roll")
         self.finger_geoms = [g for g in range(m.ngeom) if env._is_hand_geom[g] and m.geom_contype[g]]
         self.table_z = float(E.TABLE_SURFACE_Z)
+        # 책상 발자국 (sim x0, x1, y0, y1) = 앞 끝(로봇 쪽) sim x ≤ TABLE_NEAR_X (0.20 = 기둥 앞면 0.30 − STAND_GAP 0.10, env 장면의
+        # table_top 상자 앞 끝과 같음) 인 반평면. 옆·먼 끝은 env 장면에선 도달 맵으로 정한 크기(반폭 WORK_Y_MAX + 0.08, 먼 끝
+        # WORK_X_MIN − 0.10)라 실물 책상이 아니다 → 끝없이 (보수적: 손가락이 그쪽에선 늘 책상 면 위여야). 2026-11-21 HOME = 모든 관절 0
+        # (팔이 책상 앞 끝 너머 로봇 쪽에 늘어짐, 손가락이 책상 면 23 cm 아래) 부터 책상 검사는 이 발자국 + TABLE_XY_MARGIN 위에서만
+        tg = int(env.table_geom_id)
+        mujoco.mj_kinematics(m, self.d)
+        near = float(E.TABLE_NEAR_X)
+        if abs(float(self.d.geom_xpos[tg][0] + m.geom_size[tg][0]) - near) > 1e-6:
+            raise RuntimeError(f"env 장면 책상 앞 끝 {self.d.geom_xpos[tg][0] + m.geom_size[tg][0]:.4f} ≠ TABLE_NEAR_X {near}")
+        self.table_xy = (-9.0, near, -9.0, 9.0)
         self.open_fingers = env.finger_targets(0.0)
         self.d.qpos[self.fadr] = self.open_fingers
         self._init_wrist()
@@ -244,13 +261,33 @@ class _Solver:
         mj.mj_kinematics(self.m, self.d)
         return self.d.site_xpos[self.site].copy(), self.d.site_xmat[self.site].reshape(3, 3).copy()
 
+    def over_table(self, xy_lo, xy_hi, margin=None):
+        """xy 상자 [xy_lo, xy_hi] (sim) 가 책상 발자국 + margin(기본 TABLE_XY_MARGIN) 과 겹치나."""
+        x0, x1, y0, y1 = self.table_xy
+        e = TABLE_XY_MARGIN if margin is None else margin
+        return bool(xy_hi[0] >= x0 - e and xy_lo[0] <= x1 + e and xy_hi[1] >= y0 - e and xy_lo[1] <= y1 + e)
+
     def lowest_finger_z(self):
-        """지금 self.d 자세에서 손가락 충돌 상자 8 꼭짓점 중 가장 낮은 z (sim)."""
+        """지금 self.d 자세에서 손가락 충돌 상자 8 꼭짓점 중 가장 낮은 z (sim) — 책상 발자국(+ TABLE_XY_MARGIN) 위에 걸친
+        상자만 (2026-11-21: 책상 옆, 예: HOME 에서 늘어진 손은 책상 면보다 낮아도 된다). 발자국 위 상자가 없으면 9.0.
+        상자 xy 범위가 발자국과 조금이라도 겹치면 그 상자 전체의 가장 낮은 점을 본다 (보수적)."""
         np = self.np
         low = 9.0
         for g in self.finger_geoms:
             c, R, h = self.d.geom_xpos[g], self.d.geom_xmat[g].reshape(3, 3), self.m.geom_size[g]
-            low = min(low, float(c[2] - np.abs(R[2]) @ h))
+            ext = np.abs(R) @ h
+            if self.over_table(c[:2] - ext[:2], c[:2] + ext[:2]):
+                low = min(low, float(c[2] - ext[2]))
+        return low
+
+    def arm_low_z(self):
+        """지금 self.d 자세에서 팔 기준점(팔꿈치·손목 두 관절 축 기준점·손목 중앙) 중 책상 발자국(+ TABLE_XY_MARGIN + ARM_RADIUS)
+        위에 있는 것의 가장 낮은 z − ARM_RADIUS (sim). 팔 링크는 모델에서 충돌이 없어 (손가락 상자만) 이 점들로 대신 본다. 없으면 9.0."""
+        low = 9.0
+        pts = [self.d.xanchor[self.m.joint(n).id] for n in ("elbow", "wrist_pitch", "wrist_yaw")] + [self.wrist_pos()]
+        for p in pts:
+            if self.over_table(p[:2], p[:2], TABLE_XY_MARGIN + ARM_RADIUS):
+                low = min(low, float(p[2]) - ARM_RADIUS)
         return low
 
     def set_ranges(self, ranges_deg, servo_unlimited=False):
@@ -602,7 +639,7 @@ class _Solver:
                    ang_err_deg=round(math.degrees(best["re"]), 2), ref=pref, wrist_real=[round(float(v), 4) for v in self.to_real(wpos)],
                    ref_info=self.ref_info(),
                    flip=bool(best["flip"]), hand_turn=round(float(best["turn"]), 2), tilt_deg=round(float(best["tilt"]), 1),
-                   finger_low_mm=round(best["low"] * 1000, 1), at_limit=at_lim,
+                   finger_low_mm=_low_mm(best["low"]), at_limit=at_lim,
                    max_move_deg=round(math.degrees(best["dist"]), 1) if current is not None else None,
                    grip_real=[round(float(v), 4) for v in self.to_real(grip)],
                    site_real=[round(float(v), 4) for v in self.to_real(site)],
@@ -637,7 +674,7 @@ class _Solver:
         return {"method": "analytic", "n_solutions": an["n"], "n_raw": an["n_raw"], "analytic_miss": bool(miss),
                 "solutions": [{"joints": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, c["q"])},
                                "max_move_deg": round(math.degrees(float(np.abs(c["q"] - ref).max())), 1),
-                               "finger_low_mm": round(c["low"] * 1000, 1), "finger_ok": bool(c["low"] >= -0.001),
+                               "finger_low_mm": _low_mm(c["low"]), "finger_ok": bool(c["low"] >= -0.001),
                                "pos_err_mm": round(c["pe"] * 1000, 3), "chosen": c is best} for c in sol]}
 
     def fast(self, b):
@@ -724,7 +761,7 @@ class _Solver:
                 "joints": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, q)},
                 "pos_err_mm": round(float(np.linalg.norm((wpos if ref == "wrist" else grip) - point)) * 1000, 1), "ang_err_deg": round(math.degrees(re_), 2),
                 "ref": ref, "wrist_real": [round(float(v), 4) for v in self.to_real(wpos)], "grip_real": [round(float(v), 4) for v in self.to_real(grip)],
-                "finger_low_mm": round(low * 1000, 1), "warn": [] if low >= -0.001 else [f"손가락이 책상에 {-low * 1000:.0f} mm 파묻힘"],
+                "finger_low_mm": _low_mm(low), "warn": [] if low >= -0.001 else [f"손가락이 책상에 {-low * 1000:.0f} mm 파묻힘"],
                 "open_fingers_deg": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.fingers, self.open_fingers)},
                 "reason": "풀림 (빠른 풀이)" if ok else ("빠른 풀이: 손가락이 책상에 닿음" if pe <= TOL_POS and re_ <= TOL_ROT else "빠른 풀이가 못 따라감 — 손을 떼면 전체 풀이"), "ms": round((time.time() - t0) * 1000, 1)}
 
