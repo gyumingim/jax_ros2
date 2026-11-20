@@ -170,6 +170,7 @@ function render() {
   renderAngles();
   renderPose();
   renderTraj();
+  renderHandIk();
   renderViewers();
   $("#foot").textContent = `${v ? "가상 모드 · " : ""}워크스페이스 ${S.info.ws} · ROS ${S.info.distro} · 레포 ${S.info.repo} · 로그 ${S.info.logs} · ${S.info.platform}` +
     ` · 메시 ${S.robot.mesh_ok ? S.robot.mesh_dir : "없음"}`;
@@ -549,7 +550,8 @@ function buildMap(c) {
   const seg = el("div", { class: "modesw seg", role: "group", "aria-label": "고르는 것" });
   M.bCube = el("button", { onclick: () => mapMode("cube") }, el("i", { class: "sw cube" }), "큐브 놓기");
   M.bTarget = el("button", { onclick: () => mapMode("target") }, el("i", { class: "sw tgt" }), "놓을 자리 고르기");
-  seg.append(M.bCube, M.bTarget);
+  M.bHand = el("button", { onclick: () => mapMode("hand"), title: "아래 '손 위치로 보내기' 의 x, y 를 지도에서 고르기" }, el("i", { class: "sw hand" }), "손 위치");
+  seg.append(M.bCube, M.bTarget, M.bHand);
   const snap = el("input", { type: "checkbox", checked: "" });
   snap.addEventListener("change", () => { M.snap = snap.checked; });
   M.yaw = el("input", { type: "range", min: -45, max: 45, step: 1, value: 0 });
@@ -582,12 +584,13 @@ function buildMap(c) {
   M.gVis = sv("rect", { class: "mvis", width: 50, height: 50, x: -25, y: -25, rx: 4, visibility: "hidden" });
   M.gArrow = sv("line", { class: "marrow", "marker-end": "url(#marr)", visibility: "hidden" });
   M.gTgt = sv("rect", { class: "mtgt", width: 50, height: 50, x: -25, y: -25, rx: 4, visibility: "hidden" });
+  M.gHand = sv("g", { visibility: "hidden", class: "mhand" }, sv("circle", { r: 14 }), sv("path", { d: "M-22,0 H22 M0,-22 V22" }));
   M.gCube = sv("g", { visibility: "hidden" }, sv("rect", { class: "mcube", width: 50, height: 50, x: -25, y: -25, rx: 5 }),
     sv("line", { x1: 0, y1: 0, x2: 25, y2: 0, class: "mcubeax" }));
   const defs = sv("defs", {}, sv("marker", { id: "marr", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
     sv("path", { d: "M0,0 L10,5 L0,10 z", fill: "#4e5968" })));
   M.svg = sv("svg", { viewBox: `0 0 ${MW.toFixed(0)} ${MH.toFixed(0)}`, class: "rmap", role: "img", "aria-label": "책상 위에서 본 도달 지도" },
-    defs, g0, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube);
+    defs, g0, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube, M.gHand);
   M.svg.addEventListener("mousemove", (e) => mapHover(mapPt(e)));
   M.svg.addEventListener("mouseleave", () => mapHover(null));
   M.svg.addEventListener("click", (e) => mapClick(mapPt(e)));
@@ -607,7 +610,7 @@ function buildMap(c) {
 }
 function mapMode(m) {
   M.mode = m;
-  M.bCube.className = m === "cube" ? "on" : ""; M.bTarget.className = m === "target" ? "on" : "";
+  M.bCube.className = m === "cube" ? "on" : ""; M.bTarget.className = m === "target" ? "on" : ""; M.bHand.className = m === "hand" ? "on" : "";
   mapPaint();
 }
 // 파지 = {hand_yaw, flip}: flip = 손 반 바퀴(HAND_FLIP). 한 배달은 한 파지로 끝까지 가므로(env._servable)
@@ -675,6 +678,7 @@ function mapHover(p) {
 function mapClick(p) {
   const c = M.c;
   if (!p || !c) return;
+  if (M.mode === "hand") { const cell = mapCell(p), at = M.snap && cell ? { x: cell.x, y: cell.y } : p; hkSetXY(at.x, at.y); return; }
   if (c.fields.cube_x.disabled) { toast("계획 중에는 못 바꿈", "error"); return; }
   const cell = mapCell(p);
   const at = M.snap && cell ? { x: cell.x, y: cell.y } : p;
@@ -775,6 +779,184 @@ function checkText(r) {
       : `큐브는 ${cg.map(gName).join(" / ")}, 놓을 자리는 ${tgg.map(gName).join(" / ")} 로만 됨 — 같은 손으로 둘 다 안 됨`;
   }
   return [`⛔ 안 됨: ${why} (큐브 yaw ${degS(foldYaw(r.input.cube[2]))} 기준)` + tail, "bad"];
+}
+
+// ---------- 역기구학 탭: 손 위치로 보내기 (POST /api/ik/hand → 유령 → 각도 보내기와 같은 /api/joint/send) ----------
+// 점 = 손이 쥐는 큐브의 중심(실좌표, m). z 는 '책상 위 cm' 로 받는다(책상 = 어깨 아래 D 0.4775 m, realcoords.MAP_D).
+// 손 방향: grasp = 실물 셋업의 큐브 잡는 자세(손가락 아래 + −40° 기울임), vertical = 손끝 수직(기울기 0, 대부분 안 닿음).
+const HK = { sol: null, req: null, last: null, busy: false, warned: false, check: null, sentAt: 0, mapD: 0.4775 };
+const ARM7 = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow", "wrist_pitch", "wrist_yaw", "hand_roll"];
+function hkSetXY(x, y) {
+  if (!HK.f) return;
+  HK.f.x.value = x.toFixed(3); HK.f.y.value = y.toFixed(3);
+  hkChanged();
+}
+function hkVals() {
+  if (!HK.f) return null;
+  const n = (e) => { const v = parseFloat(e.value); return Number.isFinite(v) ? v : null; };
+  const x = n(HK.f.x), y = n(HK.f.y), zc = n(HK.f.zn), yaw = n(HK.f.yawn);
+  if (x == null || y == null || zc == null) return null;
+  return { x, y, z_table_cm: zc, z: zc / 100 - HK.mapD, yaw_deg: yaw ?? 0, mode: HK.f.mode.value };
+}
+const hkSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function hkMapMark() {
+  if (!M.gHand) return;
+  const v = hkVals();
+  if (!v) { M.gHand.setAttribute("visibility", "hidden"); return; }
+  M.gHand.setAttribute("transform", `translate(${msx(v.x).toFixed(1)},${msy(v.y).toFixed(1)})`);
+  M.gHand.setAttribute("visibility", "visible");
+}
+function hkChanged() {
+  // 값이 바뀌면 이전 풀이는 무효 (보내기 막힘, 유령 숨김)
+  if (HK.sol && !hkSame(hkVals(), HK.req)) { HK.sol = null; HK.check = null; }
+  if (HK.f) {
+    if (document.activeElement !== HK.f.zr) { HK.f.zr.value = HK.f.zn.value; rangeFill(HK.f.zr); }
+    if (document.activeElement !== HK.f.yawr) { HK.f.yawr.value = HK.f.yawn.value; rangeFill(HK.f.yawr); }
+  }
+  hkMapMark(); hkRender(); updateIkView();
+}
+function buildHandIk() {
+  const f = HK.f = {};
+  const num = (val, step) => el("input", { value: val, inputmode: "decimal", type: "number", step });
+  const fld = (lab, unit, inp) => el("label", { class: "field" }, el("span", {}, lab, unit ? el("small", {}, " " + unit) : null), inp);
+  f.x = num("0.100", 0.005); f.y = num("-0.300", 0.005);
+  f.zn = num("2.5", 0.5); f.zn.style.width = "80px";
+  f.zr = el("input", { type: "range", min: 0, max: 40, step: 0.5, value: 2.5 });
+  f.yawn = num("0", 1); f.yawn.style.width = "80px";
+  f.yawr = el("input", { type: "range", min: -45, max: 45, step: 1, value: 0 });
+  f.mode = el("select", {}, el("option", { value: "grasp" }, "큐브 잡는 자세 (손가락 아래, −40° 기울임)"),
+    el("option", { value: "vertical" }, "손끝 수직 아래 (기울기 0°) — 시험"));
+  f.open = el("input", { type: "checkbox" });
+  for (const e of [f.x, f.y, f.zn, f.yawn]) e.addEventListener("input", hkChanged);
+  f.zr.addEventListener("input", () => { f.zn.value = f.zr.value; hkChanged(); });
+  f.yawr.addEventListener("input", () => { f.yawn.value = f.yawr.value; hkChanged(); });
+  f.mode.addEventListener("change", hkChanged);
+  const preset = el("button", { class: "btn line small", onclick: () => { f.zn.value = "2.5"; hkChanged(); }, title: "큐브(5 cm) 중심 높이 = 책상 위 2.5 cm" }, "큐브 잡는 높이 (2.5 cm)");
+  const fromCube = el("button", { class: "btn line small", title: "위 지도의 큐브 x, y, yaw 를 가져오기", onclick: () => {
+    const v = mapVals(); if (!v.cube) { toast("지도에 큐브가 없음", "error"); return; }
+    f.yawn.value = String(Math.round(foldYaw(v.cube.yaw))); hkSetXY(v.cube.x, v.cube.y);
+  } }, "지도의 큐브 자리 쓰기");
+  const pickMap = el("button", { class: "btn line small", onclick: () => { mapMode("hand"); if (M.svg) M.svg.scrollIntoView({ block: "center", behavior: "smooth" }); },
+    title: "지도 위 [손 위치] 모드: 지도를 누르면 x, y 가 채워진다" }, "지도에서 고르기");
+  HK.bSolve = el("button", { class: "btn", onclick: hkSolve }, "풀기");
+  HK.bSend = el("button", { class: "btn", onclick: hkSend }, "보내기");
+  HK.bCheck = el("button", { class: "btn line", onclick: () => hkFk(true), title: "지금 팔 자세(AK45 피드백·서보 보낸 값)로 FK → 손이 쥐는 점이 목표에서 몇 mm" }, "지금 손 위치 확인");
+  HK.vb = el("span", { class: "vbadge", hidden: true }, "가상");
+  HK.res = el("div", { class: "result hkres" }, "x, y, 높이, 손 방향을 정하고 [풀기]");
+  HK.meta = el("div", { class: "hkmeta" });
+  HK.gate = el("div", { class: "hkmeta" });
+  HK.chk = el("div", { class: "hkmeta" });
+  const root = el("div", { class: "hk" },
+    el("h2", { class: "sec" }, el("span", { class: "snum" }, "3"), "손 위치로 보내기"),
+    el("div", { class: "card" },
+      el("p", { class: "help", style: "margin-top:0" }, "손이 쥐는 점(큐브 중심)을 정하면 역기구학으로 팔 관절각을 풀어 3D 에 ",
+        el("b", { style: "color:#2f66d0" }, "파란 유령"), "으로 보이고, [보내기] 로 팔을 그 자세로 옮긴다. 손가락은 그대로 (아래 체크 시 벌림)."),
+      el("div", { class: "frow" }, el("b", {}, "x, y"), fld("x", "m · 왼쪽 +", f.x), fld("y", "m · 앞 −", f.y), pickMap, fromCube),
+      el("div", { class: "mctl", style: "margin-top:12px" }, el("span", { class: "mlabel" }, "높이 (책상 위)"), f.zr, f.zn, el("span", {}, "cm"), preset),
+      el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 방향 (잡을 큐브 yaw)"), f.yawr, f.yawn, el("span", {}, "°")),
+      el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 자세"), f.mode),
+      el("label", { class: "chk", style: "display:flex;gap:6px;align-items:center;margin:4px 0 0" }, f.open, "보낼 때 손가락도 벌리기 (집기 전 자세)"),
+      el("div", { class: "row", style: "align-items:center" }, HK.bSolve, HK.bSend, HK.bCheck, HK.vb),
+      HK.res, HK.meta, HK.gate, HK.chk,
+      el("details", { class: "log" }, el("summary", {}, "자세히"),
+        el("p", { class: "help" }, "점 = 손이 쥐는 큐브의 중심. 파지 중심(end_effector)은 손 축 따라 21.5 mm 위 (env.pick_pose 와 같음, 손끝 수직이면 0). " +
+          "손 방향 = 이 손이 쥘 큐브의 yaw (지도와 같은 기준, 위에서 반시계). 큐브의 세 면 × 손 그대로/반 바퀴 중 관절 한계(calibration 의 보낼 수 있는 범위, 손 비틀기 ±88°) 안에서 " +
+          "위치 5 mm · 방향 1.5° 안으로 풀리는 해, 그중 지금 자세에서 가장 가까운 해를 고른다. team-jax/IK env.py·ik.py 를 그대로 쓴다 (서버 자식 프로세스, 첫 풀이는 모델 읽기 1~3초). " +
+          "실물 책상(어깨 아래 47.75 cm)에서는 손끝을 수직으로 세우면 팔이 거의 안 닿아서 IK 셋업이 손을 40° 기울여 잡는다 — 그래서 기본이 '큐브 잡는 자세'. " +
+          "[보내기] = 각도 제어 탭과 같은 /api/joint/send (같은 막힘 규칙·확인창). 지금 자세 → 목표까지 관절마다 직선으로 가며, 중간 경로의 충돌은 검사하지 않는다."))));
+  $("#handik").append(root);
+  hkChanged();
+}
+async function hkSolve() {
+  const v = hkVals();
+  if (!v) { toast("x, y, 높이를 숫자로", "error"); return; }
+  HK.busy = true; HK.sol = null; HK.check = null; HK.last = null;
+  HK.res.textContent = "⏳ 푸는 중… (처음엔 MuJoCo 모델을 읽느라 몇 초 더)"; HK.res.className = "result hkres run";
+  hkRender();
+  let r;
+  try {
+    r = await (await fetch("/api/ik/hand", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(v) })).json();
+  } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
+  HK.busy = false; HK.req = v; HK.last = r;
+  HK.sol = r.ok ? r : null;
+  hkRender(); updateIkView();
+}
+function hkRender() {
+  if (!HK.res || !S) return;
+  const r = HK.last, v = hkVals();
+  const stale = r && !hkSame(v, HK.req);
+  HK.vb.hidden = !VIRT();
+  if (!HK.busy && r) {
+    const hand = r.flip ? "손 반 바퀴" : "손 그대로";
+    if (r.ok) {
+      HK.res.textContent = `✅ 풀림 · 오차 ${r.pos_err_mm} mm · 방향 ${r.ang_err_deg}° · ${hand}, 손 돌림 ${degS(r.hand_turn)}` +
+        (r.warn && r.warn.length ? "\n⚠ " + r.warn.join(" · ") : "") + (stale ? "\n(값이 바뀜 — 다시 풀기)" : "");
+      HK.res.className = "result hkres " + (stale || (r.warn && r.warn.length) ? "warn" : "ok");
+    } else {
+      HK.res.textContent = "⛔ " + (r.reason || "못 풂") + (stale ? "\n(값이 바뀜 — 다시 풀기)" : "");
+      HK.res.className = "result hkres bad";
+    }
+    const j = r.joints;
+    HK.meta.textContent = j ? `${r.ok ? "" : "가장 가까운 해: "}` + ARM7.map((n) => `${jLabel(n).replace(/ \(.*\)$/, "")} ${f1(j[n])}`).join(" · ") +
+      (r.max_move_deg != null ? ` · 지금에서 최대 ${r.max_move_deg}° 이동` : "") + (r.at_limit && r.at_limit.length ? ` · 한계에 닿은 관절: ${r.at_limit.join(", ")}` : "") +
+      (r.finger_low_mm != null ? ` · 벌린 손가락 끝 책상 위 ${r.finger_low_mm} mm` : "") + (r.load_s ? ` · 모델 읽기 ${r.load_s}초` : "") + (r.ms != null ? ` · 풀이 ${r.ms} ms` : "") : "";
+  } else if (!HK.busy) HK.meta.textContent = "";
+  const g = S.gate || { joints: {} };
+  const blocked = ARM7.filter((n) => !((g.joints || {})[n] || {}).ok);
+  HK.bSolve.disabled = HK.busy;
+  HK.bSend.disabled = HK.busy || !HK.sol || stale || blocked.length > 0;
+  HK.gate.textContent = blocked.length ? `보내기 막힘: ${blocked.length === ARM7.length ? shortGate(g) : blocked.map((n) => `${n} (${(g.joints[n] || {}).reason || "?"})`).join(", ")}`
+    : `${VIRT() ? "(가상) " : ""}보낼 수 있음 — 각도 제어 탭과 같은 길`;
+  HK.gate.className = "hkmeta" + (blocked.length ? " bad" : "");
+  // 보낸 뒤 팔이 목표에 닿으면 FK 로 손 위치 한 번 확인
+  if (HK.sentAt && HK.sol) {
+    const p = S.pose || {}, done = ARM7.every((n) => p[n] && Math.abs(p[n].deg - HK.sol.joints[n]) < 0.3);
+    if (done) { HK.sentAt = 0; hkFk(false); }
+    else if (performance.now() - HK.sentAt > 120000) HK.sentAt = 0;
+  }
+  if (HK.check) {
+    const c = HK.check;
+    HK.chk.textContent = c.ok ? `지금 손이 쥐는 점 (FK): x ${cm(c.grip_real[0])} · y ${cm(c.grip_real[1])} cm · 책상 위 ${((c.grip_real[2] + HK.mapD) * 100).toFixed(1)} cm` +
+      (c.diff_mm != null ? ` → 목표와 ${c.diff_mm.toFixed(1)} mm 차이` : "") + ` · 손 축 기울기 ${c.axis_tilt_deg}°` : "FK 못 함: " + (c.reason || "?");
+  } else HK.chk.textContent = "";
+}
+async function hkFk(manual) {
+  const mode = (HK.req && HK.req.mode) || (HK.f && HK.f.mode.value) || "grasp";
+  let r;
+  try { r = await (await fetch("/api/ik/fk", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode }) })).json(); }
+  catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
+  const t = HK.req;
+  if (r.ok && t) r.diff_mm = Math.hypot(r.grip_real[0] - t.x, r.grip_real[1] - t.y, r.grip_real[2] - t.z) * 1000;
+  HK.check = r; hkRender();
+  if (manual && !r.ok) toast("FK 못 함: " + (r.reason || "?"), "error");
+}
+async function hkSend() {
+  const r = HK.sol;
+  if (!r) return;
+  const g = S.gate || { joints: {} }, cal = calJ();
+  if (!HK.warned) {
+    const ok = confirm((VIRT() ? "(가상 팔) " : "⚠ 실제 모터가 움직인다.\n\n") +
+      "지금 자세 → 목표 자세까지 관절마다 직선으로 간다 (arm_control_node 의 max_speed 램프).\n" +
+      "중간 경로에서 팔·손이 책상이나 몸에 부딪히는지는 검사하지 않는다 — 길을 비우고 지켜본다.\n\n" +
+      `가장 많이 도는 관절: ${r.max_move_deg != null ? r.max_move_deg + "°" : "? (지금 자세 모름)"}\n\n계속할까요?`);
+    if (!ok) return;
+    HK.warned = true;
+  }
+  if (!confirmFirst()) return;
+  const joints = {};
+  for (const n of ARM7) joints[n] = Math.round(clampR(cal[n], r.joints[n]) * 100) / 100;
+  if (HK.f.open.checked) for (const [n, v] of Object.entries(r.open_fingers_deg || {})) if (cal[n] && (g.joints[n] || {}).ok) joints[n] = Math.round(clampR(cal[n], v) * 100) / 100;
+  const res = await post("/api/joint/send", { joints });
+  if (res.ok) {
+    HK.sentAt = performance.now(); HK.check = null;
+    for (const [n, v] of Object.entries(joints)) { A.sent[n] = v; if (A.built) setVal(n, v, true); }
+  }
+  hkRender();
+}
+function renderHandIk() {
+  if (!$("#handik") || !S) return;
+  if (!HK.f) { if (!((S.calibration || {}).joints || []).length) return; buildHandIk(); }
+  hkRender();
 }
 
 // ---------- 보정 안내 ----------
@@ -1171,7 +1353,7 @@ function initViewers() {
     VW.angle.load(S.robot.mesh_ok).then(renderViewers);
   }
   if (curTab === "ik" && !VW.ik) {
-    VW.ik = window.JaxViewer.create($("#v3d-ik"), { ghost: false });
+    VW.ik = window.JaxViewer.create($("#v3d-ik"), { ghost: true });   // 유령 = 손 위치로 보내기의 목표 자세
     VW.ik.load(S.robot.mesh_ok).then(updateIkView);
   }
 }
@@ -1205,7 +1387,14 @@ function updateIkView() {
   const o = S.ros.available ? S.ros.object_pose : null;
   VW.ik.setObject(o && o.frame_id === "shoulder_roll_axis" ? { x: o.x, y: o.y, z: o.z, yaw: o.yaw_deg } : null);
   const pbRun = VIRT() && ((((S.ros || {}).virtual_state || {}).playback) || {}).running;   // 가상 재생 중엔 가상 팔(실제 자세)을 보인다
-  VW.ik.setActual(T.view === "actual" || pbRun || !T.traj ? actualRad() : trajPose(T.frame));
+  // 손 위치로 보내기: 풀린 자세를 유령으로(손가락 등 나머지 관절은 지금 값), 목표점은 분홍 표시
+  const hs = HK.sol, hv = hkVals(), hshow = !!(hs && HK.req && hkSame(hv, HK.req));
+  VW.ik.setActual(T.view === "actual" || pbRun || !T.traj || hshow || HK.sentAt ? actualRad() : trajPose(T.frame));
+  if (hshow) {
+    const p = S.pose || {}, reached = ARM7.every((n) => p[n] && Math.abs(p[n].deg - hs.joints[n]) < 0.5);
+    VW.ik.setGhost(reached ? null : Object.assign(actualRad(), toRad(hs.joints)));
+  } else VW.ik.setGhost(null);
+  if (VW.ik.setHandMark) VW.ik.setHandMark(hv ? { x: hv.x, y: hv.y, z: hv.z } : null);
 }
 
 connect();

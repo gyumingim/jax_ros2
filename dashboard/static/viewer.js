@@ -236,6 +236,23 @@ export class Viewer {
     if (t) this.target.position.set(t.x, t.y, -this.d + CUBE / 2);
     this.dirty();
   }
+  setHandMark(p) {   // 손 위치로 보내기의 목표점(손이 쥐는 점): 분홍 구 + 책상까지 세로선
+    if (!this.handMark) {
+      const g = new THREE.Group();
+      g.add(new THREE.Mesh(new THREE.SphereGeometry(0.008, 16, 12), new THREE.MeshBasicMaterial({ color: 0xdb2777 })));
+      const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+      this.handLine = new THREE.Line(geo, new THREE.LineDashedMaterial({ color: 0xdb2777, dashSize: 0.01, gapSize: 0.008 }));
+      g.add(this.handLine);
+      this.handMark = g; this.scene.add(g);
+    }
+    this.handMark.visible = !!p;
+    if (p) {
+      this.handMark.position.set(p.x, p.y, p.z);
+      const h = Math.max(1e-3, p.z + this.d);
+      this.handLine.scale.set(1, 1, h); this.handLine.computeLineDistances();
+    }
+    this.dirty();
+  }
   setObject(o) {   // /object_pose (shoulder_roll_axis 틀): 보라 반투명 상자
     this.objMark.visible = !!o;
     if (o) { this.objMark.position.set(o.x, o.y, Number.isFinite(o.z) ? o.z : -this.d + CUBE / 2); this.objMark.rotation.set(0, 0, (o.yaw || 0) * Math.PI / 180); }

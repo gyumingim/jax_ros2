@@ -283,3 +283,12 @@ svg.rmap { display: block; width: 100%; height: auto; cursor: crosshair; touch-a
   .frow .field { width: calc(33% - 8px); min-width: 80px; }
   .rmap .mt { font-size: 21px; } .rmap .mlab { font-size: 21px; }
 }
+
+/* 손 위치로 보내기 */
+i.sw.hand { border: 2px solid #db2777; border-radius: 50%; width: 12px; height: 12px; }
+.rmap .mhand circle { fill: rgba(219, 39, 119, .12); stroke: #db2777; stroke-width: 3; }
+.rmap .mhand path { stroke: #db2777; stroke-width: 2; }
+.hk .frow .field { width: 110px; }
+.hk .mctl .num { min-width: 64px; }
+.hk .hkres { white-space: pre-line; }
+.hk .hkmeta { font-size: 13px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
