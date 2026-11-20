@@ -37,6 +37,10 @@ TILT_PULL = 0.05              # auto: 남는 자유도로 기울기를 0 쪽으�
 TOL_ANALYTIC = 0.0005         # 해석 IK 해의 MuJoCo FK 검증 (손목 중앙 0.5 mm)
 A3 = ("shoulder_roll", "upper_arm_roll", "elbow")   # 해석 IK 가 푸는 관절 (shoulder_yaw 고정, 손목 3 관절 지금 값)
 MAP_PARTS = max(1, min(8, (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸는 프로세스 수 (이 worker + 도우미)
+# 집는 점(손끝 사이, end_effector)을 큐브 중심보다 이만큼 위에 (2026-11-21 사용자: "1 cm 높게 잡아"). 큐브 5 cm 면 책상 위 3.5 cm.
+# 지도(grasp_eval)·계획(pick_plan: 집기·놓기 — 놓을 때도 큐브 바닥 = 책상)·IK 탭 기본 높이(ref_info → app.js)가 모두 이 값 하나를 쓴다.
+# 패드: 손가락 판 안쪽 면은 집는 점 −16 ~ +34 mm (손 축 따라). 닿는 곳(판 끝, 큐브 면 1 mm 안) −16 ~ +2 mm → 책상 위 19~37 mm, 큐브 면(0~50) 안.
+GRIP_ABOVE_CENTER = 0.010
 GRASP_TILT_TOL = 3.0          # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
 
@@ -115,8 +119,13 @@ class _Solver:
     def ref_info(self):
         """화면용: 손이 수직일 때 손목 중앙이 집는 점(site)보다 몇 m 위, 벌린 손가락 끝이 책상에 닿는 손목 높이."""
         return {"wrist_above_grip_vertical_m": round(self.wrist_above_site, 4),
+                "grip_above_table_m": round(self.grip_above_table(), 4),
                 "wrist_min_vertical_m": round(self.wrist_above_site - self.finger_below_site, 4),
                 "wrist_axes_gap_mm": round(self.wrist_axes_gap_mm, 2)}
+
+    def grip_above_table(self):
+        """큐브를 잡을(놓을) 때 집는 점의 책상 위 높이 (m) = 큐브 반 변 + GRIP_ABOVE_CENTER (5 cm 큐브면 0.035)."""
+        return float(self.E.OBJECT_HALF_SIZE) + GRIP_ABOVE_CENTER
 
     # ---- 좌표
     def to_sim(self, p):
@@ -754,7 +763,7 @@ class _Solver:
         fix = {k: float(v) for k, v in (b.get("fix_deg") or {}).items()}
         ranges.update({j: [v, v] for j, v in fix.items()})
         lim = self.set_ranges(ranges)
-        zc = -R.MAP_D + float(E.OBJECT_HALF_SIZE)
+        zc = -R.MAP_D + self.grip_above_table()   # 집는 점 높이 (큐브 중심 + GRIP_ABOVE_CENTER, 놓을 때도 같게)
         pc = np.asarray(self.to_sim([float(cube[0]), float(cube[1]), zc]))
         pt = np.asarray(self.to_sim([float(target[0]), float(target[1]), zc]))
         y = R.fold_yaw(yaw + R.SIM_FROM_REAL_YAW)
@@ -791,13 +800,13 @@ class _Solver:
                 "fixed": fix, "ms": round((time.time() - t0) * 1000)}
 
     # ---- 집을 수 있는 곳 (graspable): 해석 IK 로 책상 위 (x, y) 마다
-    # 정의: 큐브(5 cm)가 책상 위 (x, y) 에 있을 때, 손을 수직으로 내려 집는 점이 큐브 중심(책상 위 2.5 cm)에 오는 자세가 있나 =
+    # 정의: 큐브(5 cm)가 책상 위 (x, y) 에 있을 때, 손을 수직으로 내려 집는 점이 큐브 중심 + GRIP_ABOVE_CENTER(책상 위 3.5 cm)에 오는 자세가 있나 =
     #   (1) 손목 중앙 = (x, y, 책상 위 GRASP_WRIST_Z) 를 해석 IK(shoulder_yaw 고정, 관절 한계 = calibration 보낼 수 있는 범위)로 풀 수 있고
     #   (2) 그 해 중 하나에서 손목 두 관절(wrist_pitch·wrist_yaw, 한계 안)로 손 축을 수직 아래 GRASP_TILT_TOL 안으로 돌릴 수 있다.
     #   손 비틀기(hand_roll ±88°)는 손 축 둘레라 수직에 영향 없고, 큐브는 90° 마다 같아 176° 범위면 어떤 yaw 든 맞춘다 → 검사 안 함.
-    #   GRASP_WRIST_Z = 2.5 cm + 수직 손에서 손목↔집는 점 거리(ref_info, 24.35 cm) 를 0.5 cm 로 반올림 = 27 cm (IK 탭 기본·'큐브 잡는 높이' 와 같음).
+    #   GRASP_WRIST_Z = 3.5 cm + 수직 손에서 손목↔집는 점 거리(ref_info, 24.35 cm) 를 0.5 cm 로 반올림 = 28 cm (IK 탭 기본·'큐브 잡는 높이' 와 같음).
     def grasp_z(self):
-        return round((0.025 + self.wrist_above_site) * 200) / 200
+        return round((self.grip_above_table() + self.wrist_above_site) * 200) / 200
 
     def grasp_setup(self, ranges, sy_deg):
         """한계(shoulder_yaw = sy 고정) + 해석 IK 기하 + 도달 상한(어깨 roll 축 기준 손목 중앙 최대 거리)."""
@@ -891,9 +900,9 @@ class _Solver:
                 qs.append(q)
         if not qs:
             return 0, None, 0
-        # 2026-11-21: 초록 = '대시보드 계획(pick_plan)이 여기서 집을 수 있음'. 집는 점(손끝 사이)을 큐브 중심(책상 위 2.5 cm)에
+        # 2026-11-21: 초록 = '대시보드 계획(pick_plan)이 여기서 집을 수 있음'. 집는 점(손끝 사이)을 큐브 중심 + GRIP_ABOVE_CENTER(책상 위 3.5 cm)에
         # 두는 해 + 손가락 책상 여유 + 곧은 수직 내려가기 — 판정은 pick_plan.Planner.point_check 한 곳 (계획과 어긋나지 않게).
-        tipp = np.asarray(self.to_sim([x, y, 0.025 - self.R.MAP_D]))
+        tipp = np.asarray(self.to_sim([x, y, float(self.E.OBJECT_HALF_SIZE) - self.R.MAP_D]))   # 큐브 중심 (집는 점은 point_check 가 + GRIP_ABOVE_CENTER)
         ok, why, tilt = self._planner(S).point_check(tipp)
         self.last_why = why
         return (2 if ok else 1), tilt, len(qs)
@@ -923,7 +932,7 @@ class _Solver:
             for y in ys:
                 rows.append("".join(str(self.grasp_eval(S, x, y, verify=False)[0]) for x in xs))
         n = [sum(r.count(c) for r in rows) for c in "012"]
-        return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(),
+        return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(), "grip_above_table_m": self.grip_above_table(),
                 "counts": {"graspable": n[2], "wrist_only": n[1], "no": n[0]}, "tilt_tol_deg": GRASP_TILT_TOL,
                 "meaning": "초록(2) = 대시보드 계획(pick_plan)이 그 자리에서 집기·놓기 가능 (모든 큐브 yaw, 손가락 책상 여유 포함)",
                 "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000), "parts": parts}

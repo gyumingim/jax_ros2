@@ -4,11 +4,11 @@
 
 [계획 돌려 보기] 의 기본. 팀 계획(arm_control/pick_place.py: team-jax/IK motion1 MuJoCo 물리 시뮬, 자기 수치 IK)은
 지도(hand_ik.grasp_eval, 해석 IK)와 판정이 달라 초록 칸에서도 실패했다. 여기는 지도와 같은 hand_ik._Solver 로 푼다:
-  - 집는 점(end_effector site, 손끝 사이) = 큐브 중심(책상 위 2.5 cm), shoulder_yaw 0 고정, 손목 중앙으로 해석 IK
+  - 집는 점(end_effector site, 손끝 사이) = 큐브 중심 + GRIP_ABOVE_CENTER 1 cm (책상 위 3.5 cm, hand_ik 한 곳), shoulder_yaw 0 고정, 손목 중앙으로 해석 IK
     + 손목 2 관절로 손 최대한 아래 + 집는 점 오차만큼 손목을 옮겨 다시 (analytic_tip) — 지도와 같은 풀이.
   - 손 돌림: 손가락이 닫히는 축(site x)을 위에서 본 각(손 yaw)을 FK 로 재고, hand_roll(±88°)로 큐브 yaw 에 맞춘다
     (큐브는 90° 마다 같으니 yaw mod 90). 손목 관절이 이미 손을 돌린 만큼은 FK 로 재서 빼므로 자동으로 들어간다.
-  - 경유점: HOME(열림) → 큐브 위(집는 점 9 cm 위, 안 되면 1 cm 씩 낮춤) → 내려감(큐브 중심) → 손가락 닫기 → 들기(큐브 위)
+  - 경유점: HOME(열림) → 큐브 위(집는 점 9 cm 위, 안 되면 1 cm 씩 낮춤) → 내려감(집는 점 = 큐브 중심 + 1 cm) → 손가락 닫기 → 들기(큐브 위)
     → 놓을 자리 위 → 내려감(큐브 바닥 = 책상) → 손가락 열기 → 들기 → HOME.
   - 가지 고르기: 경유점마다 해석 IK 해(가지) × hand_roll 후보 중, 이웃 경유점 사이 관절 최대 이동각의 합이 가장 작은 줄
     (손 IK 의 '최소 회전' 규칙을 경로 전체로).
@@ -33,8 +33,9 @@ warnings.filterwarnings("ignore", message=".*reachmap.*")   # team env 가 impor
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path[:0] = [str(HERE), str(REPO / "arm_control"), str(REPO / "stm_bridge")]   # pick_place 로컬 실행과 같게
+from hand_ik import GRIP_ABOVE_CENTER   # noqa: E402  집는 점 = 큐브 중심 + 이것 (지도·계획·IK 탭 한 값)
 
-ABOVE_CM = (9.0, 7.0, 5.0, 3.0)   # 큐브·놓을 자리 위 경유점: 집는 점을 이만큼 (4.25 cm 미만이면 벌린 손가락 끝이 큐브 윗면보다 낮다:
+ABOVE_CM = (9.0, 7.0, 5.0, 3.0)   # 큐브·놓을 자리 위 경유점: 집는 점을 이만큼 (3.25 cm 미만이면 벌린 손가락 끝이 큐브 윗면보다 낮다:
                                   # 그때는 손가락이 큐브 양옆으로 곧게 내려가야 한다 — 손가락↔큐브 검사가 본다)
 APPROACH_TILTS = (0, 15, 30, 45, 60)   # 그 경유점 방향: 수직에서 기울기(°) × 방위 45° 마다
 APPROACH_AZ = 45
@@ -60,11 +61,12 @@ except Exception:   # real_arm 을 못 읽는 곳(팀 PC 등)에선 보수적으
     MAX_ACC = 90.0
     print("pick_plan: real_arm.DEFAULTS 를 못 읽어 MAX_ACC 90 °/s² 가정", file=sys.stderr)
 TABLE_MARGIN = 0.008         # 손가락 충돌 상자·들고 가는 큐브 바닥이 책상 면보다 이만큼(m) 위여야 (실물 책상 높이 MAP_D 0.4775 는 가정 —
-                             # 실측 전엔 오차가 이 여유를 먹는다. README). 손이 수직이면 벌린 손가락 9.7 mm·쥔 손가락 8.5 mm 위라 통과,
-                             # 12° 기울면 4 mm 아래쪽 → 그런 곳은 '집을 수 없음' (지도도 같은 판정: grasp_clear)
+                             # 실측 전엔 오차가 이 여유를 먹는다. README). 집는 점 = 큐브 중심이던 때는 수직 손에서 쥔 손가락 8.5 mm 위라
+                             # 손이 조금만 기울어도 못 지켰다 → 2026-11-21 집는 점 +1 cm (GRIP_ABOVE_CENTER, 수직이면 18.5 mm 위)
 YAW_SAMPLES = tuple(range(0, 90, 15))   # 지도 판정에서 볼 큐브 yaw (sim °, 90° 마다 같음)
-VERT_TILT = 0.5             # ° 지도: 잡는 자세 손이 이보다 기울면 '못 집음'. 수직이면 쥔 손가락 8.5 mm 위(여유 8 통과), 1° 면 7.9,
-                            # 2~5° 는 hand_roll 만 돌린 근사로 8 mm 를 넘어도 계획(다시 풂)에선 7.6~7.8 이라 거절됐다 (2026-11-21 plan_check)
+VERT_TILT = 90.0            # ° 지도: 잡는 자세 손이 이보다 기울면 '못 집음' — 2026-11-21 집는 점 +1 cm 부터 사실상 끔 (손가락 책상 여유
+                            # _roll_best 가 판정). 예전(집는 점 = 큐브 중심) 0.5: 수직이어도 쥔 손가락 8.5 mm 라 1° 만 기울어도 8 mm 를 못 지켰다.
+                            # +1 cm 면 수직 18.5 mm 위라 8~15° 기운 칸도 통과 (plan_check 로 확인, README)
 MAP_SLACK = 0.0003          # m 지도 판정의 책상 여유 덤: hand_roll 만 돌린 근사·중간 프레임 차이 (계획은 덤 없이 TABLE_MARGIN)
 MAP_TILTS = (15, 30)        # 지도가 보는 비스듬한 내려가기 (수직에서 °, APPROACH_TILTS 의 앞쪽). 계획은 45·60 도 보지만 지도는 시간 때문에 여기까지
 REASON = {1: "손목은 닿지만 손끝(집는 점)을 큐브에 못 맞춤", 0: "팔이 안 닿음"}   # hand_ik.graspcheck 와 같은 말
@@ -139,7 +141,7 @@ class Planner:
     # ---- 지도(집을 수 있는 곳)의 판정 = 이 계획기가 그 자리에서 집을 수 있나 (2026-11-21, 두 판정이 어긋나지 않게 여기 한 곳)
     def point_check(self, pc):
         """큐브 중심 pc (sim) 에서 이 계획기의 집기(=놓기·빠지기) 조건을 싸게: (됨?, 이유, 잡는 자세 손 기울기 °).
-        1) 집는 점 = 큐브 중심인 해 (analytic_tip, 모든 가지 → HOME 팔꿈치 가지 우선 = family).
+        1) 집는 점 = 큐브 중심 + GRIP_ABOVE_CENTER 인 해 (analytic_tip, 모든 가지 → HOME 팔꿈치 가지 우선 = family).
         2) 그 해에서 집는 점을 곧게 위로 min(ABOVE_CM) 까지 (descent 와 같은 한 걸음 _tip_step, 손 최대한 아래, 같은 가지),
            그 위는 손목을 옮겨 갈 높이 z_clear 까지 (transit 의 마지막 다리, 손목 2 cm 마다).
         3) 큐브 yaw 를 YAW_SAMPLES 로 돌려 가며 모두: hand_roll(±88°, 큐브는 90° 마다 같으니 roll 후보 1~2 개)을 맞춘 그 길에서
@@ -147,10 +149,11 @@ class Planner:
            hand_roll 만 바꾸고 다시 풀지 않는다 (손 축 둘레라 집는 점이 3 mm 안으로만 움직임 — 계획은 다시 풀어 정확히 검사).
         큐브는 손이 수직이면 손 축 둘레 대칭이라 yaw 와 상관없고, 기울면 yaw 에 따라 아래쪽 손가락이 달라 모든 yaw 를 본다."""
         np, s, lim = self.np, self.s, self.lim
-        qs, _ = s.analytic_tip(pc, self.S["q0"], lim, "position", tol=0.002)
-        qs = [q for q in qs if float(np.linalg.norm(self.grip(q) - pc)) <= TIP_TOL]
+        pg = self.grip_target(pc)
+        qs, _ = s.analytic_tip(pg, self.S["q0"], lim, "position", tol=0.002)
+        qs = [q for q in qs if float(np.linalg.norm(self.grip(q) - pg)) <= TIP_TOL]
         if not qs:
-            return False, "손끝(집는 점)을 큐브 중심에 못 맞춤", None
+            return False, f"손끝(집는 점)을 큐브 중심 +{GRIP_ABOVE_CENTER * 100:g} cm 에 못 맞춤", None
         qs = self.family(qs)
         tilts = [s.axis_tilt(s.fk(q)[1]) for q in qs]
         why = None
@@ -160,7 +163,7 @@ class Planner:
                 continue
             need = set(YAW_SAMPLES)
             for v in self._dirs():
-                path, w = self._rise(pc, q, v)
+                path, w = self._rise(pg, q, v)
                 if path is None:
                     why = why or w
                     continue
@@ -182,6 +185,12 @@ class Planner:
                        + " (실좌표) 에선 곧게 내려가는 길에서 손가락이 큐브·책상 여유에 걸림")
         return False, why or "곧게 내려가는 길 없음", min(tilts)
 
+    def grip_target(self, pc):
+        """큐브 중심 pc (sim) → 잡을(놓을) 때 집는 점 목표 = 위로 GRIP_ABOVE_CENTER (sim z = 위)."""
+        pg = self.np.array(pc, dtype=float)
+        pg[2] += GRIP_ABOVE_CENTER
+        return pg
+
     def _dirs(self):
         """지도가 보는 내려가기 방향: 수직, 그다음 MAP_TILTS 기울기 × 방위 APPROACH_AZ 마다 (계획 approaches 의 앞쪽과 같은 순서)."""
         np = self.np
@@ -199,11 +208,11 @@ class Planner:
             best = max(best, self.grasp_clearance(qq))
         return best
 
-    def _rise(self, pc, qg, v):
+    def _rise(self, pg, qg, v):
         """qg 에서 집는 점을 v 방향 곧게 min(ABOVE_CM) 까지 STEP_DESCENT 마다 (descent 의 거꾸로), 그 위 손목을 z_clear 까지
         2 cm 마다 (transit 의 마지막 다리). (자세 목록, None) 또는 (None, 이유)."""
         np, s = self.np, self.s
-        path, why = self._tip_path(pc, qg, v, min(ABOVE_CM) / 100)
+        path, why = self._tip_path(pg, qg, v, min(ABOVE_CM) / 100)
         if path is None:
             return None, why
         prev = path[-1]
@@ -572,18 +581,19 @@ def plan(a):
         code, _, _ = s.grasp_eval(P.S, x, y, verify=True)
         if code != 2:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {REASON[code]}"}
-    zc = 0.025 - R.MAP_D                     # 큐브 중심 높이 (실좌표, 어깨 축 기준)
-    pc = np.asarray(s.to_sim([cx, cy, zc]))
+    zc = float(s.E.OBJECT_HALF_SIZE) - R.MAP_D   # 큐브 중심 높이 (실좌표, 어깨 축 기준). 놓을 때도 큐브 바닥 = 책상
+    pc = np.asarray(s.to_sim([cx, cy, zc]))      # 큐브 중심 (sim) — 손가락↔큐브 검사·들고 가는 큐브
     pt = np.asarray(s.to_sim([tx, ty, zc]))
+    gc, gt = P.grip_target(pc), P.grip_target(pt)   # 집는 점 목표 = 큐브 중심 + GRIP_ABOVE_CENTER (집기·놓기)
     ycube = cyaw + R.SIM_FROM_REAL_YAW        # sim yaw (mod 90 만 쓴다)
     yplace = tyaw + R.SIM_FROM_REAL_YAW
     # 2) 경유점 후보
-    G = P.family(P.candidates(pc, ycube))
-    Pl = P.family(P.candidates(pt, yplace))
+    G = P.family(P.candidates(gc, ycube))
+    Pl = P.family(P.candidates(gt, yplace))
     for name, c in (("큐브를 잡는 자세", G), ("놓는 자세", Pl)):
         if not c:
             return {**out, "status": "unreachable", "reason": f"{name}: 손 방향(yaw)까지 맞는 해 없음"}
-    # 집는 점은 그대로(큐브 중심), 손가락이 책상 위 TABLE_MARGIN 을 지키는 해만. 없으면 그 자리는 집을 수 없음
+    # 집는 점은 그대로(큐브 중심 + GRIP_ABOVE_CENTER), 손가락이 책상 위 TABLE_MARGIN 을 지키는 해만. 없으면 그 자리는 집을 수 없음
     for name, c in (("큐브를 잡는 자세", G), ("놓는 자세", Pl)):
         if not any(P.grasp_clearance(q) >= TABLE_MARGIN for q in c):
             best = max(c, key=P.grasp_clearance)
@@ -673,8 +683,8 @@ def plan(a):
         return {"bad": bad, "c": c + pk["c"], "q": (qa, qg, qb, qp), "frames": fr, "marks": mk, "hit": hit, "bp": bp, "fb": fb}
 
     ie = s.arm.index("elbow")
-    pick_it = P.approaches(pc, G, P.hand_axis(g_ref))
-    place_it = P.approaches(pt, Pl, P.hand_axis(p_ref))
+    pick_it = P.approaches(gc, G, P.hand_axis(g_ref))
+    place_it = P.approaches(gt, Pl, P.hand_axis(p_ref))
     pk = first_pk = None
     tries_a = 0
     for ap in pick_it:
@@ -724,8 +734,8 @@ def plan(a):
     traj_q = [list(map(float, q)) + list(map(float, f)) for q, f in frames]
     sy = s.arm.index("shoulder_yaw")   # 0 고정 (HOME 만 6.3°: 그 사이 보간은 범위 안)
     over = [n for k, n in enumerate(s.arm) if k != sy and any(not (lim[k, 0] - 1e-4 <= q[k] <= lim[k, 1] + 1e-4) for q, _ in frames)]
-    grip_err = float(np.linalg.norm(P.grip(qg) - pc))
-    place_err = float(np.linalg.norm(P.grip(qp) - pt))
+    grip_err = float(np.linalg.norm(P.grip(qg) - gc))
+    place_err = float(np.linalg.norm(P.grip(qp) - gt))
 
     def pad_face(q, yaw):
         """손가락이 닫히는 축(site x)과 가장 가까운 큐브 옆면 법선 사이 3D 각 (°). 손이 기울면 0 이 아닐 수 있다."""
@@ -752,7 +762,7 @@ def plan(a):
     if fallback:
         problems.append("손목 높이 유지 길을 못 찾아 관절 공간 직선으로 감: " + ", ".join(fallback))
     if grip_err > TIP_TOL or place_err > TIP_TOL:
-        problems.append(f"집는 점이 큐브 중심에서 잡을 때 {grip_err * 1000:.1f} mm, 놓을 때 {place_err * 1000:.1f} mm")
+        problems.append(f"집는 점이 목표(큐브 중심 +{GRIP_ABOVE_CENTER * 100:g} cm)에서 잡을 때 {grip_err * 1000:.1f} mm, 놓을 때 {place_err * 1000:.1f} mm")
     status = "playable" if not problems else ("finger below table" if below else "finger hits cube" if (hit_pick or hit_place) else "check failed")
     wp = [{"label": labels[k], "frame": i, "t_s": round(i * DT, 2),
            "joints_deg": {n: round(math.degrees(float(v)), 2) for n, v in zip(s.arm, frames[i][0])},

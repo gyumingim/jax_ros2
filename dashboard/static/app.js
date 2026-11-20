@@ -752,7 +752,7 @@ async function graspLoad() {
     if (my !== G.seq) return;
     if (!d.ok) { G.data = null; if (G.note) G.note.textContent = "⚠ 집을 수 있는 곳 계산 실패: " + (d.reason || "?"); graspPaint(); return; }
     G.data = d;
-    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손끝(집는 점)을 큐브 중심(책상 위 2.5 cm)에 · 어깨 옆 ${d.shoulder_yaw}°`;
+    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손끝(집는 점)을 큐브 중심 +1 cm(책상 위 ${d.grip_above_table_m != null ? +(d.grip_above_table_m * 100).toFixed(1) : 3.5} cm)에 · 어깨 옆 ${d.shoulder_yaw}°`;
     graspPaint();
   } catch (e) { if (my === G.seq && G.note) G.note.textContent = "⚠ 집을 수 있는 곳을 못 받음 (서버)"; }
 }
@@ -887,7 +887,7 @@ async function mapCheckIk(v) {
     M.res.textContent = `⛔ IK: ${why}${fx} · ${ms} ms — 그래도 계획 돌려 보기는 됨 (시뮬이 다시 확인)`;
     M.res.className = "result bad";
   }
-  M.res.title = "실제 IK (hand_ik.pair): 파지마다 집기 = 기울기 자유 풀이, 놓기 = 같은 기울기 6D. 큐브 중심 = 책상 위 2.5 cm";
+  M.res.title = "실제 IK (hand_ik.pair): 파지마다 집기 = 기울기 자유 풀이, 놓기 = 같은 기울기 6D. 집는 점 = 큐브 중심 +1 cm = 책상 위 3.5 cm";
 }
 function checkText(r) {
   if (!r.ok) return ["⚠ 판정 못 함: " + (r.error || "?"), "warn"];
@@ -1033,9 +1033,11 @@ function hkSlider(lab, unit, min, max, step, val, digits) {
   return { range, num, set, row: el("div", { class: "mctl" }, el("span", { class: "mlabel" }, lab), range, num, el("span", {}, unit)) };
 }
 const HK_ABOVE = 0.2435;   // 손이 수직일 때 손목 중앙이 집는 점보다 위 (m) — 서버 ref_info 가 오면 그 값
-const HK_WRIST_Z0 = Math.round(2.5 + HK_ABOVE * 100);   // 손목 기준 기본 높이 = 집는 점 2.5 cm 에 해당 (27 cm)
+const HK_GRIP_CM = 3.5;   // 큐브 잡는 높이: 집는 점 = 큐브 중심 + 1 cm = 책상 위 3.5 cm (hand_ik.GRIP_ABOVE_CENTER) — 서버 ref_info 가 오면 그 값
+const HK_WRIST_Z0 = Math.round(HK_GRIP_CM + HK_ABOVE * 100);   // 손목 기준 기본 높이 = 집는 점 3.5 cm 에 해당 (28 cm)
 const hkAbove = () => (HK.good && HK.good.ref_info && HK.good.ref_info.wrist_above_grip_vertical_m) || HK_ABOVE;
-const hkCubeZ = () => HK.f.ref.value === "wrist" ? Math.round((2.5 + hkAbove() * 100) * 2) / 2 : 2.5;
+const hkGripCm = () => { const r = HK.good && HK.good.ref_info; return r && r.grip_above_table_m != null ? +(r.grip_above_table_m * 100).toFixed(1) : HK_GRIP_CM; };
+const hkCubeZ = () => HK.f.ref.value === "wrist" ? Math.round((hkGripCm() + hkAbove() * 100) * 2) / 2 : hkGripCm();
 function hkRefUi() {   // 큐브 잡는 높이 버튼: 손목 기준은 수직 손에서만 계산이 맞음
   HK.preset.hidden = HK.f.ref.value === "wrist" && HK.f.mode.value !== "vertical";   // 위치만이면 손목 각에 따라 달라 숨김
   HK.preset.textContent = `큐브 잡는 높이 (${hkCubeZ()} cm)`;
@@ -1054,7 +1056,7 @@ function buildHandIk() {
   f.y = hkSlider("y (앞 −)", "m", -0.45, 0.05, 0.005, -0.3, 3);
   // 기준점: 손목 중앙(기본, 손목 굽힘·비틀기 축의 교점) / 손가락 사이(집는 점). 높이 = 그 기준점의 책상 위 높이
   // 사용자 2026-11-20 밤: 기준점 = 손끝(집는 점) 기본, 역기구학은 손목 중앙으로 풀고 손이 기운 만큼 손목을 옮겨 맞춤
-  f.z = hkSlider("높이 (집는 점, 책상 위)", "cm", 0, 40, 0.5, 2.5, 1);
+  f.z = hkSlider("높이 (집는 점, 책상 위)", "cm", 0, 40, 0.5, HK_GRIP_CM, 1);
   f.ref = el("select", {}, el("option", { value: "grip" }, "손끝 사이 (집는 점, 기본)"), el("option", { value: "wrist" }, "손목 중앙"));
   f.ref.addEventListener("change", () => hkRefChanged());
   f.yaw = hkSlider("손 방향 (잡을 큐브 yaw)", "°", -45, 45, 1, 0, 0);
@@ -1088,8 +1090,8 @@ function buildHandIk() {
       }
     }
   });
-  // 큐브 잡는 높이: 집는 점이 큐브 중심(책상 위 2.5 cm)에 오는 높이 — 손목 기준이면 수직 손에서 + 손목↔집는 점 거리(24.35 cm)
-  HK.preset = el("button", { class: "btn line small", onclick: () => { f.z.set(hkCubeZ()); hkEdit(false); }, title: "집는 점 = 큐브(5 cm) 중심 = 책상 위 2.5 cm" }, "큐브 잡는 높이");
+  // 큐브 잡는 높이: 집는 점이 큐브 중심 +1 cm(책상 위 3.5 cm)에 오는 높이 — 손목 기준이면 수직 손에서 + 손목↔집는 점 거리(24.35 cm)
+  HK.preset = el("button", { class: "btn line small", onclick: () => { f.z.set(hkCubeZ()); hkEdit(false); }, title: "집는 점 = 큐브(5 cm) 중심 + 1 cm = 책상 위 3.5 cm (패드가 큐브 옆면 위쪽을 쥠)" }, "큐브 잡는 높이");
   f.z.row.append(HK.preset);
   const fromCube = el("button", { class: "btn line small", title: "위 지도의 큐브 x, y, yaw 를 가져오기", onclick: () => {
     const v = mapVals(); if (!v.cube) { toast("지도에 큐브가 없음", "error"); return; }
