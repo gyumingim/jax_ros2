@@ -739,13 +739,14 @@ function mapVision(o) {
   M.gVis.setAttribute("visibility", "visible");
 }
 // ---------- 집을 수 있는 곳 (해석 IK) ----------
-// 정의(서버 hand_ik.grasp_eval): 손목 중앙 = 큐브 위 책상 위 27 cm 가 해석 IK(어깨 옆 고정, 관절 한계 안)로 풀리고,
-// 그 자세에서 손목 두 관절로 손을 수직 아래 3° 안으로 돌릴 수 있으면 '집을 수 있음'. 지도 = 1 cm 격자, 비전 큐브 = 그 점 그대로.
+// 정의(서버 hand_ik.grasp_eval → pick_plan.Planner.point_check, 2026-11-21): '대시보드 계획이 여기서 집기·놓기 가능' —
+// 손끝을 큐브 중심에 + 손가락이 책상 위 8 mm 이상 + 큐브 위 3 cm 에서 곧게 내려가는 길(손가락이 큐브에 안 닿음), 큐브 yaw 모두.
+// 지도 = 1 cm 격자, 비전 큐브 = 그 점 그대로.
 const G = { data: null, seq: 0, vis: null, visKey: null, visBusy: false };
 const graspSy = () => (HK.f && HK.f.fix.checked ? parseFloat(HK.f.fixv.value) || 0 : 0);
 async function graspLoad() {
   const my = ++G.seq, sy = graspSy();
-  if (G.note) G.note.textContent = "집을 수 있는 곳 계산 중… (처음 한 번 약 10초)";
+  if (G.note) G.note.textContent = "집을 수 있는 곳 계산 중… (처음 한 번 약 1분)";
   try {
     const d = await (await fetch(`/api/ik/graspmap?shoulder_yaw=${encodeURIComponent(sy)}`)).json();
     if (my !== G.seq) return;
@@ -783,7 +784,7 @@ function graspAt(p) {   // 격자 칸 코드: 2 됨, 1 손목만 닿음, 0 안 �
 }
 function graspHover(p) {
   const c = graspAt(p);
-  return c == null ? "" : c === 2 ? " · ✅ 집을 수 있음" : c === 1 ? " · ❌ 못 집음 (손을 수직으로 못 내림)" : " · ❌ 못 집음 (팔이 안 닿음)";
+  return c == null ? "" : c === 2 ? " · ✅ 집을 수 있음" : c === 1 ? " · ❌ 못 집음 (손이 기울어 손가락이 책상에 닿거나, 곧게 내려가는 길 없음)" : " · ❌ 못 집음 (팔이 안 닿음)";
 }
 async function graspVision(o) {   // 비전 큐브 자리 그대로 판정 (격자 칸 아님). 1 mm·어깨 옆 값이 바뀌면 다시.
   if (!o) { G.vis = null; G.visKey = null; return; }

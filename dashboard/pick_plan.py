@@ -12,7 +12,7 @@
     → 놓을 자리 위 → 내려감(큐브 바닥 = 책상) → 손가락 열기 → 들기 → HOME.
   - 가지 고르기: 경유점마다 해석 IK 해(가지) × hand_roll 후보 중, 이웃 경유점 사이 관절 최대 이동각의 합이 가장 작은 줄
     (손 IK 의 '최소 회전' 규칙을 경로 전체로).
-  - 경유점 사이는 관절 공간 보간(부드러운 시작·끝), 프레임 간격 dt 0.02 s, 가장 빠른 관절이 max_speed(°/s) 를 안 넘게.
+  - 경유점 사이는 관절 공간 보간, 사다리꼴 시간(가장 빠른 관절이 max_speed °/s, 실물 램프 가속 max_acc °/s² 를 안 넘게), 프레임 간격 dt 0.02 s.
   - 프레임마다 손가락 충돌 상자 가장 낮은 점이 책상 위인지 (lowest_finger_z) 검사, 아니면 상태 'finger below table'.
 물리·쥐기 시뮬은 없다: 큐브가 실제로 잡히고 미끄러지지 않는지는 이 계획이 모른다 (팀 시뮬 계획은 '팀 시뮬 계획 (물리)').
 
@@ -39,23 +39,51 @@ ABOVE_CM = (9.0, 7.0, 5.0, 3.0)   # 큐브·놓을 자리 위 경유점: 집는 
 APPROACH_TILTS = (0, 15, 30, 45, 60)   # 그 경유점 방향: 수직에서 기울기(°) × 방위 45° 마다
 APPROACH_AZ = 45
 STEP_TRANSIT = 0.01         # 옮겨 가는 길: 손목 중앙 1 cm 마다 IK
-STEP_DESCENT = 0.01         # 내려가기·들기: 집는 점 1 cm 마다 IK (그 사이는 관절 보간 — 옆으로 1 mm 안팎)
+STEP_DESCENT = 0.005        # 내려가기·들기: 집는 점 0.5 cm 마다 IK (그 사이는 관절 보간). 1 cm 이면 손목 2 관절이 한계에 닿는 곳에서
+                            # 한 걸음에 팔이 15° 넘게 움직여 '가지 튐' 으로 버려졌다 (2026-11-21 지도 판정과 같이 0.5)
 FALLBACK_COST = 10.0        # 길을 못 찾아 관절 직선으로 가는 구간의 벌점 (rad, 고르기에서 뒤로)
 TRANSIT_LIFTS = (0.0, 0.03, 0.06, None)   # 옮겨 가는 길의 높이: max(두 끝, 하한) + 이만큼 (None = 곧은 선)
 CLEAR_CM = 3.0               # 옮겨 갈 때 손가락 끝이 큐브 윗면보다 이만큼 위 (손목 높이 하한)
 JUMP_DEG = 15.0             # 그 사이 팔 관절이 이보다 크게 튀면 가지가 끊긴 것 (그 길 버림)
 SAME_BRANCH_DEG = 2.0       # 길 끝 해가 목표 자세와 같은 가지인가 (팔 3 관절 차이)
-MAX_TRIES = 15               # 손가락이 큐브에 닿지 않는 접근을 찾을 때 볼 후보 수 (집기·놓기 각각)
+MAX_TRIES = 100               # 손가락이 큐브에 닿지 않는 접근을 찾을 때 볼 후보 수 (집기·놓기 각각)
 DT = 0.02                    # 프레임 간격 (팀 계획과 같은 50 Hz)
 GRIP_S = 0.8                 # 손가락 닫기·열기 시간 (팀: 한 스텝 0.025 씩 → 40 스텝 = 0.8 s)
 GRIP_HOLD_S = 0.2            # 닫은/연 뒤 기다림
 YAW_TOL = 2.0                # 손 yaw 가 큐브 면에서 이 각(°) 안
 TIP_TOL = 0.005              # 집는 점 오차 5 mm (지도와 같은 TOL_POS)
-SMOOTH_PEAK = 1.5            # 3차 smoothstep 의 최대 속도 / 평균 속도
+TRACK_LAG_DEG = 2.0          # 실물 램프(real_arm)가 순항 중 늦게 따라가는 각 상한 → 순항 속도 √(2·max_acc·이것) = 19 °/s (max_acc 90)
+try:   # 실물 램프 가속(°/s²) — real_arm.DEFAULTS 한 곳에서 읽는다 (계획 프레임을 실물이 따라갈 수 있게)
+    from real_arm import DEFAULTS as _REAL
+    MAX_ACC = float(_REAL["max_acc"])
+except Exception:   # real_arm 을 못 읽는 곳(팀 PC 등)에선 보수적으로 같은 기본값 — 경고를 남긴다
+    MAX_ACC = 90.0
+    print("pick_plan: real_arm.DEFAULTS 를 못 읽어 MAX_ACC 90 °/s² 가정", file=sys.stderr)
 TABLE_MARGIN = 0.008         # 손가락 충돌 상자·들고 가는 큐브 바닥이 책상 면보다 이만큼(m) 위여야 (실물 책상 높이 MAP_D 0.4775 는 가정 —
                              # 실측 전엔 오차가 이 여유를 먹는다. README). 손이 수직이면 벌린 손가락 9.7 mm·쥔 손가락 8.5 mm 위라 통과,
                              # 12° 기울면 4 mm 아래쪽 → 그런 곳은 '집을 수 없음' (지도도 같은 판정: grasp_clear)
+YAW_SAMPLES = tuple(range(0, 90, 15))   # 지도 판정에서 볼 큐브 yaw (sim °, 90° 마다 같음)
+VERT_TILT = 0.5             # ° 지도: 잡는 자세 손이 이보다 기울면 '못 집음'. 수직이면 쥔 손가락 8.5 mm 위(여유 8 통과), 1° 면 7.9,
+                            # 2~5° 는 hand_roll 만 돌린 근사로 8 mm 를 넘어도 계획(다시 풂)에선 7.6~7.8 이라 거절됐다 (2026-11-21 plan_check)
+MAP_SLACK = 0.0003          # m 지도 판정의 책상 여유 덤: hand_roll 만 돌린 근사·중간 프레임 차이 (계획은 덤 없이 TABLE_MARGIN)
+MAP_TILTS = (15, 30)        # 지도가 보는 비스듬한 내려가기 (수직에서 °, APPROACH_TILTS 의 앞쪽). 계획은 45·60 도 보지만 지도는 시간 때문에 여기까지
 REASON = {1: "손목은 닿지만 손끝(집는 점)을 큐브에 못 맞춤", 0: "팔이 안 닿음"}   # hand_ik.graspcheck 와 같은 말
+
+
+def _trap(t, T, L, v, acc):
+    """사다리꼴 속도(최대 v, 가속 acc, 총 시간 T, 거리 L)로 t 초에 간 거리. 짧으면 삼각형(최대 속도 √(L·acc))."""
+    vp = min(v, math.sqrt(L * acc))
+    ta = vp / acc
+    if t <= 0:
+        return 0.0
+    if t >= T:
+        return L
+    if t < ta:
+        return 0.5 * acc * t * t
+    if t > T - ta:
+        r = T - t
+        return L - 0.5 * acc * r * r
+    return 0.5 * acc * ta * ta + vp * (t - ta)
 
 
 def _cmd_ranges(cal_file):
@@ -86,22 +114,142 @@ def _find_ik(path):
 
 
 class Planner:
-    def __init__(self, ik_dir, ranges):
-        import hand_ik
-        self.s = s = hand_ik._Solver(str(ik_dir))
+    def __init__(self, ik_dir, ranges, solver=None, setup=None):
+        """solver/setup: 지도(hand_ik worker)가 자기 _Solver 와 grasp_setup 결과로 이 계획기의 집기 조건(point_check)을 쓴다."""
+        if solver is None:
+            import hand_ik
+            solver = hand_ik._Solver(str(ik_dir))
+        self.s = s = solver
         self.np = np = s.np
-        self.S = s.grasp_setup(ranges, 0.0)          # 지도와 같은 한계 (shoulder_yaw 0 고정)
+        self.S = setup if setup is not None else s.grasp_setup(ranges, 0.0)   # 지도와 같은 한계 (shoulder_yaw 0 고정)
         self.lim = self.S["lim"]
         self.hr = s.arm.index("hand_roll")
         self.open = np.asarray(s.env.finger_targets(0.0), dtype=float)
         self.closed = np.asarray(s.env.finger_targets(1.0), dtype=float)   # 팀 계획이 들고 갈 때 쓰는 값 (grip 1.0)
         self.home = np.asarray(s.E.HOME_ARM_QPOS, dtype=float)
+        self.home0 = self.home.copy()
+        self.home0[s.arm.index("shoulder_yaw")] = 0.0   # 해석 IK 는 shoulder_yaw 0 고정 → 계획은 HOME 에서 먼저 그것만 0 으로
         self.cube_grip = float(getattr(s.E, "CUBE_GRIP", 1.0))
         # 옮겨 갈 때 손목 높이 하한: 손을 수직으로 내려도 벌린 손가락 끝이 큐브 윗면(5 cm) + CLEAR_CM 위
         self.z_clear = s.table_z + 0.05 + CLEAR_CM / 100 + (s.wrist_above_site - s.finger_below_site)
         self.obj_body = int(s.env.object_body_ids[0])
         self.cube_geom = [g for g in range(s.m.ngeom) if s.m.geom_bodyid[g] == self.obj_body][0]
         self.fgeoms = set(s.finger_geoms)   # 충돌하는 손 상자는 손가락 6 개뿐 (손바닥·서보 메시는 충돌 없음)
+
+    # ---- 지도(집을 수 있는 곳)의 판정 = 이 계획기가 그 자리에서 집을 수 있나 (2026-11-21, 두 판정이 어긋나지 않게 여기 한 곳)
+    def point_check(self, pc):
+        """큐브 중심 pc (sim) 에서 이 계획기의 집기(=놓기·빠지기) 조건을 싸게: (됨?, 이유, 잡는 자세 손 기울기 °).
+        1) 집는 점 = 큐브 중심인 해 (analytic_tip, 모든 가지 → HOME 팔꿈치 가지 우선 = family).
+        2) 그 해에서 집는 점을 곧게 위로 min(ABOVE_CM) 까지 (descent 와 같은 한 걸음 _tip_step, 손 최대한 아래, 같은 가지),
+           그 위는 손목을 옮겨 갈 높이 z_clear 까지 (transit 의 마지막 다리, 손목 2 cm 마다).
+        3) 큐브 yaw 를 YAW_SAMPLES 로 돌려 가며 모두: hand_roll(±88°, 큐브는 90° 마다 같으니 roll 후보 1~2 개)을 맞춘 그 길에서
+           잡는 자세 손가락(벌림·쥠) 책상 위 TABLE_MARGIN 이상, 벌린 손가락이 길 내내 책상 여유 위·큐브에 안 닿음.
+           hand_roll 만 바꾸고 다시 풀지 않는다 (손 축 둘레라 집는 점이 3 mm 안으로만 움직임 — 계획은 다시 풀어 정확히 검사).
+        큐브는 손이 수직이면 손 축 둘레 대칭이라 yaw 와 상관없고, 기울면 yaw 에 따라 아래쪽 손가락이 달라 모든 yaw 를 본다."""
+        np, s, lim = self.np, self.s, self.lim
+        qs, _ = s.analytic_tip(pc, self.S["q0"], lim, "position", tol=0.002)
+        qs = [q for q in qs if float(np.linalg.norm(self.grip(q) - pc)) <= TIP_TOL]
+        if not qs:
+            return False, "손끝(집는 점)을 큐브 중심에 못 맞춤", None
+        qs = self.family(qs)
+        tilts = [s.axis_tilt(s.fk(q)[1]) for q in qs]
+        why = None
+        for q, t in sorted(zip(qs, tilts), key=lambda c: c[1]):
+            if t > VERT_TILT or self._roll_best(q) < TABLE_MARGIN + MAP_SLACK:   # 손이 기울면 손가락이 여유 아래 (아래 참고)
+                why = why or f"손이 {t:.0f}° 기울어 손가락이 책상 위 {TABLE_MARGIN * 1000:.0f} mm 를 못 지킴"
+                continue
+            need = set(YAW_SAMPLES)
+            for v in self._dirs():
+                path, w = self._rise(pc, q, v)
+                if path is None:
+                    why = why or w
+                    continue
+                got = self._yaws_pass(pc, path, need)
+                if not got:
+                    continue
+                t1 = self.transit(self.home0, path[min(len(path) - 1, int(round(min(ABOVE_CM) / 100 / STEP_DESCENT)))], f_home=True)
+                if t1 is None:
+                    why = why or "HOME 에서 이 자리 위로 옮겨 가는 길이 없음 (팔 가지·도달 범위)"
+                    continue
+                if any(self.finger_low(q, self.open) < self.s.table_z + TABLE_MARGIN + MAP_SLACK for q in t1):
+                    why = why or "HOME 에서 옮겨 오는 길에 손가락이 책상 여유 아래 (어깨 가까운 곳: 손을 아래로 못 돌림)"
+                    continue
+                need -= got
+                if not need:
+                    return True, "집을 수 있음", min(tilts)
+            if need != set(YAW_SAMPLES):
+                why = ("큐브 yaw " + ", ".join(f"{y - s.R.SIM_FROM_REAL_YAW:+.0f}°" for y in sorted(need))
+                       + " (실좌표) 에선 곧게 내려가는 길에서 손가락이 큐브·책상 여유에 걸림")
+        return False, why or "곧게 내려가는 길 없음", min(tilts)
+
+    def _dirs(self):
+        """지도가 보는 내려가기 방향: 수직, 그다음 MAP_TILTS 기울기 × 방위 APPROACH_AZ 마다 (계획 approaches 의 앞쪽과 같은 순서)."""
+        np = self.np
+        out = []
+        for al in (0,) + MAP_TILTS:
+            for be in (range(0, 360, APPROACH_AZ) if al else (0,)):
+                a_, b_ = math.radians(al), math.radians(be)
+                out.append(np.array([math.sin(a_) * math.cos(b_), math.sin(a_) * math.sin(b_), math.cos(a_)]))
+        return out
+
+    def _roll_best(self, q):
+        hr, best = self.hr, -1.0
+        for r in self.np.linspace(self.lim[hr, 0], self.lim[hr, 1], 24):
+            qq = q.copy(); qq[hr] = r
+            best = max(best, self.grasp_clearance(qq))
+        return best
+
+    def _rise(self, pc, qg, v):
+        """qg 에서 집는 점을 v 방향 곧게 min(ABOVE_CM) 까지 STEP_DESCENT 마다 (descent 의 거꾸로), 그 위 손목을 z_clear 까지
+        2 cm 마다 (transit 의 마지막 다리). (자세 목록, None) 또는 (None, 이유)."""
+        np, s = self.np, self.s
+        path, why = self._tip_path(pc, qg, v, min(ABOVE_CM) / 100)
+        if path is None:
+            return None, why
+        prev = path[-1]
+        w = self.wrist(prev)
+        n = int(math.ceil((self.z_clear - w[2]) / 0.02))
+        for i in range(1, n + 1):
+            sols, _ = s.analytic_position(np.array([w[0], w[1], min(self.z_clear, w[2] + i * 0.02)]), prev, self.lim)
+            if not sols:
+                return None, "큐브 위로 손목을 옮겨 갈 높이까지 못 올림"
+            q = self._near(sols, prev)
+            if self._jump(q, prev):
+                return None, "큐브 위로 손목을 올리면 팔 가지가 바뀜"
+            path.append(q)
+            prev = q
+        return path, None
+
+    def _yaws_pass(self, pc, path, yaws):
+        """yaws 중 이 길(path)로 되는 것 (집합)."""
+        np, hr, lim = self.np, self.hr, self.lim
+        qg = path[0]
+        # 이웃 자세 사이 중간점도 (계획의 프레임은 그 사이 관절 보간)
+        poses = [qg] + [a + (b - a) * u for a, b in zip(path, path[1:]) for u in (0.5, 1.0)]
+        phi = self.hand_yaw(qg)
+        good = set()
+        for yaw in yaws:
+            d = ((yaw - phi + 45) % 90) - 45
+            ok = False
+            for k in (-2, -1, 0, 1, 2):
+                r = qg[hr] + math.radians(d + 90 * k)
+                if not (lim[hr, 0] - 1e-9 <= r <= lim[hr, 1] + 1e-9):
+                    continue
+                qs = []
+                for q in poses:
+                    qq = q.copy(); qq[hr] = r + (q[hr] - qg[hr])
+                    qs.append(qq)
+                if self.grasp_clearance(qs[0]) < TABLE_MARGIN + MAP_SLACK:
+                    continue
+                if any(self.finger_low(q, self.open) < self.s.table_z + TABLE_MARGIN + MAP_SLACK for q in qs):
+                    continue
+                if self.cube_hits([(q, self.open) for q in qs], range(len(qs)), pc, yaw):
+                    continue
+                ok = True
+                break
+            if ok:
+                good.add(yaw)
+        return good
 
     # ---- 손 yaw (위에서 본 손가락 닫히는 축 = site x 의 각, sim °)
     def hand_yaw(self, q):
@@ -145,10 +293,12 @@ class Planner:
                     out.append(qq)
         return out
 
-    def approaches(self, p, yaw_sim, axis, fam=True):
-        """큐브 위 경유점 후보 (h cm, 방향 v, 해 목록) 를 좋은 순서로 (게으르게). 집는 점 = p + h·v.
-        순서 점수 = v 와 잡는 자세 손 축(axis) 사이 각(°) + 5 × (9 − h cm): 손가락 방향 그대로 위로 빠지는 것, 높은 것 먼저.
-        지도 가장자리에선 바로 위로 못 올라가 (손을 아래로 못 돌림) 비스듬히 빠지는 길만 풀린다."""
+    def approaches(self, p, G, axis):
+        """큐브 위 경유점 후보를 좋은 순서로 (게으르게): 잡는 자세 qg(G) 마다 집는 점을 v 방향 곧게 h cm 올린 길 (_tip_path,
+        hand_roll 은 qg 그대로 — 지도 point_check 와 같은 걸음). yield {cm, 방향, pairs: [(위 자세 qa, qg, 내려가기 qa→qg)]}.
+        순서 점수 = 3 × (v 와 잡는 자세 손 축(axis) 사이 각 °) + 5 × (9 − h cm): 손가락 방향 그대로 위로 빠지는 것을 모든 높이에서
+        먼저, 그다음 높은 것. 2026-11-21: 예전엔 위 경유점을 따로(처음부터) 풀어 잡는 자세로 내려갔는데, 손목 관절이 한계에 닿는
+        곳에선 따로 푼 해가 없거나 다른 가지라 지도(이어서 올림)와 판정이 달랐다."""
         np = self.np
         opts = []
         for al in APPROACH_TILTS:
@@ -157,20 +307,28 @@ class Planner:
                 v = np.array([math.sin(a_) * math.cos(b_), math.sin(a_) * math.sin(b_), math.cos(a_)])
                 ang = math.degrees(math.acos(max(-1.0, min(1.0, float(v @ axis)))))
                 for cm in ABOVE_CM:
-                    opts.append((ang + 5.0 * (ABOVE_CM[0] - cm), cm, al, be, v))
+                    opts.append((3.0 * ang + 5.0 * (ABOVE_CM[0] - cm), cm, al, be, v))   # 손 축 방향(수직) 먼저, 그다음 높은 것
         opts.sort(key=lambda o: o[0])
-        hold = self.S["q0"].copy()
         for _, cm, al, be, v in opts:
-            pp = p + v * (cm / 100)
-            base, _ = self.s.analytic_tip(pp, hold, self.lim, "position", first=True)   # 빠른 거르기: 손 돌림 전 집는 점이 맞나
-            if not any(float(np.linalg.norm(self.grip(q) - pp)) <= TIP_TOL for q in base):
-                continue
-            c = self.candidates(pp, yaw_sim)
-            if fam:
-                e = self.s.arm.index("elbow")
-                c = [q for q in c if (q[e] < 0) == (self.home[e] < 0)]
-            if c:
-                yield {"cm": cm, "tilt_deg": al, "azimuth_deg": be, "v": v, "cands": c}
+            pairs = []
+            for qg in G:
+                path, _ = self._tip_path(p, qg, v, cm / 100)
+                if path is not None:
+                    pairs.append((path[-1], qg, path[::-1]))
+            if pairs:
+                yield {"cm": cm, "tilt_deg": al, "azimuth_deg": be, "v": v, "pairs": pairs}
+
+    def _tip_path(self, p, qg, v, top):
+        """qg(집는 점 = p)에서 집는 점을 v 방향 곧게 top(m) 까지 STEP_DESCENT 마다 (_tip_step, hand_roll 고정). (자세 목록, None) 또는 (None, 이유)."""
+        path, prev = [qg], qg
+        n = max(1, int(round(top / STEP_DESCENT)))
+        for k in range(1, n + 1):
+            q = self._tip_step(prev, p + v * (top * k / n), qg[self.hr])
+            if q is None:
+                return None, f"큐브 위 {top * k / n * 100:.1f} cm 까지 곧게 못 올라감 (같은 팔 가지)"
+            path.append(q)
+            prev = q
+        return path, None
 
     def hand_axis(self, q):
         return self.s.fk(q)[1][:, 2].copy()
@@ -262,6 +420,12 @@ class Planner:
         out[-1] = qt.copy()
         return out
 
+    def via_home(self, qa, qb, home0):
+        """곧장 옮겨 갈 길이 없으면 (두 자리가 팔 가지·도달 범위로 갈라져 있음) HOME 을 거쳐서: qa → HOME → qb. 없으면 None."""
+        t1 = self.transit(qa, home0, t_home=True)
+        t2 = self.transit(home0, qb, f_home=True) if t1 else None
+        return t1 + t2[1:] if t1 and t2 else None
+
     def family(self, cands):
         """HOME 과 같은 팔꿈치 방향(부호) 가지만. 반대 가지로 넘어가려면 팔을 쭉 펴야 해서(특이점) 공중에서 크게 휘두르게 된다.
         같은 가지 해가 없으면 그대로 (그때는 길을 못 찾아 관절 직선 → 검사에 걸림)."""
@@ -283,20 +447,8 @@ class Planner:
         prev, out = qa.copy(), [qa.copy()]
         for k in range(1, n + 1):
             p = pa + (pg - pa) * (k / n)
-            hold = prev.copy()
-            hold[self.hr] = qa[self.hr] + (qg[self.hr] - qa[self.hr]) * (k / n)
-            w = self.wrist(prev) + (p - self.grip(prev))
-            q = None
-            for _ in range(8):
-                sols, _ = s.analytic_position(w, hold, self.lim)
-                if not sols:
-                    return None
-                q = self._near(sols, prev)
-                e = p - self.grip(q)
-                if float(np.linalg.norm(e)) < 3e-4:
-                    break
-                w = w + e
-            if self._jump(q, prev):
+            q = self._tip_step(prev, p, qa[self.hr] + (qg[self.hr] - qa[self.hr]) * (k / n))
+            if q is None:
                 return None
             out.append(q)
             prev = q
@@ -305,23 +457,53 @@ class Planner:
         out[-1] = qg.copy()
         return out
 
+    def _tip_step(self, prev, p, roll):
+        """한 걸음: 집는 점을 p 로 (hand_roll = roll). 손목 목표 = 앞 손목 + (p − 앞 집는 점) 에서 해석 IK(손 최대한 아래) →
+        집는 점 오차만큼 손목을 옮겨 다시. 앞 가지에 가장 가까운 해, 튀면 None. descent·지도(_rise) 가 같이 쓴다."""
+        np, s = self.np, self.s
+        hold = prev.copy()
+        hold[self.hr] = roll
+        w = self.wrist(prev) + (p - self.grip(prev))
+        q = None
+        for _ in range(8):
+            sols, _ = s.analytic_position(w, hold, self.lim)
+            if not sols:
+                return None
+            q = self._near(sols, prev)
+            e = p - self.grip(q)
+            if float(np.linalg.norm(e)) < 3e-4:
+                break
+            w = w + e
+        return None if self._jump(q, prev) else q
+
     def arc(self, qs):
         np = self.np
         return float(sum(np.abs(b - a).max() for a, b in zip(qs, qs[1:])))
 
     def frames(self, qs, fa, fb, speed_deg_s, min_s=0.0):
-        """관절 목록 qs (꺾은선) 를 따라, 손가락 fa → fb. 길이 = 이웃 사이 관절 최대 이동각의 합(손가락 포함),
-        smoothstep 시간으로 — 가장 빠른 관절도 speed 를 안 넘는다. 첫 프레임 뺀 (q, f) 목록."""
+        """관절 목록 qs (꺾은선) 를 따라, 손가락 fa → fb. 길이 L = 이웃 사이 관절 최대 이동각의 합(손가락 포함).
+        시간은 사다리꼴 (2026-11-21): 속도 ≤ min(speed, √(2·MAX_ACC·TRACK_LAG_DEG)), 가속 ≤ MAX_ACC (실물 real_arm 램프의 max_acc) — 가장 빠른 관절도
+        둘 다 안 넘는다 (꺾은선 모서리에선 관절별 방향이 바뀌어 순간 가속이 더 클 수 있다: 1 cm 마다라 작다). min_s 보다 짧으면 늘인다.
+        첫 프레임 뺀 (q, f) 목록."""
         np = self.np
         fmove = float(np.abs(fb - fa).max())
         segs = [float(np.abs(b - a).max()) for a, b in zip(qs, qs[1:])]
         L = sum(segs)
-        n = max(1, int(math.ceil(max(math.degrees(max(L, fmove)) * SMOOTH_PEAK / (speed_deg_s * DT), min_s / DT))))
+        Lt = math.degrees(max(L, fmove))
+        acc = MAX_ACC
+        v = min(float(speed_deg_s), math.sqrt(2.0 * acc * TRACK_LAG_DEG))   # 실물 램프는 목표에서 멈추게 감속하므로 움직이는 목표를
+        #   v²/(2·acc) 만큼 늦게 따라간다 (30 °/s 면 5°) — 늦음을 TRACK_LAG_DEG 안으로: 순항 속도 √(2·acc·lag)
+        if Lt >= v * v / acc:
+            T = Lt / v + v / acc
+        else:
+            T = 2.0 * math.sqrt(Lt / acc) if Lt > 0 else 0.0
+        k_ = max(1.0, (min_s / T) if T > 0 else 1.0)      # min_s 로 늘이기: 시간 축만 늘림 (속도 1/k, 가속 1/k²)
+        Ts = max(T * k_, min_s)
+        n = max(1, int(math.ceil(Ts / DT - 1e-9)))
         cum = np.concatenate([[0.0], np.cumsum(segs)])
         out = []
         for k in range(1, n + 1):
-            t_ = k / n
-            u = t_ * t_ * (3 - 2 * t_)
+            u = _trap(k / n * T, T, Lt, v, acc) / Lt if Lt > 0 and T > 0 else 1.0
             if L <= 0 or len(qs) == 1:
                 q = qs[-1].copy()
             else:
@@ -432,19 +614,15 @@ def plan(a):
     def pick_part(ap, clean_only):
         """clean_only: 이미 대체(안 깨끗한) 계획이 있으면 길을 못 찾은 후보는 아예 안 푼다 (시간)."""
         best = None
-        t1s = [(qa, P.transit(home0, qa, f_home=True)) for qa in ap["cands"]]
-        if any(t1 for _, t1 in t1s):
-            t1s = [(qa, t1) for qa, t1 in t1s if t1]
+        t1s = [(qa, qg, d1, P.transit(home0, qa, f_home=True)) for qa, qg, d1 in ap["pairs"]]
+        if any(x[3] for x in t1s):
+            t1s = [x for x in t1s if x[3]]
         elif clean_only:
             return None
-        for qa, t1 in t1s:
-            for qg in sorted((g for g in G if P.near_branch(qa, g)), key=lambda g: (P.table_penalty(g), float(np.abs(g - qa).max())))[:1]:
-                d1 = P.descent(qa, qg)
-                if d1 is None:
-                    continue
-                c = P.arc(t1 or [home0, qa]) + P.arc(d1) + (0.0 if t1 else FALLBACK_COST) + P.table_penalty(qg)
-                if best is None or c < best[0]:
-                    best = (c, qa, qg, t1, d1)
+        for qa, qg, d1, t1 in t1s:
+            c = P.arc(t1 or [home0, qa]) + P.arc(d1) + (0.0 if t1 else FALLBACK_COST) + P.table_penalty(qg)
+            if best is None or c < best[0]:
+                best = (c, qa, qg, t1, d1)
         if best is None:
             return None
         c, qa, qg, t1, d1 = best
@@ -460,20 +638,16 @@ def plan(a):
     def place_part(pk, bp, clean_only):
         best = None
         qa = pk["qa"]
-        ts = [(qb, P.transit(qa, qb), P.transit(qb, home0, t_home=True)) for qb in bp["cands"]]
-        if any(t2 and t3 for _, t2, t3 in ts):
-            ts = [x for x in ts if x[1] and x[2]]
+        ts = [(qb, qp, d2, P.transit(qa, qb) or P.via_home(qa, qb, home0), P.transit(qb, home0, t_home=True)) for qb, qp, d2 in bp["pairs"]]
+        if any(x[3] and x[4] for x in ts):
+            ts = [x for x in ts if x[3] and x[4]]
         elif clean_only:
             return None
-        for qb, t2, t3 in ts:
-            for qp in sorted((g for g in Pl if P.near_branch(qb, g)), key=lambda g: (P.table_penalty(g), float(np.abs(g - qb).max())))[:1]:
-                d2 = P.descent(qb, qp)
-                if d2 is None:
-                    continue
-                c = (P.arc(t2 or [qa, qb]) + P.arc(d2) + P.arc(t3 or [qb, home0])
-                     + (0.0 if t2 else FALLBACK_COST) + (0.0 if t3 else FALLBACK_COST) + P.table_penalty(qp))
-                if best is None or c < best[0]:
-                    best = (c, qb, qp, t2, d2, t3)
+        for qb, qp, d2, t2, t3 in ts:
+            c = (P.arc(t2 or [qa, qb]) + P.arc(d2) + P.arc(t3 or [qb, home0])
+                 + (0.0 if t2 else FALLBACK_COST) + (0.0 if t3 else FALLBACK_COST) + P.table_penalty(qp))
+            if best is None or c < best[0]:
+                best = (c, qb, qp, t2, d2, t3)
         if best is None:
             return None
         c, qb, qp, t2, d2, t3 = best
@@ -499,9 +673,8 @@ def plan(a):
         return {"bad": bad, "c": c + pk["c"], "q": (qa, qg, qb, qp), "frames": fr, "marks": mk, "hit": hit, "bp": bp, "fb": fb}
 
     ie = s.arm.index("elbow")
-    fam = lambda L: any((q[ie] < 0) == (home[ie] < 0) for q in L)
-    pick_it = P.approaches(pc, ycube, P.hand_axis(g_ref), fam(G))
-    place_it = P.approaches(pt, yplace, P.hand_axis(p_ref), fam(Pl))
+    pick_it = P.approaches(pc, G, P.hand_axis(g_ref))
+    place_it = P.approaches(pt, Pl, P.hand_axis(p_ref))
     pk = first_pk = None
     tries_a = 0
     for ap in pick_it:
@@ -516,7 +689,7 @@ def plan(a):
             break
     pk = pk or first_pk
     if pk is None:
-        return {**out, "status": "unreachable", "reason": "큐브 위 5~9 cm 에서 손을 아래로 둔 채 큐브까지 곧게 내려가는 길이 없음"}
+        return {**out, "status": "unreachable", "reason": f"큐브 위 {min(ABOVE_CM):g}~{max(ABOVE_CM):g} cm 에서 손을 아래로 둔 채 큐브까지 곧게 내려가는 길이 없음"}
     plan_ = first_pl = None
     tries_b = 0
     for bp in place_it:
@@ -531,7 +704,7 @@ def plan(a):
             break
     plan_ = plan_ or first_pl
     if plan_ is None:
-        return {**out, "status": "unreachable", "reason": "놓을 자리 위 5~9 cm 에서 손을 아래로 둔 채 곧게 내려가는 길이 없음"}
+        return {**out, "status": "unreachable", "reason": f"놓을 자리 위 {min(ABOVE_CM):g}~{max(ABOVE_CM):g} cm 에서 손을 아래로 둔 채 곧게 내려가는 길이 없음"}
     fallback = plan_["fb"]
     ap, bp = pk["ap"], plan_["bp"]
     frames, mk = plan_["frames"], plan_["marks"]
@@ -606,7 +779,7 @@ def plan(a):
                                     "place": {"cm": hb, "tilt_deg": bp["tilt_deg"], "azimuth_deg": bp["azimuth_deg"], "tried": tries_b}},
                        "path_joint_move_deg": round(math.degrees(plan_["c"]), 1),
                        "joint_space_fallback": fallback,
-                       "n_candidates": {"above_pick": len(ap["cands"]), "grasp": len(G), "above_place": len(bp["cands"]), "place": len(Pl)}},
+                       "n_candidates": {"above_pick": len(ap["pairs"]), "grasp": len(G), "above_place": len(bp["pairs"]), "place": len(Pl)}},
             "plan_s": round(time.time() - t0, 2)}
 
 

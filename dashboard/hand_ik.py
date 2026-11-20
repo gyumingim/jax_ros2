@@ -36,12 +36,14 @@ TIE_DEG = 2.0                 # 해 고르기: 최소 회전에서 이 각 안�
 TILT_PULL = 0.05              # auto: 남는 자유도로 기울기를 0 쪽으로 당기는 세기 (한 반복에 t 의 몇 배)
 TOL_ANALYTIC = 0.0005         # 해석 IK 해의 MuJoCo FK 검증 (손목 중앙 0.5 mm)
 A3 = ("shoulder_roll", "upper_arm_roll", "elbow")   # 해석 IK 가 푸는 관절 (shoulder_yaw 고정, 손목 3 관절 지금 값)
+MAP_PARTS = max(1, min(8, (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸는 프로세스 수 (이 worker + 도우미)
 GRASP_TILT_TOL = 3.0          # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
 
 # ============================================================ worker (자식 프로세스)
 class _Solver:
     def __init__(self, ik_dir):
+        self.ik_dir = str(ik_dir)
         os.environ["JAX_SETUP"] = "real"
         sys.path.insert(0, str(Path(ik_dir) / SUB))
         sys.path.insert(0, str(Path(ik_dir) / SUB / "humanoid_grasp_rl"))
@@ -889,45 +891,80 @@ class _Solver:
                 qs.append(q)
         if not qs:
             return 0, None, 0
-        # 사용자 2026-11-20 밤: 기준점 = 집는 점(손끝 사이). 집는 점을 큐브 중심(책상 위 2.5 cm)에 두고, 손목 중앙으로 푸는
-        # analytic_tip(손 최대한 아래 + 기울어진 만큼 손목을 옮겨 다시)으로 5 mm 안에 맞으면 집을 수 있음.
+        # 2026-11-21: 초록 = '대시보드 계획(pick_plan)이 여기서 집을 수 있음'. 집는 점(손끝 사이)을 큐브 중심(책상 위 2.5 cm)에
+        # 두는 해 + 손가락 책상 여유 + 곧은 수직 내려가기 — 판정은 pick_plan.Planner.point_check 한 곳 (계획과 어긋나지 않게).
         tipp = np.asarray(self.to_sim([x, y, 0.025 - self.R.MAP_D]))
-        best = None
-        for q in self.analytic_tip(tipp, q0, lim, "position", tol=0.002, first=True)[0]:
-            site, rot = self.fk(q)
-            pe = float(np.linalg.norm(site - tipp))
-            if best is None or pe < best[0]:
-                best = (pe, self.axis_tilt(rot))
-        if best is not None and best[0] <= TOL_POS:
-            return 2, best[1], len(qs)
-        return 1, (best[1] if best else None), len(qs)
+        ok, why, tilt = self._planner(S).point_check(tipp)
+        self.last_why = why
+        return (2 if ok else 1), tilt, len(qs)
+
+    def _planner(self, S):
+        if getattr(self, "_pp", None) is None or self._pp.S is not S:
+            import pick_plan
+            self._pp = pick_plan.Planner(None, None, solver=self, setup=S)
+        return self._pp
 
     def graspmap(self, b):
-        """op graspmap: 책상 위 격자 (x0..x1, y0..y1, step) 마다 grasp_eval. rows[j] = y 한 줄의 코드 문자열 ('2'/'1'/'0')."""
+        """op graspmap: 책상 위 격자 (x0..x1, y0..y1, step) 마다 grasp_eval. rows[j] = y 한 줄의 코드 문자열 ('2'/'1'/'0').
+        판정(pick_plan.point_check)이 칸마다 수십 ms 라 y 줄을 MAP_PARTS 개 도우미 프로세스(같은 worker)에 나눠 같이 푼다."""
         np = self.np
         t0 = time.time()
-        S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
         st = float(b.get("step") or 0.01)
         xs = [round(float(v), 4) for v in np.arange(float(b["x0"]), float(b["x1"]) + st / 2, st)]
         ys = [round(float(v), 4) for v in np.arange(float(b["y0"]), float(b["y1"]) + st / 2, st)]
-        rows, n = [], [0, 0, 0]
-        for y in ys:
-            r = ""
-            for x in xs:
-                c = self.grasp_eval(S, x, y, verify=False)[0]
-                n[c] += 1
-                r += str(c)
-            rows.append(r)
+        if b.get("y_list") is not None:
+            ys = [float(v) for v in b["y_list"]]
+        parts = int(b.get("parts") or MAP_PARTS)
+        if parts > 1 and len(ys) >= 2 * parts:
+            rows = self._graspmap_parts(b, ys, parts)
+        else:
+            S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
+            rows = []
+            for y in ys:
+                rows.append("".join(str(self.grasp_eval(S, x, y, verify=False)[0]) for x in xs))
+        n = [sum(r.count(c) for r in rows) for c in "012"]
         return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(),
                 "counts": {"graspable": n[2], "wrist_only": n[1], "no": n[0]}, "tilt_tol_deg": GRASP_TILT_TOL,
-                "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000)}
+                "meaning": "초록(2) = 대시보드 계획(pick_plan)이 그 자리에서 집기·놓기 가능 (모든 큐브 yaw, 손가락 책상 여유 포함)",
+                "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000), "parts": parts}
+
+    def _graspmap_parts(self, b, ys, parts):
+        """y 줄을 parts 개로 엇갈려 나눠(위·아래 칸 난이도 고르게) 도우미 worker 에 보내고 하나는 여기서. 도우미는 계속 살려 둔다."""
+        helpers = getattr(self, "_helpers", None)
+        if helpers is None or len(helpers) != parts - 1:
+            helpers = self._helpers = [HandIK() for _ in range(parts - 1)]
+        groups = [ys[i::parts] for i in range(parts)]
+        res, errs = [None] * parts, []
+
+        def run(i):
+            try:
+                rq = {**b, "op": "graspmap", "parts": 1, "y_list": groups[i]}
+                r = helpers[i - 1].call(self.ik_dir, rq, timeout=600.0)
+                if not r.get("ok"):
+                    raise RuntimeError(r.get("reason"))
+                res[i] = r["rows"]
+            except Exception as e:
+                errs.append(f"{type(e).__name__}: {e}")
+        ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(1, parts)]
+        for t in ts:
+            t.start()
+        res[0] = self.graspmap({**b, "parts": 1, "y_list": groups[0]})["rows"]
+        for t in ts:
+            t.join()
+        if errs:
+            raise RuntimeError("지도 도우미 실패: " + "; ".join(errs))
+        rows = [None] * len(ys)
+        for i in range(parts):
+            for k, r in enumerate(res[i]):
+                rows[i + k * parts] = r
+        return rows
 
     def graspcheck(self, b):
         """op graspcheck: 한 점 (x, y) — 격자와 같은 판정 + MuJoCo FK 검증."""
         t0 = time.time()
         S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
         c, tilt, ns = self.grasp_eval(S, float(b["x"]), float(b["y"]), verify=True)
-        why = {2: "집을 수 있음", 1: "손목은 닿지만 손끝(집는 점)을 큐브에 못 맞춤", 0: "팔이 안 닿음"}[c]
+        why = "팔이 안 닿음" if c == 0 else getattr(self, "last_why", None) or ("집을 수 있음" if c == 2 else "못 집음")
         return {"ok": True, "graspable": c == 2, "code": c, "reason": why, "tilt_min_deg": None if tilt is None else round(tilt, 1),
                 "n_solutions": ns, "z_table_m": self.grasp_z(), "x": float(b["x"]), "y": float(b["y"]),
                 "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000, 1)}
@@ -1112,7 +1149,10 @@ def pair(ik_dir, body, ranges_deg):
         return {"ok": False, "reason": str(e)}
 
 
-def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=(-0.28, 0.38, -0.45, 0.075), step=0.01):
+MAP_BOX = (-0.28, 0.38, -0.45, 0.20)   # 지도 격자 x0, x1, y0, y1 (실좌표 m). y 위쪽은 예전 0.075 에서 초록이 잘려 늘림 (2026-11-21)
+
+
+def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=MAP_BOX, step=0.01):
     """책상 위 집을 수 있는 곳 지도 (해석 IK, 서버가 메모리에 캐시)."""
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
