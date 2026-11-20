@@ -1,16 +1,20 @@
-"""JAX 팔 대시보드: 탭 6개(AK / 서보 / 손가락 / 팔 / 역기구학 / 비전). 노드 켜기/끄기/로그 + 상태(읽기 전용)
-+ 원점(homing_guard 서비스 부르기) + pick_place --dry-run(계획·검사만).
+"""JAX 팔 대시보드: 탭 3개(연결 / 각도 제어 / 역기구학) + 팔 3D 뷰.
 
     python3 dashboard/server.py                 # http://localhost:8080 (이 PC에서만)
+    python3 dashboard/server.py --virtual       # 가상 팔(실물·CAN·ROS 없이, Windows 에서도)
     python3 dashboard/server.py --host 0.0.0.0  # 같은 네트워크의 폰·노트북에서도 (보호 없음, 주의)
 
-ROS 구독은 서버 안이 아니라 자식 프로세스(ros_monitor_proc.py, /opt/ros/<distro> + <ws>/install 을 source)에서 돈다.
-서버를 source 없이 켜도 되고, 실패하면 화면의 'ROS 연결(source)' 버튼으로 다시 시도한다.
+ROS 구독·발행은 서버 안이 아니라 자식 프로세스(ros_monitor_proc.py, /opt/ros/<distro> + <ws>/install 을 source)에서 돈다.
+가상 모드에서는 자식 대신 virtual_arm.VirtualArm 이 같은 모양의 상태를 채운다(화면 위 스위치로 바꿈).
+모터를 움직이는 길은 하나: 각도 제어 탭의 '보내기' -> POST /api/joint/send -> 여기서 관절명·범위·유한값·원점 검사
+-> /arm_control/joint_command (arm_control_node 의 램프·calibration 클립, arm_homed 면 homing_guard 를 거침).
 """
 import argparse
 import asyncio
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -27,11 +31,13 @@ from fastapi.staticfiles import StaticFiles   # noqa: E402
 from procman import IS_LINUX, LOG_DIR, ProcessManager, tail_file   # noqa: E402
 from ros_bridge import RosBridge   # noqa: E402
 from ros_monitor import HOMING_SRV   # noqa: E402  (rclpy 는 import 하지 않음 — 구독은 자식 프로세스)
-from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, REPO, ROS_DISTRO, WS   # noqa: E402
+from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, PICK_TRAJ, REPO, ROS_DISTRO, WS   # noqa: E402
 
 pm = ProcessManager()
 ros = RosBridge()
 can_state = {"available": IS_LINUX, "text": "Linux 아님" if not IS_LINUX else "확인 중"}
+MODE = {"virtual": False, "error": ""}
+VM = {"arm": None}
 
 
 def _can_watch():
@@ -54,20 +60,76 @@ def _can_watch():
         time.sleep(2)
 
 
+# ---------------------------------------------------------------- 가상 / 실물
+def set_mode(virtual):
+    """가상 모드 켜기/끄기. {ok, msg | error}."""
+    virtual = bool(virtual)
+    if virtual == MODE["virtual"]:
+        return {"ok": True, "msg": "이미 " + ("가상" if virtual else "실물") + " 모드"}
+    if virtual:
+        if VM["arm"] is None:
+            try:
+                from virtual_arm import VirtualArm
+                VM["arm"] = VirtualArm(log=pm.vlog)
+            except Exception as e:
+                MODE["error"] = f"가상 팔을 못 만듦: {type(e).__name__}: {e}"
+                return {"ok": False, "error": MODE["error"]}
+        r = pm.set_virtual(VM["arm"])
+        if not r["ok"]:
+            return r
+        ros.stop()
+        MODE.update(virtual=True, error="")
+        return {"ok": True, "msg": "가상 모드: 실물 모터·CAN·ROS 와 상관없음"}
+    VM["arm"].stop_trajectory()
+    VM["arm"].stop_all()
+    pm.set_virtual(None)
+    MODE.update(virtual=False, error="")
+    threading.Thread(target=ros.start, daemon=True).start()
+    return {"ok": True, "msg": "실물(ROS) 모드: ROS 연결 시도 중"}
+
+
+def backend():
+    return VM["arm"] if MODE["virtual"] else ros
+
+
+def ros_possible():
+    return Path(ros.setup_paths()[0]).is_file()
+
+
+# ---------------------------------------------------------------- calibration / homing
 HOMING_FILE = REPO / "arm_control" / "homing.json"
 CALIB_FILE = REPO / "arm_control" / "calibration.json"
+SERVO_RANGE = (0.0, 180.0)
 _calib_cache = {"mtime": None, "data": None}
 
 
+def _cmd_range(j):
+    """보낼 수 있는 sim 범위 = sim_range_deg ∩ 모터 범위(서보 0~180, AK45 zero±limit)를 sim 으로 바꾼 것."""
+    try:
+        lo, hi = (float(v) for v in j["sim_range_deg"])
+        if j["motor"] == "servo":
+            mlo, mhi = SERVO_RANGE
+        else:
+            mlo, mhi = j["zero_deg"] - j["limit_deg"], j["zero_deg"] + j["limit_deg"]
+        a, b = sorted(((mlo - j["zero_deg"]) / (j["sign"] * j["scale"]), (mhi - j["zero_deg"]) / (j["sign"] * j["scale"])))
+        r = [max(lo, a), min(hi, b)]
+        return r if r[0] <= r[1] else None
+    except Exception:
+        return None
+
+
 def _calibration():
-    """calibration.json 의 관절 표(관절↔모터·ID·verified). 파일이 바뀌면 다시 읽는다. 없거나 깨지면 error."""
+    """calibration.json 의 관절 표(관절↔모터·ID·verified + 보낼 수 있는 범위). 파일이 바뀌면 다시 읽는다."""
     try:
         m = CALIB_FILE.stat().st_mtime
         if _calib_cache["mtime"] != m:
             d = json.loads(CALIB_FILE.read_text(encoding="utf-8"))
-            joints = [{k: j.get(k) for k in ("joint", "motor", "id", "name", "sign", "scale", "zero_deg",
-                                             "sim_range_deg", "verified", "limit_deg")}
-                      for j in d.get("joints") or []]
+            joints = []
+            for j in d.get("joints") or []:
+                row = {k: j.get(k) for k in ("joint", "motor", "id", "name", "sign", "scale", "zero_deg",
+                                             "sim_range_deg", "verified", "limit_deg", "note")}
+                row["cmd_range_deg"] = _cmd_range(row)
+                joints.append(row)
             _calib_cache.update(mtime=m, data={"file": str(CALIB_FILE), "joints": joints})
         return _calib_cache["data"]
     except Exception as e:
@@ -75,7 +137,6 @@ def _calibration():
 
 
 def _home_poses():
-    """homing.json 의 home_sim_deg {관절: 도}. 없거나 깨지면 {}."""
     try:
         d = json.loads(HOMING_FILE.read_text(encoding="utf-8"))
         return {str(k): float(v) for k, v in (d.get("home_sim_deg") or {}).items()}
@@ -86,22 +147,194 @@ def _home_poses():
 def _homing_call(action, b):
     """action: home | release. b["joint"]: 관절 이름 또는 "all"."""
     joint = str((b if isinstance(b, dict) else {}).get("joint") or "").strip()
-    allowed = set(_home_poses()) | set(ros.homing_joints())
+    snap_joints = [j.get("joint") for j in ((backend().snapshot().get("homing") or {}).get("joints") or [])]
+    allowed = set(_home_poses()) | set(snap_joints)
     if joint != "all" and joint not in allowed:
         return {"ok": False, "error": f"모르는 관절 {joint!r} (허용: all, {', '.join(sorted(allowed)) or '없음'})"}
-    return ros.call_trigger(f"{HOMING_SRV}{action}_{joint}", timeout=2.0)
+    return backend().call_trigger(f"{HOMING_SRV}{action}_{joint}", timeout=2.0)
+
+
+def _to_sim(j, motor_deg):
+    return (motor_deg - (j.get("zero_deg") or 0.0)) / (j["sign"] * j["scale"])
+
+
+def actual_pose(snap, cal):
+    """관절마다 지금 sim 각(°): AK45 = 피드백(arm_homed 면 guard 가 오프셋을 뺀 /ak45/joint_states_homed),
+    서보 = /servo/state(마지막으로 보낸 값). {joint: {deg, src, age}}."""
+    out = {}
+    if not snap.get("available"):
+        return out
+    for j in cal.get("joints") or []:
+        try:
+            if j["motor"] == "ak45":
+                key = f"ak45_{j['id']}"
+                h = (snap.get("joints_homed") or {}).get(key)
+                if h and h["age"] <= 1.0:
+                    out[j["joint"]] = {"deg": _to_sim(j, h["deg"]), "src": "피드백(원점 보정)", "age": h["age"]}
+                    continue
+                v = (snap.get("joints") or {}).get(key)
+                if v:
+                    out[j["joint"]] = {"deg": _to_sim(j, v["deg"]), "src": "피드백", "age": v["age"]}
+            else:
+                v = (snap.get("servos") or {}).get(j["name"])
+                if v:
+                    out[j["joint"]] = {"deg": _to_sim(j, v["deg"]), "src": "보낸 값", "age": v["age"]}
+        except Exception:
+            continue
+    return out
+
+
+def cmd_gate(snap, cal, services):
+    """보내기 버튼을 켜도 되는지. 화면과 POST /api/joint/send 가 같은 판정을 쓴다."""
+    alive = {s["id"] for s in services if s["alive"]}
+    g = {"ok": False, "reason": "", "guard": False, "homed_mode": False, "joints": {}}
+    if not snap.get("available"):
+        g["reason"] = f"{snap.get('reason') or 'ROS 없음'} — ROS 를 연결하거나 가상 모드로"
+    elif (snap.get("cmd_subs") or 0) < 1:
+        g["reason"] = ("arm_control_node 가 안 켜짐 (/arm_control/joint_command 구독자 없음) — 연결 탭에서 "
+                       "arm_homed.launch.py / arm.launch.py / arm_control_node 켜기")
+    else:
+        g["ok"] = True
+    h = snap.get("homing") or {}
+    guard_fresh = bool(h.get("seen")) and (h.get("age") or 99) <= 3.0
+    homed_mode = "arm_homed" in alive or guard_fresh
+    g["guard"], g["homed_mode"] = guard_fresh, homed_mode
+    homed = {x.get("joint"): bool(x.get("homed")) for x in (h.get("joints") or [])} if guard_fresh else {}
+    servos = snap.get("servos") or {}
+    jfb = snap.get("joints") or {}
+    for j in cal.get("joints") or []:
+        name, row = j["joint"], {"ok": g["ok"], "reason": "" if g["ok"] else "명령 받을 노드 없음", "note": ""}
+        if g["ok"] and j["motor"] == "ak45":
+            if homed_mode and not guard_fresh:
+                row.update(ok=False, reason="homing_guard 상태가 안 옴 (arm_homed 켜짐인데 guard 응답 없음)")
+            elif homed_mode and not homed.get(name):
+                row.update(ok=False, reason="원점 없음 — 위 원점 패널에서 원점 잡기")
+            elif f"ak45_{j['id']}" not in jfb:
+                row["note"] = "피드백 없음: arm_control_node 가 피드백을 기다리며 안 움직인다"
+        elif g["ok"] and j["motor"] == "servo" and j["name"] not in servos:
+            row["note"] = "첫 명령: 서보 위치를 몰라 램프 없이 바로 그 각으로 간다"
+        if j.get("cmd_range_deg") is None:
+            row.update(ok=False, reason="calibration 범위가 비어 있음")
+        g["joints"][name] = row
+    return g
+
+
+def _send_joints(b):
+    joints = (b if isinstance(b, dict) else {}).get("joints")
+    if not isinstance(joints, dict) or not joints:
+        return {"ok": False, "error": "joints: {관절: sim 각(°)} 이 비었음"}
+    cal = _calibration()
+    by = {j["joint"]: j for j in cal.get("joints") or []}
+    if len(joints) > len(by):
+        return {"ok": False, "error": "관절이 너무 많음"}
+    snap = backend().snapshot()
+    gate = cmd_gate(snap, cal, pm.snapshot())
+    if not gate["ok"]:
+        return {"ok": False, "error": gate["reason"]}
+    names, rads, shown = [], [], []
+    for n, v in joints.items():
+        if n not in by:
+            return {"ok": False, "error": f"모르는 관절 {n!r}"}
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return {"ok": False, "error": f"{n}: 숫자가 아님 ({v!r})"}
+        lo, hi = by[n]["cmd_range_deg"] or (None, None)
+        if lo is None or not (lo - 1e-6 <= v <= hi + 1e-6):
+            return {"ok": False, "error": f"{n}: {v:g}° 가 보낼 수 있는 범위 {lo}~{hi}° 밖"}
+        jg = gate["joints"].get(n) or {}
+        if not jg.get("ok"):
+            return {"ok": False, "error": f"{n}: {jg.get('reason') or '못 보냄'}"}
+        names.append(n)
+        rads.append(math.radians(float(v)))
+        shown.append(f"{n} {float(v):.1f}°")
+    r = backend().send_joint_command(names, rads)
+    if r.get("ok"):
+        r["msg"] = (r.get("msg") or "보냄") + " — " + ", ".join(shown)
+    return r
+
+
+# ---------------------------------------------------------------- 3D: 메시 / 궤적
+def _ik_dir():
+    for c in (os.environ.get("JAX_IK_DIR"), REPO.parent / "IK", Path(WS) / "src" / "IK"):
+        if c and (Path(c) / "motion2" / "arm" / "meshes").is_dir():
+            return Path(c)
+    return None
+
+
+def robot_info():
+    d = _ik_dir()
+    mesh = d / "motion2" / "arm" / "meshes" if d else None
+    ok = bool(mesh and (mesh / "Upper_Arm_1.obj").is_file())
+    return {"mesh_ok": ok, "mesh_dir": str(mesh) if mesh else None,
+            "looked": [os.environ.get("JAX_IK_DIR") or "(JAX_IK_DIR 없음)", str(REPO.parent / "IK"), str(Path(WS) / "src" / "IK")]}
+
+
+def _trajectory():
+    it = pm.items.get("pick_dry")
+    params = dict(it.params) if it else {}
+    out = {"ok": False, "params": params, "running": bool(it and it.alive()),
+           "exit_code": it.exit_code if it else None, "file": str(PICK_TRAJ)}
+    if not PICK_TRAJ.is_file():
+        out["error"] = "궤적 파일 없음 (pick_place 가 아직 안 돌았거나, 팔이 못 닿아 계획이 없음)"
+        return out
+    try:
+        d = json.loads(PICK_TRAJ.read_text(encoding="utf-8"))
+    except Exception as e:
+        out["error"] = f"궤적 파일을 못 읽음: {e}"
+        return out
+    keep = ("real", "sim", "status", "reason", "playable", "delivered_in_sim", "retries", "final_error_m",
+            "joint_names", "dt", "positions", "unit", "peak_speed_deg_s", "reach_map")
+    out.update(ok=True, traj={k: d.get(k) for k in keep if k in d}, mtime=PICK_TRAJ.stat().st_mtime)
+    if not d.get("positions"):
+        out.update(ok=False, error=f"궤적 없음: {d.get('status')} ({d.get('reason')})")
+    return out
+
+
+def _play_virtual():
+    if not MODE["virtual"]:
+        return {"ok": False, "error": "가상 모드에서만 (실물 재생은 대시보드에 없음)"}
+    t = _trajectory()
+    if not t["ok"]:
+        return {"ok": False, "error": t.get("error") or "궤적 없음"}
+    traj = t["traj"]
+    try:
+        from arm_control import calibration as C
+        from arm_control.play import check_trajectory
+        fatal, problems = check_trajectory(traj, C.load())
+    except Exception as e:
+        fatal, problems = None, [f"검사 못 함: {e}"]
+    if fatal:
+        return {"ok": False, "error": f"재생 거절: {fatal}"}
+    try:
+        speed = float(t["params"].get("max_speed") or 30.0)
+    except ValueError:
+        speed = 30.0
+    r = VM["arm"].play_trajectory(traj, speed)
+    if r.get("ok") and problems:
+        r["msg"] += f" (검사 {len(problems)}건은 실물이면 --force 가 필요: 가상이라 재생)"
+    return r
 
 
 def state():
+    b = backend()
+    snap = b.snapshot() if b is not None else ros.snapshot()
+    cal = _calibration()
+    services = pm.snapshot()
     return {
         "t": time.time(),
-        "services": pm.snapshot(),
+        "mode": {"virtual": MODE["virtual"], "error": MODE["error"], "ros_possible": ros_possible(),
+                 "ros_setup": ros.setup_paths()[0]},
+        "services": services,
         "strays": pm.strays,
-        "ros": ros.snapshot(),
-        "can": dict(can_state, up_cmd=CAN_UP_CMD),
+        "ros": snap,
+        "can": dict(can_state, up_cmd=CAN_UP_CMD) if not MODE["virtual"] else
+               {"available": True, "up": True, "state": "ERROR-ACTIVE", "text": "can0 (가상) UP", "up_cmd": CAN_UP_CMD},
         "calibrate": CALIBRATE_GUIDE,
         "home_poses": _home_poses(),
-        "calibration": _calibration(),
+        "calibration": cal,
+        "pose": actual_pose(snap, cal),
+        "gate": cmd_gate(snap, cal, services),
+        "robot": robot_info(),
+        "traj_mtime": PICK_TRAJ.stat().st_mtime if PICK_TRAJ.is_file() else None,
         "info": {"ws": WS, "distro": ROS_DISTRO, "repo": str(REPO), "logs": str(LOG_DIR),
                  "platform": sys.platform},
     }
@@ -109,6 +342,15 @@ def state():
 
 app = FastAPI(title="JAX dashboard")
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+
+@app.middleware("http")
+async def _no_stale_static(request, call_next):
+    # 화면 파일(app.js, viewer.js …)을 고친 뒤 브라우저가 옛 것을 쓰지 않게: 매번 확인(바뀌지 않았으면 304)
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/") and "/vendor/" not in request.url.path:
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.get("/")
@@ -145,12 +387,21 @@ async def api_svc(sid: str, action: str, req: Request):
 
 @app.post("/api/stop")
 def api_stop():
+    if MODE["virtual"] and VM["arm"] is not None:
+        VM["arm"].stop_trajectory()
     return pm.stop_all()
+
+
+@app.post("/api/mode")
+async def api_mode(req: Request):
+    b = await _body(req)
+    return JSONResponse(await asyncio.to_thread(set_mode, bool(b.get("virtual"))))
 
 
 @app.post("/api/ros/connect")
 async def api_ros_connect():
-    """ROS 를 source 한 자식 프로세스를 (다시) 띄운다. 서버를 source 없이 켰어도 이 버튼으로 붙는다."""
+    if MODE["virtual"]:
+        return JSONResponse({"ok": False, "error": "가상 모드 — 실물(ROS)로 바꾼 뒤 연결"})
     return JSONResponse(await asyncio.to_thread(ros.start))
 
 
@@ -162,6 +413,66 @@ async def api_homing_home(req: Request):
 @app.post("/api/homing/release")
 async def api_homing_release(req: Request):
     return JSONResponse(await asyncio.to_thread(_homing_call, "release", await _body(req)))
+
+
+@app.post("/api/joint/send")
+async def api_joint_send(req: Request):
+    return JSONResponse(await asyncio.to_thread(_send_joints, await _body(req)))
+
+
+@app.post("/api/virtual/power")
+async def api_virtual_power(req: Request):
+    if not MODE["virtual"]:
+        return JSONResponse({"ok": False, "error": "가상 모드에서만"})
+    return JSONResponse(VM["arm"].power(bool((await _body(req)).get("on"))))
+
+
+@app.post("/api/virtual/cube")
+async def api_virtual_cube(req: Request):
+    if not MODE["virtual"]:
+        return JSONResponse({"ok": False, "error": "가상 모드에서만"})
+    b = await _body(req)
+    if b.get("clear"):
+        return JSONResponse(VM["arm"].set_cube(None))
+    try:
+        v = [float(b[k]) for k in ("x", "y", "z", "yaw")]
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "x, y, z, yaw 숫자 4개"})
+    if not all(math.isfinite(x) for x in v) or max(abs(x) for x in v[:3]) > 2:
+        return JSONResponse({"ok": False, "error": "값이 이상함 (|x|,|y|,|z| ≤ 2 m)"})
+    return JSONResponse(VM["arm"].set_cube(v))
+
+
+@app.get("/api/ik/trajectory")
+def api_ik_traj():
+    return JSONResponse(_trajectory())
+
+
+@app.post("/api/ik/play_virtual")
+def api_ik_play():
+    return JSONResponse(_play_virtual())
+
+
+@app.post("/api/ik/stop_virtual")
+def api_ik_stop():
+    if VM["arm"] is None:
+        return JSONResponse({"ok": False, "error": "가상 팔 없음"})
+    return JSONResponse(VM["arm"].stop_trajectory())
+
+
+_MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")
+
+
+@app.get("/robot/meshes/{name}")
+def robot_mesh(name: str):
+    """team-jax/IK motion2/arm/meshes 의 OBJ (레포에 넣지 않고 JAX_IK_DIR 등에서 서빙)."""
+    d = _ik_dir()
+    if not _MESH_NAME.fullmatch(name) or d is None:
+        return PlainTextResponse("메시 없음", status_code=404)
+    p = d / "motion2" / "arm" / "meshes" / name
+    if not p.is_file():
+        return PlainTextResponse("메시 없음", status_code=404)
+    return FileResponse(str(p), media_type="text/plain", headers={"Cache-Control": "max-age=3600"})
 
 
 @app.get("/api/log/{sid}")
@@ -178,7 +489,7 @@ async def ws(sock: WebSocket):
     try:
         while True:
             await sock.send_text(json.dumps(state()))
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.25)
     except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
@@ -190,22 +501,30 @@ def main():
     ap.add_argument("--host", default=os.environ.get("JAX_DASH_HOST", "127.0.0.1"),
                     help="기본 127.0.0.1(이 PC만). 0.0.0.0 이면 같은 네트워크 누구나 노드를 켜고 끌 수 있음")
     ap.add_argument("--port", type=int, default=int(os.environ.get("JAX_DASH_PORT", "8080")))
+    ap.add_argument("--virtual", action="store_true", default=os.environ.get("JAX_DASH_VIRTUAL") == "1",
+                    help="가상 팔로 시작 (실물·CAN·ROS 없이). 화면 위 스위치로 바꿀 수 있다")
     a = ap.parse_args()
     import uvicorn
-    threading.Thread(target=ros.start, daemon=True).start()   # 시작할 때 한 번 자동 시도(실패하면 화면 버튼)
+    if a.virtual:
+        r = set_mode(True)
+        print("가상 모드로 시작" if r["ok"] else f"가상 모드 실패: {r['error']}", flush=True)
+    if not MODE["virtual"]:
+        threading.Thread(target=ros.start, daemon=True).start()   # 시작할 때 한 번 자동 시도(실패하면 화면 버튼)
     if IS_LINUX:
         threading.Thread(target=_can_watch, daemon=True).start()
     shown = "localhost" if a.host in ("127.0.0.1", "localhost") else a.host
-    print(f"대시보드: http://{shown}:{a.port}/   ws={WS} distro={ROS_DISTRO} ROS=자식 프로세스로 연결 시도 중",
-          flush=True)
+    print(f"대시보드: http://{shown}:{a.port}/   ws={WS} distro={ROS_DISTRO} "
+          f"모드={'가상' if MODE['virtual'] else '실물(ROS 자식 프로세스로 연결 시도 중)'}", flush=True)
+    if not MODE["virtual"] and not ros_possible():
+        print(f"참고: {ros.setup_paths()[0]} 없음 — 실물 모드는 못 씀. --virtual 또는 화면의 '가상' 스위치", flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
-        print("주의: 외부 접속 열림 — 같은 네트워크 누구나 노드를 켜고 끌 수 있다.", flush=True)
+        print("주의: 외부 접속 열림 — 같은 네트워크 누구나 노드를 켜고 끄고 모터 명령을 보낼 수 있다.", flush=True)
     try:
         uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
     finally:
         # 서버가 꺼져도 노드는 그대로 둔다(끄면 팔이 떨어질 수 있음). 다시 켜면 pids.json 으로 다시 붙잡는다(Linux).
         ros.stop()
-        alive = [it.svc.label for it in pm.items.values() if it.alive()]
+        alive = [it.svc.label for it in pm.items.values() if it.alive() and it.vm is None]
         if alive:
             print("대시보드 종료. 아직 켜져 있는 항목(그대로 둠): " + ", ".join(alive), flush=True)
 

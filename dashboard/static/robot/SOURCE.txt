@@ -1,0 +1,14 @@
+출처: https://github.com/team-jax/IK  브랜치 sim-table-friction  커밋 925e023
+      ("feat(motion1): layouts_10.json을 실물 배치로 — --layouts 파일의 배치로 자동으로 열기")
+파일: motion2/arm/arm.xml  (MJCF, sha256 28182e6104197165ac902cd29af3281d1ceb4edfe2f92c366ae986a602452381)
+      motion2/arm/arm.urdf (sha256 dc0e039dcd3bd4a0827d6751a511c410b4746bfdca2f424fae0e435d2899de7f)
+둘 다 IK 레포의 motion2/arm/make_arm_urdf.py 가 만든 생성 파일이다. 손으로 고치지 말고, IK 쪽이 바뀌면 다시 복사한다.
+
+3D 뷰(static/viewer.js)는 arm.xml 을 읽는다:
+  - arm.urdf 는 ikpy 용 7관절 체인뿐이라 <visual>(메시)도 손가락도 없다.
+  - arm.xml 은 같은 7관절(관절 원점·축이 arm.urdf 와 같음: 2026-11-20 확인, 위치 차 0, 회전 차 < 1e-7°)
+    + 손가락 6관절 + 시각 메시 배치(geom pos/quat)를 갖고 있고, motion1(pick_place 계획)도 같은 생성기의 모델을 쓴다.
+  - 관절 이름(shoulder_roll … hand_roll, finger1_joint1 … finger3_joint2)이 calibration.json 의 sim 관절명과 같다.
+    finger_rotation 은 sim 에서 고정(관절 없음)이라 3D 에서 안 움직인다.
+메시(OBJ, 약 8.7 MB)는 레포에 넣지 않는다. 서버가 JAX_IK_DIR(없으면 ../IK, <ws>/src/IK)의 motion2/arm/meshes 를
+/robot/meshes/<파일> 로 서빙한다. 없으면 3D 뷰는 관절 원점을 잇는 막대 모델로 그린다.

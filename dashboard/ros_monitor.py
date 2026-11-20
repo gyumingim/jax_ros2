@@ -3,8 +3,12 @@
 /servo/state (stm_bridge_node 가 마지막으로 보낸 서보 각도 — 측정값 아님), /object_pose (vision_node).
 
 rclpy 가 없으면(Windows, 또는 ROS 를 source 하지 않고 서버를 켬) available=False 로 두고 아무것도 안 한다.
-명령 토픽은 발행하지 않는다. 부르는 것은 homing_guard 의 std_srvs/Trigger 서비스
-(/arm_control/home_all, home_<관절>, release_all, release_<관절>)뿐이다.
+/ak45/joint_states_homed (homing_guard 가 원점 오프셋을 뺀 피드백 — arm_homed 일 때 sim 각 환산에 쓴다).
+
+발행하는 명령 토픽은 하나: /arm_control/joint_command (sensor_msgs/JointState, sim 관절명, rad).
+각도 제어 탭의 '보내기' 버튼을 누를 때만(publish_joint_command), 서버가 관절명·범위·유한값을 검사한 뒤.
+arm_control_node 가 램프(max_speed_deg_s)·calibration 클립을, arm_homed 면 homing_guard 가 원점 검사를 한다.
+부르는 서비스는 homing_guard 의 std_srvs/Trigger(/arm_control/home_all, home_<관절>, release_all, release_<관절>).
 """
 import json
 import math
@@ -14,6 +18,8 @@ import time
 
 HOMING_TOPIC = "/arm_control/homing"
 HOMING_SRV = "/arm_control/"   # + home_all, home_<관절>, release_all, release_<관절>
+JOINT_COMMAND = "/arm_control/joint_command"
+HOMED_STATES = "/ak45/joint_states_homed"
 
 
 class RosMonitor:
@@ -24,6 +30,9 @@ class RosMonitor:
         self.diag = {}        # name -> {level, message, hardware_id, values{}, t}
         self.joints = {}      # name -> {deg, t}
         self.joint_t = None
+        self.joints_homed = {}  # /ak45/joint_states_homed: name -> {deg, t}
+        self._cmd_pub = None
+        self._JointState = None
         self.diag_t = None
         self.homing = None    # homing_guard 의 마지막 JSON (homing.Homing.status + stamp)
         self.homing_t = None  # 받은 시각(이 PC time.time)
@@ -57,6 +66,7 @@ class RosMonitor:
             node.create_subscription(DiagnosticArray, "/diagnostics", self._on_diag, 10)
             node.create_subscription(JointState, "/joint_states", self._on_joints, 10)
             node.create_subscription(JointState, "/servo/state", self._on_servo, 10)
+            node.create_subscription(JointState, HOMED_STATES, self._on_homed, 10)
             node.create_subscription(PoseStamped, "/object_pose", self._on_pose, 10)
             # homing_guard 는 depth 1, transient local 로 발행 -> 늦게 켠 대시보드도 마지막 상태를 받는다
             node.create_subscription(String, HOMING_TOPIC, self._on_homing,
@@ -66,6 +76,7 @@ class RosMonitor:
             return
         self._node = node
         self._Trigger = Trigger
+        self._JointState = JointState
         self.available = True
         self.reason = ""
         threading.Thread(target=self._spin, args=(rclpy, node), daemon=True).start()
@@ -105,6 +116,35 @@ class RosMonitor:
             for n, p in zip(msg.name, msg.position):
                 self.joints[n] = {"deg": math.degrees(p), "t": now}
             self.joint_t = now
+
+    def _on_homed(self, msg):
+        now = time.time()
+        with self.lock:
+            for n, p in zip(msg.name, msg.position):
+                self.joints_homed[n] = {"deg": math.degrees(p), "t": now}
+
+    def publish_joint_command(self, names, positions):
+        """/arm_control/joint_command 한 번. 검사는 서버가 했다(이름·범위·유한값). {ok, msg | error}."""
+        if not self.available or self._node is None:
+            return {"ok": False, "error": f"{self.reason or 'ROS 없음'} — 명령을 못 보냄"}
+        with self._cli_lock:
+            if self._cmd_pub is None:
+                self._cmd_pub = self._node.create_publisher(self._JointState, JOINT_COMMAND, 10)
+        subs = self._node.count_subscribers(JOINT_COMMAND)
+        if subs < 1:
+            return {"ok": False, "error": f"{JOINT_COMMAND} 구독자 없음 (arm_control_node 꺼짐)"}
+        msg = self._JointState()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.name = [str(n) for n in names]
+        msg.position = [float(p) for p in positions]
+        self._cmd_pub.publish(msg)
+        return {"ok": True, "msg": f"{JOINT_COMMAND}: {len(names)}개 관절 보냄 (구독자 {subs})"}
+
+    def _count_subs(self):
+        try:
+            return self._node.count_subscribers(JOINT_COMMAND) if self._node is not None else 0
+        except Exception:
+            return 0
 
     def _on_servo(self, msg):
         now = time.time()
@@ -201,6 +241,8 @@ class RosMonitor:
                 "homing": self._homing_snapshot(now),
                 "joints": {n: {"deg": d["deg"], "age": now - d["t"]} for n, d in self.joints.items()},
                 "servos": {n: {"deg": d["deg"], "age": now - d["t"]} for n, d in self.servos.items()},
+                "joints_homed": {n: {"deg": d["deg"], "age": now - d["t"]} for n, d in self.joints_homed.items()},
+                "cmd_subs": self._count_subs(),
                 "servo_age": (now - self.servo_t) if self.servo_t else None,
                 "object_pose": dict(self.obj, age=now - self.obj["t"]) if self.obj else None,
             }

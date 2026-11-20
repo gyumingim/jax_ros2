@@ -3,7 +3,8 @@
 서버를 ROS 를 source 하지 않은 터미널에서 켰어도 화면의 'ROS 연결(source)' 버튼으로 붙을 수 있게 하려는 것.
 자식 = bash -c "source /opt/ros/<JAX_ROS_DISTRO>/setup.bash; source <JAX_WS>/install/setup.bash(있으면);
                 exec python3 -u dashboard/ros_monitor_proc.py"
-자식 stdout 의 JSON 줄로 상태를 받고, 원점 서비스 호출은 stdin 명령으로 보낸다(ros_monitor_proc.py 맨 위).
+자식 stdout 의 JSON 줄로 상태를 받고, 원점 서비스 호출과 관절 명령(/arm_control/joint_command)은 stdin 명령으로
+보낸다(ros_monitor_proc.py 맨 위).
 자식의 stderr 는 logs/ros_monitor.log.
 """
 import json
@@ -156,19 +157,28 @@ class RosBridge:
         return [j.get("joint") for j in h.get("joints") or []]
 
     def call_trigger(self, service, timeout=2.0):
+        return self._request({"op": "trigger", "service": service, "timeout": timeout}, timeout + 1.5, service,
+                             "원점 서비스를 못 부름")
+
+    def send_joint_command(self, names, positions):
+        """/arm_control/joint_command 한 번(자식이 발행). names = sim 관절명, positions = rad (서버가 검사함)."""
+        return self._request({"op": "joint_command", "names": list(names), "positions": list(positions)}, 2.0,
+                             "/arm_control/joint_command", "명령을 못 보냄")
+
+    def _request(self, cmd, wait, what, fail):
         with self.lock:
             p, ok = self.proc, self.state == "connected"
             self._next_id += 1
             rid = self._next_id
         if not ok or p is None:
-            return {"ok": False, "error": f"{self.reason or 'ROS 없음'} — 원점 서비스를 못 부름"}
+            return {"ok": False, "error": f"{self.reason or 'ROS 없음'} — {fail}"}
         ev = [threading.Event(), None]
         self._replies[rid] = ev
         try:
-            p.stdin.write((json.dumps({"id": rid, "op": "trigger", "service": service, "timeout": timeout}) + "\n").encode())
+            p.stdin.write((json.dumps(dict(cmd, id=rid)) + "\n").encode())
             p.stdin.flush()
-            if not ev[0].wait(timeout + 1.5):
-                return {"ok": False, "error": f"{service}: ROS 자식이 {timeout + 1.5:g}초 안에 답 없음"}
+            if not ev[0].wait(wait):
+                return {"ok": False, "error": f"{what}: ROS 자식이 {wait:g}초 안에 답 없음"}
             return ev[1] or {"ok": False, "error": "빈 답"}
         except (BrokenPipeError, OSError, ValueError) as e:
             return {"ok": False, "error": f"ROS 자식에 못 보냄: {e}"}
@@ -189,4 +199,4 @@ class RosBridge:
         why = reason or ("ROS 연결됨 — 첫 상태를 기다리는 중" if state == "connected" else "ROS 없음")
         return {"available": False, "reason": why, "conn": conn, "motors": [], "bus": None, "diag_age": None,
                 "joint_age": None, "homing": {"available": False, "reason": why}, "joints": {}, "servos": {},
-                "servo_age": None, "object_pose": None}
+                "servo_age": None, "object_pose": None, "joints_homed": {}, "cmd_subs": 0}

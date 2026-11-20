@@ -12,9 +12,10 @@ Service 필드
   conflicts 동시에 켜면 안 되는 항목 id(켜기를 거절)
   procs     이 항목이 띄우는 실행 파일 이름(대시보드 밖에서 이미 떠 있는지 pgrep 으로 검사)
   stop_warn 끌 때 확인창 문구(비우면 확인 없이 끔)
-  linux     True 면 Linux 에서만(Windows 에서는 '이 PC에서 못 씀')
+  linux     True 면 Linux 에서만(Windows 에서는 '이 PC에서 못 씀'). 가상 모드에서는 전부 가상 노드로 켜진다
+            build 의 p["_local"] 이 True 면(가상 모드 또는 Linux 아님) ROS 없이 이 PC 의 python 으로 돌리는 argv
   demo      True 면 JAX_DASH_DEMO=1 이거나 Linux 가 아닐 때만 보임(시험용 가짜 항목)
-  tab       화면 탭: ak | servo | finger | arm | ik | vision (그 탭에 카드가 그려진다)
+  tab       화면 탭: conn(연결) | ik(역기구학) (그 탭에 카드가 그려진다)
   tail      화면에 보이는 로그 줄 수
 """
 import os
@@ -26,6 +27,8 @@ from pathlib import Path
 from typing import Callable, List, Union
 
 REPO = Path(__file__).resolve().parent.parent
+LOG_DIR = Path(os.environ.get("JAX_DASH_LOGS") or Path(__file__).resolve().parent / "logs")
+PICK_TRAJ = LOG_DIR / "pick_dry_traj.json"   # pick_place --save: 마지막 dry-run 의 궤적(관절각 시계열)
 
 
 def _default_ws():
@@ -64,7 +67,7 @@ class Service:
     stop_warn: str = ""
     linux: bool = True
     demo: bool = False
-    tab: str = "arm"
+    tab: str = "conn"
     tail: int = 30
 
 
@@ -161,26 +164,48 @@ def _vision(p):
     return "exec " + " ".join(shlex.quote(x) for x in a)
 
 
-def _pick_dry(p):
-    # 계획 + 검사만(--dry-run 고정). 모터를 움직이는 실행(--dry-run 없이, --force)은 대시보드에 없다.
+def _pick_args(p):
     cx = _num(p.get("cube_x"), "cube x", -1.0, 1.0)
     cy = _num(p.get("cube_y"), "cube y", -1.0, 1.0)
     cyaw = _num(p.get("cube_yaw"), "cube yaw", -360, 360)
     tx = _num(p.get("target_x"), "target x", -1.0, 1.0)
     ty = _num(p.get("target_y"), "target y", -1.0, 1.0)
     ms = _num(p.get("max_speed"), "max_speed", 0.1, 360)
-    a = ["ros2", "run", "arm_control", "pick_place", "--cube", f"{cx:g}", f"{cy:g}", f"{cyaw:g}",
-         "--target", f"{tx:g}", f"{ty:g}", "--max-speed", f"{ms:g}"]
+    a = ["--cube", f"{cx:g}", f"{cy:g}", f"{cyaw:g}", "--target", f"{tx:g}", f"{ty:g}", "--max-speed", f"{ms:g}"]
     d = (p.get("d") or "").strip()
     if d:
         a += ["--d", f"{_num(d, 'd', 0.0, 2.0):g}"]
     ik = (p.get("ik") or "").strip()
     if ik:
-        if not re.fullmatch(r"[A-Za-z0-9_./~-]{1,200}", ik):
+        if not re.fullmatch(r"[A-Za-z0-9_./~:\\-]{1,200}", ik):
             raise ValueError(f"ik: 경로에 이상한 글자 ({ik!r})")
         a += ["--ik", os.path.expanduser(ik)]
-    a.append("--dry-run")
-    return "exec " + " ".join(shlex.quote(x) for x in a)
+    # --save: pick_place 가 계획한 궤적을 JSON 으로 쓴다(기존 옵션). 3D 뷰가 /api/ik/trajectory 로 읽는다.
+    return a + ["--save", str(PICK_TRAJ), "--dry-run"]
+
+
+# 로컬 실행(가상 모드 / Windows): ros2 run 대신 이 PC 의 python 으로 같은 pick_place.main 을 부른다.
+# arm_control·stm_bridge 를 sys.path 에 넣는 것만 다르다(colcon 없이). IK 계획에는 mujoco·gymnasium·scipy 가 필요하다
+# (없으면 출력에 ImportError). JAX_DASH_PYTHONPATH 에 경로를 주면 sys.path 뒤에 붙인다.
+_LOCAL_PICK = "\n".join([
+    "import os, sys",
+    "sys.path[:0] = [{arm!r}, {stm!r}]",
+    "sys.path += [x for x in os.environ.get('JAX_DASH_PYTHONPATH', '').split(os.pathsep) if x]",
+    "from arm_control.pick_place import main",
+    "main(sys.argv[1:])", ""])
+
+
+def _pick_dry(p):
+    # 계획 + 검사만(--dry-run 고정). 모터를 움직이는 실행(--dry-run 없이, --force)은 대시보드에 없다.
+    a = _pick_args(p)
+    try:
+        PICK_TRAJ.unlink()   # 이번 실행이 못 쓰면(팔이 못 닿음 등) 옛 궤적이 남아 보이지 않게
+    except OSError:
+        pass
+    if p.get("_local"):
+        code = _LOCAL_PICK.format(arm=str(REPO / "arm_control"), stm=str(REPO / "stm_bridge"))
+        return [sys.executable, "-u", "-c", code] + a
+    return "exec " + " ".join(shlex.quote(x) for x in ["ros2", "run", "arm_control", "pick_place"] + a)
 
 
 def _vcan(p):
@@ -190,7 +215,7 @@ def _vcan(p):
 PY = sys.executable
 
 SERVICES = [
-    Service("can_up", "can0 올리기", _can_up, kind="once", ros=False, group="준비", tab="ak",
+    Service("can_up", "can0 올리기", _can_up, kind="once", ros=False, group="준비", tab="conn",
             help=f"재부팅마다 1번. sudo 권한이 필요하다. 안 되면 터미널에서: {CAN_UP_CMD}"),
     Service("arm_launch", "arm.launch.py (3개 한 번에)", _arm_launch, group="노드",
             help="ak45_node + stm_bridge_node + arm_control_node. 보정(calibrate --ros) 중에는 켜지 않는다.",
@@ -202,7 +227,7 @@ SERVICES = [
             stop_warn=AK45_STOP_WARN),
     Service("arm_homed", "arm_homed.launch.py (원점 guard 포함)", _arm_homed, group="노드",
             help="arm.launch.py 와 같고 homing_guard 가 arm_control_node 와 ak45_node 사이에 낀다. "
-                 "원점을 잡기 전·전원 재투입 뒤에는 AK45 명령이 막힌다(AK 탭 '원점' 칸).",
+                 "원점을 잡기 전·전원 재투입 뒤에는 AK45 명령이 막힌다(각도 제어 탭 '원점' 칸).",
             params=[Param("servo_channel", "servo_channel", "can0"),
                     Param("max_speed_deg_s", "max_speed_deg_s", "30.0", "°/s"),
                     Param("calibration_file", "calibration_file", "", "비우면 패키지 기본"),
@@ -212,11 +237,11 @@ SERVICES = [
             stop_warn=AK45_STOP_WARN),
     Service("ak45", "ak45_node", lambda p: "exec ros2 launch ak45_ros2 ak45_node.launch.py", group="노드",
             help="AK45 4개(ID 1~4). /joint_states, /diagnostics 발행, /ak45/command 수신.",
-            conflicts=("arm_launch", "arm_homed"), procs=("ak45_node",), stop_warn=AK45_STOP_WARN, tab="ak"),
+            conflicts=("arm_launch", "arm_homed"), procs=("ak45_node",), stop_warn=AK45_STOP_WARN),
     Service("stm_bridge", "stm_bridge_node", _stm_bridge, group="노드",
             help="/servo/command → STM32 서보 CAN 프레임(StdId 5).",
             params=[Param("servo_channel", "servo_channel", "can0")],
-            conflicts=("arm_launch", "arm_homed"), procs=("stm_bridge_node",), tab="servo"),
+            conflicts=("arm_launch", "arm_homed"), procs=("stm_bridge_node",)),
     Service("arm_control", "arm_control_node", _arm_control, group="노드",
             help="/arm_control/joint_command → /ak45/command, /servo/command. calibrate --ros 와 같이 켜지 않는다.",
             params=[Param("max_speed_deg_s", "max_speed_deg_s", "30.0", "°/s"),
@@ -226,10 +251,11 @@ SERVICES = [
             help="둘 중 하나만: fixed_pose(시험용) 또는 result_json(카메라 inference.json 경로).",
             params=[Param("fixed_pose", "fixed_pose", "[0.10, -0.30, 0.0, 20.0]", "[x m, y m, z m, yaw °]"),
                     Param("result_json", "result_json", "", "…/inference.json")],
-            procs=("vision_node",), tab="vision"),
-    Service("pick_dry", "pick_place --dry-run (계획·검사만)", _pick_dry, kind="once", group="역기구학", tab="ik", tail=200,
+            procs=("vision_node",)),
+    Service("pick_dry", "pick_place --dry-run (계획·검사만)", _pick_dry, kind="once", group="역기구학", tab="ik", tail=200, linux=False,
             help="sim 에서 배달을 계획(planner.py, team-jax/IK motion1)하고 검사(play.check_trajectory)만 한다. "
-                 "--dry-run 고정: 모터에 아무것도 안 보낸다. 종료코드 0 통과, 1 거절, 3 팔이 못 닿음.",
+                 "--dry-run 고정: 모터에 아무것도 안 보낸다. 종료코드 0 통과, 1 거절, 3 팔이 못 닿음. "
+                 "계획한 궤적은 --save 로 logs/pick_dry_traj.json 에 써서 오른쪽 3D 뷰에서 재생한다.",
             params=[Param("cube_x", "cube x", "0.10", "m, +x = 로봇 왼쪽"),
                     Param("cube_y", "cube y", "-0.30", "m, 앞 = -y"),
                     Param("cube_yaw", "cube yaw", "20", "°, 위에서 반시계"),

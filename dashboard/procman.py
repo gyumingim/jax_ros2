@@ -3,6 +3,9 @@
 - Linux: bash -lc "source ROS; source ws; exec stdbuf -oL ..." , start_new_session=True, 그룹 전체에 신호(터미널 Ctrl+C 와 같음).
 - Windows(시험용): CREATE_NEW_PROCESS_GROUP, SIGINT 대신 CTRL_BREAK_EVENT, SIGTERM/SIGKILL 둘 다 TerminateProcess.
 - 대시보드를 껐다 켜도 Linux 에서는 logs/pids.json 으로 아직 살아 있는 항목을 다시 붙잡는다(입양).
+- 가상 모드(set_virtual): ROS 노드 항목은 프로세스를 띄우지 않고 virtual_arm.VirtualArm 의 가상 노드를 켜고 끈다.
+  bash 한 번 실행형(can0 올리기, vcan 시험)은 '가상: 할 일 없음' 으로 바로 끝난다. argv 항목(가짜 시험, 로컬
+  pick_place --dry-run)은 그대로 이 PC 에서 실행. 로그는 logs/virtual/<id>.log (실물 로그와 섞이지 않게).
 """
 import json
 import os
@@ -16,6 +19,12 @@ import time
 from pathlib import Path
 
 from services import ROS_DISTRO, WS, WATCH_PROCS, visible_services
+
+try:
+    from virtual_arm import SERVICE_NODES as VIRTUAL_NODES
+except Exception:   # virtual_arm 을 못 읽어도(arm_control 없음) 실물 모드는 돈다
+    VIRTUAL_NODES = {}
+MODE = {"virtual": False}
 
 IS_LINUX = sys.platform.startswith("linux")
 LOG_DIR = Path(os.environ.get("JAX_DASH_LOGS") or Path(__file__).resolve().parent / "logs")
@@ -67,13 +76,16 @@ class Item:
         self.cmd = ""
         self.params = {p.key: p.default for p in svc.params}
         self.adopted = False
+        self.vm = None            # 가상 모드에서 켠 가상 노드 (VirtualArm)
         self.lock = threading.Lock()
 
     @property
     def log_path(self):
-        return LOG_DIR / f"{self.svc.id}.log"
+        return (LOG_DIR / "virtual" if MODE["virtual"] else LOG_DIR) / f"{self.svc.id}.log"
 
     def alive(self):
+        if self.vm is not None:
+            return self.vm.service_alive(self.svc.id)
         if self.proc is not None:
             return self.proc.poll() is None
         if self.pid:
@@ -91,6 +103,8 @@ class Item:
         return False
 
     def available(self):
+        if MODE["virtual"]:
+            return True, ""
         if self.svc.linux and not IS_LINUX:
             return False, "이 PC에서 못 씀 (Linux 로봇 PC 전용)"
         return True, ""
@@ -101,6 +115,7 @@ class ProcessManager:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.items = {s.id: Item(s) for s in visible_services()}
         self.strays = []
+        self.virtual = None       # VirtualArm (가상 모드) 또는 None
         self._adopt()
         threading.Thread(target=self._watch, daemon=True).start()
 
@@ -129,13 +144,17 @@ class ProcessManager:
                 for k in it.params:
                     if k in params:
                         it.params[k] = str(params[k])
+            if self.virtual is not None and it.svc.id in VIRTUAL_NODES:
+                return self._start_virtual(it)
             try:
-                body = it.svc.build(dict(it.params))
+                body = it.svc.build(dict(it.params, _local=self.virtual is not None or not IS_LINUX))
             except ValueError as e:
                 it.error = str(e)
                 return {"ok": False, "error": str(e)}
             env = dict(os.environ, PYTHONUNBUFFERED="1", RCUTILS_COLORIZED_OUTPUT="0",
                        RCUTILS_LOGGING_BUFFERED_STREAM="0")
+            if isinstance(body, str) and self.virtual is not None:
+                return self._once_virtual(it, body)
             if isinstance(body, str):
                 if not IS_LINUX:
                     return {"ok": False, "error": "bash 명령은 Linux 에서만"}
@@ -175,6 +194,8 @@ class ProcessManager:
             return {"ok": False, "error": f"없는 항목 {sid}"}
         if not it.alive():
             return {"ok": True, "msg": f"{it.svc.label} 이미 꺼짐"}
+        if it.vm is not None:
+            return self._stop_virtual(it)
         if it.stopping:
             return {"ok": True, "msg": "끄는 중"}
         it.stopping = True
@@ -238,12 +259,74 @@ class ProcessManager:
     def stop_all(self):
         threads = []
         for it in self.items.values():
+            if it.vm is not None and it.alive():
+                self._stop_virtual(it)
+                threads.append(it.svc.label + "(가상)")
+                continue
             if it.alive() and not it.stopping:
                 it.stopping = True
                 t = threading.Thread(target=self._stop_seq, args=(it,), daemon=True)
                 t.start()
                 threads.append(it.svc.label)
         return {"ok": True, "msg": ("정지: " + ", ".join(threads)) if threads else "켜진 항목 없음"}
+
+    # ---------- 가상 모드 ----------
+    def set_virtual(self, vm):
+        """vm = VirtualArm 이면 가상 모드, None 이면 실물. 실물 프로세스가 켜져 있으면 가상으로 못 바꾼다."""
+        if vm is not None:
+            real = [it.svc.label for it in self.items.values()
+                    if it.vm is None and it.alive() and (it.svc.id in VIRTUAL_NODES or it.svc.ros)]
+            if real:
+                return {"ok": False, "error": "실물 노드가 켜져 있어 가상으로 못 바꿈: " + ", ".join(real) + " — 먼저 끄세요"}
+        else:
+            for it in self.items.values():
+                if it.vm is not None:
+                    it.vm.stop_service(it.svc.id)
+                    it.vm = None
+        self.virtual = vm
+        MODE["virtual"] = vm is not None
+        (LOG_DIR / "virtual").mkdir(parents=True, exist_ok=True)
+        for it in self.items.values():
+            if it.proc is None and not it.pid:
+                it.started = it.ended = it.exit_code = None
+                it.stop_note = it.error = it.cmd = ""
+        return {"ok": True}
+
+    def vlog(self, sid, text):
+        it = self.items.get(sid)
+        if it is not None:
+            try:
+                with open(it.log_path, "ab") as f:
+                    f.write(f"{time.strftime('%H:%M:%S')} {text}\n".encode())
+            except OSError:
+                pass
+
+    def _start_virtual(self, it):
+        vm = self.virtual
+        it.cmd = f"(가상) {it.svc.label}: " + ", ".join(VIRTUAL_NODES[it.svc.id]) + " 가상 노드"
+        self._log(it, f"켜기: {it.cmd}")
+        it.vm = vm
+        vm.start_service(it.svc.id, dict(it.params))
+        it.started, it.ended, it.exit_code = time.time(), None, None
+        it.stop_note, it.error, it.pid, it.proc = "", "", None, None
+        return {"ok": True, "msg": f"{it.svc.label} 켬 (가상)"}
+
+    def _stop_virtual(self, it):
+        it.vm.stop_service(it.svc.id)
+        it.vm = None
+        it.stop_note = "가상 노드: 바로 끝남"
+        it.ended, it.exit_code = time.time(), 0
+        self._log(it, "끄기: 가상 노드 끝남")
+        return {"ok": True, "msg": f"{it.svc.label} 끔 (가상)"}
+
+    def _once_virtual(self, it, body):
+        it.cmd = "(가상) " + body.strip().splitlines()[0][:120]
+        self._log(it, f"켜기: {it.cmd}")
+        self.vlog(it.svc.id, "[가상] 실물 버스·스크립트가 없어 할 일 없음. 가상 can0 은 늘 UP 으로 본다.")
+        it.started, it.ended, it.exit_code = time.time(), time.time(), 0
+        it.stop_note, it.error = "", ""
+        self._log(it, "끝남: 종료코드 0 (가상)")
+        return {"ok": True, "msg": f"{it.svc.label}: 가상 — 할 일 없음 (종료코드 0)"}
 
     def restart(self, sid, params=None):
         it = self.items.get(sid)
@@ -274,8 +357,10 @@ class ProcessManager:
             for it in self.items.values():
                 if not it.stopping:
                     self._reap(it)
-            if IS_LINUX:
+            if IS_LINUX and self.virtual is None:
                 self.strays = self._scan_strays()
+            elif self.virtual is not None:
+                self.strays = []
             time.sleep(1.0)
 
     def _scan_strays(self):
@@ -346,6 +431,7 @@ class ProcessManager:
                 "params": [{"key": p.key, "label": p.label, "value": it.params.get(p.key, ""), "hint": p.hint}
                            for p in s.params],
                 "stop_warn": s.stop_warn, "conflicts": list(s.conflicts),
+                "virtual": it.vm is not None or (MODE["virtual"] and not s.demo and s.id != "pick_dry"),
                 "log": tail_file(it.log_path, s.tail), "tail": s.tail,
             })
         return out

@@ -9,7 +9,8 @@ stdout 한 줄 = JSON 하나:
   {"type": "reply", "id": n, "result": {...}}        stdin 명령의 답
 stdin 한 줄 = 명령:
   {"id": n, "op": "trigger", "service": "/arm_control/home_elbow", "timeout": 2.0}
-stdin 이 닫히면(서버가 죽으면) 끝난다. 명령 토픽은 발행하지 않는다(ros_monitor.py 와 같음).
+  {"id": n, "op": "joint_command", "names": [...], "positions": [rad, ...]}   /arm_control/joint_command 한 번
+stdin 이 닫히면(서버가 죽으면) 끝난다. 발행하는 명령은 joint_command 하나뿐(서버가 검사한 것만).
 """
 import json
 import sys
@@ -44,6 +45,13 @@ def _reader(mon, stop):
                     r = {"ok": False, "error": f"서비스 호출 실패: {e}"}
                 emit({"type": "reply", "id": c.get("id"), "result": r})
             threading.Thread(target=run, daemon=True).start()
+        elif cmd.get("op") == "joint_command":
+            try:
+                r = mon.publish_joint_command(list(cmd.get("names") or []),
+                                              [float(x) for x in cmd.get("positions") or []])
+            except Exception as e:
+                r = {"ok": False, "error": f"발행 실패: {e}"}
+            emit({"type": "reply", "id": cmd.get("id"), "result": r})
     stop.set()   # stdin EOF = 서버가 끝남
 
 
