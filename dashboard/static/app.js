@@ -254,7 +254,7 @@ function renderSteps() {
     ST.can = step("1", "CAN 켜기");
     ST.can.b = el("button", { class: "btn", onclick: () => post("/api/svc/can_up/start", { params: {} }) }, "can0 올리기");
     ST.can.row.append(ST.can.b);
-    ST.ros = step("2", "ROS 연결");
+    ST.ros = step("2", "연결");
     ST.ros.b = el("button", { class: "btn", onclick: rosConnect }, "연결");
     ST.ros.row.append(ST.ros.b);
     ST.arm = step("3", "팔 켜기");
@@ -283,7 +283,7 @@ function renderSteps() {
   }
   const arm = S.services.find((x) => x.id === "arm_homed"), [t, cls] = svcState(arm);
   setChip(ST.arm.chip, (arm && arm.virtual ? "가상 · " : "") + t, cls);
-  ST.arm.note.textContent = !arm ? "" : !arm.available ? arm.why : arm.error || "ak45 · 서보 · 원점 guard · arm_control 한 번에 (arm_homed.launch.py)";
+  ST.arm.note.textContent = !arm ? "" : !arm.available ? arm.why : arm.error || "AK45 4개 · 서보 · 원점 검사 · 각도 변환을 한 번에";
   ST.arm.on.disabled = !arm || !arm.available || arm.alive || arm.stopping;
   ST.arm.off.disabled = !arm || !arm.alive || arm.stopping;
 }
