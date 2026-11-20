@@ -600,8 +600,7 @@ function buildMap(c) {
     el("div", { class: "lead", style: "margin:0 0 10px" }, "지도에서 ", el("b", {}, "큐브"), " → ", el("b", {}, "놓을 자리"), " 순서로 누르세요."),
     el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기")),
     el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
-    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw both" }), "손 그대로·반 바퀴 둘 다 됨"), el("span", {}, el("i", { class: "sw ok" }), "한쪽 손 모양만 됨"),
-      el("span", {}, el("i", { class: "sw half" }), "집기·놓기 한쪽만·가장자리"),
+    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "됨 (큐브: 집을 수 있는 칸 / 놓을 자리: 이 큐브를 놓을 수 있는 칸)"),
       el("span", {}, el("i", { class: "sw no" }), "안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
       el("span", {}, el("i", { class: "sw vis" }), "비전")),
     M.guide, el("div", { class: "mwrap" }, M.svg), M.hover, M.res, M.err);
@@ -630,7 +629,7 @@ function mapPaint() {
   d.cells.forEach((c, n) => {
     let cls;
     if (pick) cls = keys && c.grasps.some((g) => keys.has(gKey(g))) ? "ok" : "dim";
-    else cls = c.feasible ? (c.plain && c.flip ? "both" : "ok") : c.grasp || c.place ? "half" : "no";
+    else cls = c.feasible ? "ok" : "no";   // 파랑 = 큐브를 놓아도 되는 칸 하나만 (연파랑·진파랑 구분은 헷갈려서 뺌, 2026-11-20)
     M.rects[n].setAttribute("class", "rc " + cls);
   });
   let txt = "", bad = false;
@@ -682,6 +681,10 @@ function mapClick(p) {
   const k = M.mode === "cube" ? ["cube_x", "cube_y"] : ["target_x", "target_y"];
   c.fields[k[0]].value = at.x.toFixed(3); c.fields[k[1]].value = at.y.toFixed(3);
   const cc = M.mode === "target" ? cubeCell() : null;
+  if (M.mode === "cube" && (!cell || !cell.feasible)) {
+    toast(`⚠ 그 칸은 ${cell ? "집을 수 없는 칸" : "지도 밖"} — 파란 칸을 누르세요 (그래도 계획 돌려 보기는 됨)`, "warn");
+    mapUpdate(); return;   // 놓을 자리 고르기로 안 넘어감: 이 큐브로는 칠할 놓을 자리가 없다
+  }
   if (!cell || !cell.feasible) toast(`⚠ 그 자리는 지도상 ${cell ? "안 되는 칸" : "지도 밖"} — 그래도 계획 돌려 보기는 됨`, "warn");
   else if (cc && !cell.grasps.some((g) => cc.grasps.some((h) => gKey(g) === gKey(h))))
     toast("⚠ 그 칸은 이 큐브를 잡는 손 모양으로는 못 놓음 — 그래도 계획 돌려 보기는 됨", "warn");
