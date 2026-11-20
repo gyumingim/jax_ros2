@@ -11,7 +11,9 @@ import math
 import shutil
 import sys
 import tempfile
+import threading
 import time
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -148,14 +150,14 @@ def main():
           f"62 ℃: 경고{'함' if warned else ' 없음'}·홀드 {'유지' if held else '끊김'} / 76 ℃: {arm.ak['ak45_3'].fault}")
     r = arm.call_trigger("/arm_control/home_upper_arm_roll")
     check("뜨거운 동안 원점 거절", not r["ok"], r.get("error"))
-    fake.m[3].temp = 40
+    fake.reset()
     time.sleep(0.2)
 
     # 9. 에러 코드
     fake.m[2].err = 2
     ok = wait(lambda: arm.ak["ak45_2"].fault is not None, 1.0)
     check("에러 코드 → 그 관절 힘 뺌", ok, f"{arm.ak['ak45_2'].fault}")
-    fake.m[2].err = 0
+    fake.reset()
     time.sleep(0.2)
 
     # 10. STOP = 홀드
@@ -235,12 +237,258 @@ def main():
 
     arm.close()
     fake.close()
+
+    review_tests(a, cal, tmp, check, wait)
     print()
     print(f"| 시험 | 결과 | 내용 |\n|---|---|---|")
     for n, s, d in rows:
         print(f"| {n} | {s} | {d} |")
     print(f"\n{sum(1 for r in rows if r[1] == 'OK')}/{len(rows)} OK · {time.monotonic() - t0:.0f} s · 로그 {tmp / 'direct.log'}")
     return 0 if all(r[1] == "OK" for r in rows) else 1
+
+
+class _Die(BaseException):
+    """rx 스레드를 진짜로 죽이는 시험용 (Exception 이 아니라 rx 보호에 안 걸림)."""
+
+
+def review_tests(a, cal, tmp, check, wait):
+    """2026-11-20 독립 검사 지적(1·2·3·4·5·7·9·10) 시험. 시험마다 새 가짜 팔 + 새 RealArm(상태가 안 섞이게)."""
+    rad = math.radians
+    k = [0]
+
+    def rig(home=True):
+        k[0] += 1
+        ch = f"{a.channel}_r{k[0]}" if a.interface == "virtual" else a.channel
+        fake = FakeArm(a.interface, ch)
+        arm = R.RealArm(calibration_file=cal, interface=a.interface, channel=ch, lock_path=None,
+                        log=lambda t: None, log_file=str(tmp / "direct.log"))
+        arm.start()
+        wait(lambda: all(m.fresh(time.monotonic(), 0.25) for m in arm.ak.values()), 2.0)
+        if home:
+            arm.call_trigger("/arm_control/home_all")
+            time.sleep(0.2)
+        return fake, arm
+
+    def done(fake, arm):
+        arm.close()
+        fake.close()
+
+    names = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow"]
+
+    # R1. 재생 첫 프레임 홀드(5 s) 중 STOP → 그 자리 홀드, 첫 프레임으로 다시 안 감
+    fake, arm = rig()
+    traj = {"joint_names": names, "dt": 0.05, "positions": [[0, 0, 0, rad(90)]] * 6, "status": "playable"}
+    arm.play_trajectory(traj, 30.0, hold=5.0)
+    time.sleep(0.5)
+    p_stop = fake.pos(4)
+    arm.hold_all("STOP")
+    ended = wait(lambda: not arm.play.get("running"), 1.0)
+    time.sleep(2.0)
+    check("재생 첫 프레임 홀드 중 STOP → 그 자리", ended and abs(fake.pos(4) - p_stop) < 2 and arm.play.get("reason") == "stopped",
+          f"STOP 때 elbow {p_stop:.1f}°, 2 s 뒤 {fake.pos(4):.1f}° (첫 프레임 90° 로 안 감), 재생 끝: {arm.play.get('reason')}")
+
+    # R2. 첫 프레임 홀드 중 '재생 멈춤'(stop_trajectory) → 끝에 hold_all
+    arm.call_trigger("/arm_control/home_all")
+    time.sleep(0.2)
+    arm.play_trajectory(traj, 30.0, hold=5.0)
+    time.sleep(0.5)
+    arm.stop_trajectory()
+    wait(lambda: not arm.play.get("running"), 1.0)
+    p_stop = fake.pos(4)
+    time.sleep(1.5)
+    check("재생 멈춤 버튼 → 지금 자리 홀드", abs(fake.pos(4) - p_stop) < 2 and arm.ak["ak45_4"].cmd is not None,
+          f"멈춤 뒤 elbow {p_stop:.1f}° → 1.5 s 뒤 {fake.pos(4):.1f}°, 홀드 {'계속' if arm.ak['ak45_4'].cmd is not None else '끊김'}")
+
+    # R3. 프레임 재생 중 STOP → 목표가 STOP 자리에서 안 바뀜(한 프레임 레이스 없음)
+    pos = [[0, 0, 0, rad(-60) * i / 80] for i in range(81)]
+    arm.call_trigger("/arm_control/home_all")
+    time.sleep(0.2)
+    arm.play_trajectory(dict(traj, positions=pos), 30.0, hold=0.2)
+    time.sleep(1.2)
+    arm.hold_all("STOP")
+    t_stop = arm.ak["ak45_4"].target
+    time.sleep(1.0)
+    t_after = arm.ak["ak45_4"].target
+    check("프레임 재생 중 STOP → 목표 안 덮어씀", not arm.play.get("running") and t_stop is not None and abs(t_after - t_stop) < 1.0,
+          f"STOP 목표 {t_stop:+.1f}° → 1 s 뒤 {t_after:+.1f}°, 팔 {fake.pos(4):+.1f}°")
+    done(fake, arm)
+
+    # R4. 5 s 이내 짧은 전원 재투입 + 엔코더 영점 30°(60° 미만) → 원점 지움, 지금 자리 홀드(옛 목표로 안 감)
+    fake, arm = rig(home=False)
+    arm.call_trigger("/arm_control/home_elbow")
+    time.sleep(0.2)
+    arm.joint_command(["elbow"], [rad(20)])
+    time.sleep(1.5)
+    fake.power(4, False)
+    time.sleep(1.0)
+    fake.power(4, True, enc_jump=30.0)
+    ph_on = fake.m[4].phys
+    time.sleep(2.0)
+    m4 = arm.ak["ak45_4"]
+    r = arm.joint_command(["elbow"], [rad(20)])
+    check("짧은 전원 재투입(영점 30° 바뀜) → 원점 지움·지금 자리", not arm.homing.m["ak45_4"].homed and abs(fake.m[4].phys - ph_on) < 5
+          and m4.target is not None and abs(m4.target - m4.pos) < 2 and not r["ok"],
+          f"켜질 때 축 {ph_on:.1f}° → 2 s 뒤 {fake.m[4].phys:.1f}° (옛 목표면 축 50°), 원점 지움, 명령 거절: {r.get('error')}")
+
+    # R5. 긴 끊김 경계(제어 루프가 cmd 를 지우기 전 5.05 s 째 피드백) → 옛 목표 말고 지금 자리
+    arm.call_trigger("/arm_control/home_elbow")
+    time.sleep(0.2)
+    with arm.lock:
+        now = time.monotonic()
+        m4.fb_t = arm.homing.m["ak45_4"].seen = now - 5.05
+        m4.target, m4.cmd = m4.pos + 20.0, m4.pos + 20.0
+        st = types.SimpleNamespace(controller_id=4, position_deg=m4.pos - 10.0, speed_erpm=0, current_a=0.0,
+                                   temperature_c=30, error=0)
+        arm._on_feedback(st, now)
+        tg, ps = m4.target, m4.pos
+    check("긴 끊김 경계 순간 → 지금 자리 홀드", abs(tg - ps) < 0.01 and not arm.homing.m["ak45_4"].homed,
+          f"5.05 s 끊김 뒤 피드백 {ps:+.1f}° → 목표 {tg:+.1f}° (옛 목표 +20 쪽 아님), 원점 지움")
+    done(fake, arm)
+
+    # R6. rx 처리 예외 → 스레드 살아 있음 + 화면 빨강, 고치면 피드백 계속
+    fake, arm = rig()
+    orig = arm._on_feedback
+
+    def bad(st, now):
+        raise ValueError("시험 예외")
+    arm._on_feedback = bad
+    time.sleep(0.3)
+    snap = arm.snapshot()
+    arm._on_feedback = orig
+    ok = wait(lambda: arm.ak["ak45_4"].fresh(time.monotonic(), 0.25), 1.0)
+    check("rx 처리 예외 → 스레드 삶·화면 빨강", arm.threads[0].is_alive() and ok and snap["bus"]["level"] == 2
+          and "수신 처리 오류" in snap["bus"]["message"] and arm.ak["ak45_4"].cmd is not None,
+          f"예외 {arm.busst['rx_errors']}개 동안 rx 살아 있음, 화면: {snap['bus']['message'][:60]}…")
+
+    # R7. rx 스레드가 진짜 죽으면 → 제어 루프가 다시 띄움
+    hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    once = [True]
+
+    def die(st, now):
+        if once[0]:
+            once[0] = False
+            raise _Die()
+        return orig(st, now)
+    arm._on_feedback = die
+    ok = wait(lambda: arm.busst["rx_restarts"] >= 1 and arm.threads[0].is_alive(), 2.0)
+    arm._on_feedback = orig
+    threading.excepthook = hook
+    fresh = wait(lambda: arm.ak["ak45_4"].fresh(time.monotonic(), 0.25), 1.0)
+    check("rx 스레드 죽음 → 다시 띄움", ok and fresh and abs(fake.pos(4)) < 1.0,
+          f"다시 띄움 {arm.busst['rx_restarts']}번, 피드백 {'돌아옴' if fresh else '없음'}, 팔 {fake.pos(4):.1f}° (안 떨어짐)")
+
+    # R8. recv 가 계속 실패(USB-CAN 빠짐 흉내) → 버스 다시 엶, 로그 폭주 없음
+    n_log = len(arm.lines)
+    bus0 = arm.bus
+
+    def broken(timeout=None):
+        time.sleep(0.01)
+        raise OSError(100, "Network is down (시험)")
+    bus0.recv = broken
+    ok = wait(lambda: arm.busst["bus_reopens"] >= 1 and arm.bus is not bus0, 4.0)
+    fresh = wait(lambda: arm.ak["ak45_4"].fresh(time.monotonic(), 0.25), 1.0)
+    new_lines = sum(1 for x in list(arm.lines)[n_log - len(arm.lines):] if "수신 오류" in x) if len(arm.lines) > n_log else 0
+    check("수신 실패 → 버스 다시 엶·로그 몇 줄", ok and fresh and new_lines <= 2 and abs(fake.pos(4)) < 1.0,
+          f"다시 엶 {arm.busst['bus_reopens']}번, 수신 오류 {arm.busst['rx_errors']}개에 '수신 오류' 로그 {new_lines}줄(5 s 에 한 줄), 피드백 돌아옴, 팔 {fake.pos(4):.1f}°")
+    done(fake, arm)
+
+    # R9. 보정 move 를 막힌 관절에 여러 번 → 목표는 측정 ±10° 안
+    fake, arm = rig(home=False)
+    with fake.lock:
+        fake.m[4].grab = True
+    for _ in range(10):
+        arm.calib("move", "elbow", 10)
+    m4 = arm.ak["ak45_4"]
+    check("보정 move 누적 안 됨", abs(m4.target - m4.pos) <= 10.0 + 1e-6,
+          f"막힌 elbow 에 +10° 10번 → 목표 {m4.target:+.1f}° · 실제 {m4.pos:+.1f}° (전엔 +100°)")
+    fake.reset()
+    done(fake, arm)
+
+    # R10. 브레이크 송신 실패(ENOBUFS 흉내) → 재시도로 다 나감 / 계속 실패면 화면 경고
+    fake, arm = rig()
+    bus0 = arm.bus
+    real_send = bus0.send
+    calls = [0]
+
+    def flaky(msg, timeout=None):
+        calls[0] += 1
+        if calls[0] % 3:
+            raise OSError(105, "No buffer space available (시험)")
+        return real_send(msg, timeout)
+    b0 = {i: fake.m[i].brakes for i in fake.m}
+    bus0.send = flaky
+    arm.limp()
+    time.sleep(0.2)
+    got = {i: fake.m[i].brakes - b0[i] for i in fake.m}
+
+    def dead(msg, timeout=None):
+        raise OSError(105, "No buffer space available (시험)")
+    bus0.send = real_send
+    arm.call_trigger("/arm_control/home_all")
+    time.sleep(0.1)
+    bus0.send = dead
+    arm.limp(["ak45_4"])
+    snap = arm.snapshot()
+    bus0.send = real_send
+    note = arm.ak["ak45_4"].note or ""
+    check("브레이크 송신 실패 → 재시도·경고", all(v >= 3 for v in got.values()) and snap["bus"]["level"] == 2 and "못 보냄" in note,
+          f"3번 중 2번 실패해도 모터마다 브레이크 {list(got.values())}개 · 계속 실패면: {note[:40]}… / 화면 {snap['bus']['message'][:40]}…")
+    done(fake, arm)
+
+    # R11. 작은 오차로 계속 누름(막힘 12° 아래, 큰 전류) → 목표를 지금 자리로(힘 유지), 끄면 안 함
+    fake, arm = rig()
+    with fake.lock:
+        fake.m[4].grab = True
+        fake.m[4].press_k = 0.5
+    arm.joint_command(["elbow"], [rad(8)])
+    ok = wait(lambda: "누르기 멈춤" in (arm.ak["ak45_4"].note or ""), 3.0)
+    time.sleep(0.3)
+    m4 = arm.ak["ak45_4"]
+    cur = m4.cur
+    check("누르기(전류 큼, 오차 8°) → 목표 풀어 줌·힘 유지", ok and m4.fault is None and m4.cmd is not None
+          and abs(m4.target - m4.pos) < 0.5 and cur < 1.0 and arm.homing.m["ak45_4"].homed,
+          f"{(m4.note or '')[:50]}… → 전류 {cur:.2f} A, 홀드 유지, 원점 유지")
+    arm.p["press_amps"] = 0.0
+    arm.joint_command(["elbow"], [rad(-8)])
+    time.sleep(2.0)
+    check("누르기 멈춤 끄기(press_amps 0)", "누르기" not in (m4.note or "") and abs(m4.target - m4.pos) > 6,
+          f"끄면 2 s 뒤에도 목표 {m4.target:+.1f}° · 실제 {m4.pos:+.1f}° 그대로 (막힘 12° 아래)")
+    fake.reset()
+    done(fake, arm)
+
+    # R12. 온도 히스테리시스 + 온도로 힘 뺀 관절은 경고 아래에서만 원점
+    fake, arm = rig()
+    m3 = arm.ak["ak45_3"]
+    seq = []
+    for t in (62, 57, 54):
+        fake.m[3].temp = t
+        time.sleep(0.15)
+        seq.append(m3.hot)
+    fake.m[3].temp = 76
+    wait(lambda: m3.fault is not None, 1.0)
+    fake.m[3].temp = 65
+    time.sleep(0.15)
+    r65 = arm.call_trigger("/arm_control/home_upper_arm_roll")
+    fake.m[3].temp = 58
+    time.sleep(0.15)
+    r58 = arm.call_trigger("/arm_control/home_upper_arm_roll")
+    check("온도 경고 풀림 −5 ℃ · 원점은 경고 아래", seq == [True, True, False] and not r65["ok"] and r58["ok"],
+          f"62/57/54 ℃ 경고 {seq}, 76 ℃ 힘 뺀 뒤 65 ℃ 원점 {'거절' if not r65['ok'] else '허용'}, 58 ℃ {'허용' if r58['ok'] else '거절'}")
+    fake.reset()
+    done(fake, arm)
+
+    # R13. 재생 중 close() → 브레이크 뒤 위치 프레임 없음
+    fake, arm = rig()
+    arm.play_trajectory(dict(traj, positions=pos), 30.0, hold=0.2)
+    time.sleep(0.8)
+    arm.close()
+    time.sleep(0.3)
+    with fake.lock:
+        t_brake = min((f[0] for f in fake.frames if f[2] and (f[1] >> 8) == 2), default=None)
+        after = sum(1 for f in fake.frames if t_brake is not None and f[0] > t_brake and f[2] and (f[1] >> 8) == 4)
+    check("재생 중 닫기 → 브레이크 뒤 위치 프레임 0", t_brake is not None and after == 0, f"브레이크 뒤 위치 프레임 {after}개")
+    fake.close()
 
 
 if __name__ == "__main__":

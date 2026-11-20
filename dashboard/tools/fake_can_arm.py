@@ -7,7 +7,8 @@
   - 위치 명령(모드 4)을 받으면 그 각으로 속도 한계 120 °/s 로 따라간다. 명령이 0.25 s 넘게 안 오면 힘이 빠진다
     (ak45_node 주석: 재송신을 멈추면 모터 쪽 명령 타임아웃으로 홀딩 토크가 풀린다 — 가정) → 0° 쪽으로 40 °/s 로 떨어진다.
   - 브레이크(모드 2): 바로 힘 빠짐.
-  - 시험용 손잡이: silent(피드백 끊기), grab(붙잡기 = 안 움직임, 막힘), temp, err, enc_jump(엔코더 영점 튐).
+  - 시험용 손잡이: silent(피드백 끊기), grab(붙잡기 = 안 움직임, 막힘), temp, err, enc_jump(엔코더 영점 튐),
+    press_k(누르기 전류). reset() = 손잡이를 기본값으로(시험 사이 상태가 섞이지 않게; 축 자리·엔코더 영점은 그대로).
 가짜 STM32: StdId 5 [id][angle×10] 를 받아 서보 각을 기록 (피드백은 보내지 않음 — 실물 펌웨어와 같음).
 모든 수신 프레임은 frames 에 (시각, id, ext, data) 로 쌓인다(첫 명령 전 무송신 검사용).
 """
@@ -36,6 +37,7 @@ class FakeMotor:
         self.cur = 0.0
         self.brakes = 0
         self.pos_cmds = 0
+        self.press_k = 0.0          # A/° — 누르기 흉내: 홀드 중 전류 += press_k × |목표 − 실제| (0 = 끔, 기본)
 
 
 class FakeArm:
@@ -100,7 +102,7 @@ class FakeArm:
                         v = max(-40.0, min(40.0, -m.phys / 0.15))
                     m.phys += v * dt
                     m.vel = v
-                    m.cur = (0.3 + 0.01 * abs(v)) if holding else 0.0
+                    m.cur = min(8.0, 0.3 + 0.01 * abs(v) + m.press_k * abs(m.target - m.phys)) if holding else 0.0
                     if k % 4 == 0 and m.powered and now >= m.silent_until:      # 50 Hz
                         pos = m.phys - m.enc_off
                         data = struct.pack(">hhhbB", int(round(pos * 10)), int(v / 6 * 14 / 10), int(m.cur * 100),
@@ -123,6 +125,12 @@ class FakeArm:
                 m.target = m.cmd_t = None
             else:
                 m.enc_off += enc_jump
+
+    def reset(self):
+        with self.lock:
+            for m in self.m.values():
+                m.grab, m.temp, m.err, m.silent_until, m.press_k = False, 30, 0, 0.0, 0.0
+                m.powered = True
 
     def pos(self, cid):
         m = self.m[cid]

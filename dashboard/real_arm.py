@@ -512,9 +512,9 @@ class RealArm:
         had = m.target is not None
         m.target = m.cmd = None
         m.vel, m.stall_t, m.press_t = 0.0, None, None
+        self._unhome(m.name, reason + " — 원점 다시 잡기")     # 브레이크(몇 ms) 전에: 그 사이 원점이 남아 보이지 않게
         if brake and had:
             self._brake(m)
-        self._unhome(m.name, reason + " — 원점 다시 잡기")
         return had
 
     def _play_abort(self, m, reason):
