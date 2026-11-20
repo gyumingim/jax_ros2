@@ -958,7 +958,7 @@ const HK_WRIST_Z0 = Math.round(2.5 + HK_ABOVE * 100);   // 손목 기준 기본 
 const hkAbove = () => (HK.good && HK.good.ref_info && HK.good.ref_info.wrist_above_grip_vertical_m) || HK_ABOVE;
 const hkCubeZ = () => HK.f.ref.value === "wrist" ? Math.round((2.5 + hkAbove() * 100) * 2) / 2 : 2.5;
 function hkRefUi() {   // 큐브 잡는 높이 버튼: 손목 기준은 수직 손에서만 계산이 맞음
-  HK.preset.hidden = HK.f.ref.value === "wrist" && HK.f.mode.value !== "vertical";
+  HK.preset.hidden = HK.f.ref.value === "wrist" && HK.f.mode.value !== "vertical";   // 위치만이면 손목 각에 따라 달라 숨김
   HK.preset.textContent = `큐브 잡는 높이 (${hkCubeZ()} cm)`;
 }
 function hkRefChanged() {   // 기준점 바꾸면 높이도 그 기준에 맞게 (수직 손 기준 거리만큼) + 슬라이더 범위
@@ -978,12 +978,13 @@ function buildHandIk() {
   f.ref = el("select", {}, el("option", { value: "wrist" }, "손목 중앙 (기본)"), el("option", { value: "grip" }, "손가락 사이 (집는 점)"));
   f.ref.addEventListener("change", () => hkRefChanged());
   f.yaw = hkSlider("손 방향 (잡을 큐브 yaw)", "°", -45, 45, 1, 0, 0);
-  f.mode = el("select", {}, el("option", { value: "vertical" }, "수직 (기울기 0°, 기본)"),
+  f.mode = el("select", {}, el("option", { value: "position" }, "손 각도 무시 (위치만, 손목 관절 그대로, 기본)"),
+    el("option", { value: "vertical" }, "수직 (기울기 0°)"),
     el("option", { value: "auto" }, "손가락 아래 (기울기 자동, 0~상한)"),
     el("option", { value: "grasp" }, "−40° 고정 (팀 IK 원래 값)"));
   f.tmax = el("input", { type: "number", min: 0, max: 90, step: 5, value: 60, style: "width:64px", title: "기울기 자동일 때 손가락 사이 축 둘레 기울기 상한 (양쪽)" });
   f.tmax.addEventListener("input", () => hkEdit(false));
-  f.fix = el("input", { type: "checkbox", checked: "" });
+  f.fix = el("input", { type: "checkbox" });   // 기본 끔 (사용자 2026-11-20)
   f.fixv = el("input", { type: "number", min: 0, max: 45, step: 1, value: 0, style: "width:70px" });
   f.open = el("input", { type: "checkbox" });
   f.followBox = el("input", { type: "checkbox" });
@@ -1033,7 +1034,7 @@ function buildHandIk() {
       el("div", { class: "row", style: "margin-top:0" }, pickMap, fromCube),
       f.x.row, f.y.row, f.z.row, f.yaw.row,
       el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "기준점"), f.ref),
-      el("details", { class: "log" }, el("summary", {}, "고급: 손 자세 (기본 수직)"),
+      el("details", { class: "log" }, el("summary", {}, "고급: 손 자세 (기본 = 손 각도 무시, 손목 관절 그대로)"),
         el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 자세"), f.mode, el("span", {}, " 기울기 상한 ±"), f.tmax, el("span", {}, "°"))),
       el("label", { class: "chk", style: "display:flex;gap:6px;align-items:center;margin:4px 0 0" }, f.fix, "어깨 옆으로 벌리기 고정 (shoulder_yaw)", f.fixv, "°"),
       el("p", { class: "help", style: "margin:4px 0 0" }, "손이 바닥을 봐도 답이 하나가 아니다: 손 위치·방향은 6개 값인데 관절이 7개라 같은 손 자세를 만드는 팔 모양이 여러 개(팔꿈치 위치가 남음)이고, 손도 반 바퀴 돌린 두 가지가 있어 계산이 하나를 고른다. " +

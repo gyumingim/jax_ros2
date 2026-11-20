@@ -29,7 +29,7 @@ SUB = Path("motion1") / "src"
 TOL_POS = 0.005               # 풀림 판정: 위치 5 mm (env.reachable 의 position_tolerance)
 TOL_ROT = math.radians(1.5)   # 손 방향 1.5°
 FAST_ITERS = 80               # 드래그 중 빠른 풀이의 반복 수 (직전 해에서 시작)
-MODES = ("auto", "grasp", "vertical")
+MODES = ("auto", "grasp", "vertical", "position")   # position = 손 각도 무시: 기준점 위치만, 손목 3 관절은 지금 값 그대로
 TILT_MAX_DEFAULT = 60.0       # auto 의 기울기 상한 (°)
 AUTO_TILT_INITS = (0.0, -40.0, 40.0)   # auto: 시작 기울기(처음 120 번 묶음) — 가지 고르기
 TIE_DEG = 2.0                 # 해 고르기: 최소 회전에서 이 각 안이면 동률 → 손 기울기 수직에 가까운 것
@@ -291,6 +291,38 @@ class _Solver:
         out.append(np.zeros(len(self.arm)))
         return out
 
+    WRIST3 = ("wrist_pitch", "wrist_yaw", "hand_roll")
+
+    def solve_position(self, seed, point, ref, its=300):
+        """손 각도 무시: 기준점(손목 중앙 / site) 위치 3 만 맞춘다. 손목 3 관절은 seed 값 그대로(움직이지 않음),
+        앞 4 관절(범위 [v, v] 로 묶인 고정 관절은 그대로)로만. 돌려줌 (q, 위치 오차 m)."""
+        np, mj, m, d = self.np, self.mj, self.m, self.d
+        dof = m.jnt_dofadr[self.jid]
+        lim = m.jnt_range[self.jid]
+        move = np.array([n not in self.WRIST3 for n in self.arm]) & (lim[:, 1] - lim[:, 0] > 1e-9)
+        jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
+        d.qpos[self.qadr] = seed
+        wrist = ref == "wrist"
+        for _ in range(its):
+            mj.mj_kinematics(m, d); mj.mj_comPos(m, d)
+            pos = self.wrist_pos() if wrist else d.site_xpos[self.site]
+            e = point - pos
+            if np.linalg.norm(e) < 2e-4:
+                break
+            if wrist:
+                mj.mj_jac(m, d, jp, jr, pos, self.wbody)
+            else:
+                mj.mj_jacSite(m, d, jp, jr, self.site)
+            J = jp[:, dof] * move
+            dq = J.T @ np.linalg.solve(J @ J.T + 1e-4 * np.eye(3), e)
+            d.qpos[self.qadr] = np.clip(d.qpos[self.qadr] + 0.5 * dq, lim[:, 0], lim[:, 1])
+        mj.mj_kinematics(m, d)
+        pos = self.wrist_pos() if wrist else d.site_xpos[self.site]
+        return d.qpos[self.qadr].copy(), float(np.linalg.norm(point - pos))
+
+    def axis_tilt(self, rot):
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(rot[2, 2])))))
+
     def tilt_fix(self, mode):
         """손목 기준 풀이에서 묶을 기울기(°): vertical 0, grasp HAND_TILT, auto 는 None(자유)."""
         return None if mode == "auto" else 0.0 if mode == "vertical" else float(self.E.HAND_TILT)
@@ -301,6 +333,16 @@ class _Solver:
         y = R.fold_yaw(yaw_real + R.SIM_FROM_REAL_YAW)
         turns = sorted({round(y, 6), round(y + 90.0, 6), round(y - 90.0, 6)}, key=abs)
         out = []
+        if mode == "position":
+            # 손목 3 관절 = 지금 값(current, 없으면 HOME) 그대로. 시작점: 직전 보낸 해·지금·HOME·0 의 앞 4 관절
+            hold = current if current is not None else np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
+            wi = [self.arm.index(n) for n in self.WRIST3]
+            for s0 in ([near] if near is not None else []) + self.seeds(current):
+                s0 = np.array(s0, dtype=float); s0[wi] = hold[wi]
+                q, pe = self.solve_position(np.clip(s0, lim[:, 0], lim[:, 1]), point_sim, ref)
+                _, rot = self.fk(q)
+                out.append({"q": q, "pe": pe, "re": 0.0, "turn": 0.0, "flip": False, "rot": rot, "tilt": self.axis_tilt(rot)})
+            return out, lim
         for turn in turns:
             for flip in (False, True):
                 if ref == "wrist" and mode != "auto":
@@ -481,7 +523,11 @@ class _Solver:
         point = np.asarray(self.to_sim(p))
         seed = np.clip(np.radians([float(seed_d[n]) for n in self.arm]), lim[:, 0], lim[:, 1])
         ref = "wrist" if b.get("ref") == "wrist" else "grip"
-        if ref == "wrist" and mode != "auto":
+        if mode == "position":   # 손목 3 관절은 seed(직전 해) 값 그대로
+            q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
+            re_ = 0.0
+            tilt = self.axis_tilt(self.fk(q)[1])
+        elif ref == "wrist" and mode != "auto":
             tilt = self.tilt_fix(mode)
             q, pe, re_, _ = self.solve_free_tilt(seed, point, turn, flip, TILT_MAX_DEFAULT, its=FAST_ITERS, home_pull=0.0, ref="wrist", tilt_fix_deg=tilt)
         elif mode == "auto":
@@ -511,6 +557,8 @@ class _Solver:
     def why(self, mode, yaw, point, current, ranges, best, tilt_max=TILT_MAX_DEFAULT, ref="grip"):
         """실패 이유를 사람 말로: 위치부터 안 닿나 → 손 비틀기 서보(±88)만 풀면 되나 → 그 손 방향이 안 되나."""
         np = self.np
+        if mode == "position":
+            return "no_reach", f"팔이 안 닿음 (손목 관절은 지금 값 그대로, 앞 4 관절로 가장 가까운 해 {best['pe'] * 1000:.0f} mm 차이)"
         self.set_ranges(ranges)
         reach = (self.position_only(self.seeds(current), point, ref="wrist") if ref == "wrist"
                  else self.position_only(self.seeds(current), point + self.dz(mode) * best["rot"][:, 2]))

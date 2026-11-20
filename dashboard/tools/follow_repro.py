@@ -18,6 +18,7 @@ ap.add_argument("--fix", type=int, default=1)
 ap.add_argument("--yaw", type=float, default=20.0)
 ap.add_argument("--tag", default="run")
 ap.add_argument("--no-send", action="store_true")
+ap.add_argument("--mode", default=None, help="손 자세 (없으면 화면 기본)")
 ap.add_argument("--resync", type=int, default=1, help="구간마다 막혀 있으면 [보내기] 로 다시 맞춤")
 ap.add_argument("--dt", type=float, default=0.15, help="슬라이더 한 칸 사이 시간 (s)")
 a = ap.parse_args()
@@ -77,7 +78,9 @@ with sync_playwright() as pw:
     page.on("dialog", lambda d: d.accept())
     page.goto(f"http://127.0.0.1:{a.port}/#ik")
     page.wait_for_function("() => typeof HK !== 'undefined' && !!HK.f", timeout=30000)
-    page.evaluate("([fx, yaw]) => { HK.f.fix.checked = !!fx; HK.f.yaw.set(yaw); HK.f.mode.value = 'auto'; HK.f.x.set(-0.10); HK.f.y.set(-0.30); HK.f.z.set(2.5); hkEdit(false); }", [a.fix, a.yaw])
+    page.evaluate("([fx, yaw, md]) => { HK.f.fix.checked = !!fx; HK.f.yaw.set(yaw); if (md) HK.f.mode.value = md; HK.f.x.set(-0.10); HK.f.y.set(-0.30); HK.f.z.set(Z0); hkEdit(false); }".replace("Z0", str(0)), [a.fix, a.yaw, a.mode])
+    z0 = page.evaluate("() => HK.f.ref && HK.f.ref.value === 'wrist' ? HK_WRIST_Z0 : 2.5")   # 기준점 높이 (손목 27 / 집는 점 2.5)
+    page.evaluate("(z) => { HK.f.z.set(z); hkEdit(false); }", z0)
     time.sleep(0.5)
     print("start settle", settle(page), page.evaluate("() => HK.last && [HK.last.ok, HK.last.reason]"))
     page.wait_for_function("() => S && S.gate && Object.values(S.gate.joints || {}).length && Object.values(S.gate.joints).every((j) => j.ok)", timeout=30000)
@@ -97,8 +100,8 @@ with sync_playwright() as pw:
         ("y -0.30→-0.20", lambda: slide(page, "y", -0.30, -0.20, 0.005, 3)),
         ("y -0.20→-0.35", lambda: slide(page, "y", -0.20, -0.35, 0.005, 3)),
         ("x 0.15→-0.10", lambda: slide(page, "x", 0.15, -0.10, 0.005, 3)),
-        ("z 2.5→15", lambda: slide(page, "z", 2.5, 15, 0.5, 1)),
-        ("z 15→2.5", lambda: slide(page, "z", 15, 2.5, 0.5, 1)),
+        ("z +0→+12.5 cm", lambda: slide(page, "z", z0, z0 + 12.5, 0.5, 1)),
+        ("z +12.5→+0 cm", lambda: slide(page, "z", z0 + 12.5, z0, 0.5, 1)),
         ("map (-0.10,-0.35)→(0.04,-0.25) 사용자 점", lambda: mapdrag(page, (-0.10, -0.35), (0.04, -0.25), 6)),
         ("map (0.04,-0.25)→(0.15,-0.20)", lambda: mapdrag(page, (0.04, -0.25), (0.15, -0.20), 5)),
         ("map (0.15,-0.20)→(-0.10,-0.30)", lambda: mapdrag(page, (0.15, -0.20), (-0.10, -0.30), 8)),

@@ -15,6 +15,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=8098)
 ap.add_argument("--mode", default="vertical")
 ap.add_argument("--yaw", type=float, default=0.0)
+ap.add_argument("--zc", type=float, default=None, help="손목 높이 cm (없으면 집는 점 2.5 cm 에 해당하는 수직 손 값)")
+ap.add_argument("--quiet", action="store_true")
 a = ap.parse_args()
 U = f"http://127.0.0.1:{a.port}"
 
@@ -30,10 +32,10 @@ def post(path, body):
 
 info = post("/api/ik/fk", {"mode": a.mode})["ref_info"]
 above = info["wrist_above_grip_vertical_m"]
-zc = 2.5 + above * 100
+zc = a.zc if a.zc is not None else 2.5 + above * 100
 print(f"ref_info {info} → 손목 높이 {zc:.2f} cm (집는 점 2.5 cm, 수직 손)")
 pts = [(x, y) for y in (-0.35, -0.30, -0.25, -0.20) for x in (-0.10, -0.05, 0.0, 0.05, 0.10, 0.15)] + [(-0.03, -0.36)]
-for fix in (True, False):
+for fix in (False, True):
     n_ok, errs, fails = 0, [], []
     for x, y in pts:
         b = {"x": x, "y": y, "z_table_cm": zc, "yaw_deg": a.yaw, "mode": a.mode, "ref": "wrist", "fix_deg": {"shoulder_yaw": 0} if fix else {}}
@@ -49,6 +51,6 @@ for fix in (True, False):
         else:
             tag = f"안 됨: {r.get('reason')} (가장 가까운 해 {r.get('pos_err_mm')} mm · {r.get('ang_err_deg')}°)"
             fails.append((x, y))
-        if (x, y) == (-0.03, -0.36) or not r.get("ok"):
+        if (x, y) == (-0.03, -0.36) or (not r.get("ok") and not a.quiet):
             print(f"  fix={fix} ({x:+.2f},{y:+.2f}) {tag}")
     print(f"고정 {'켬' if fix else '끔'}: 24점+사용자 점 중 {n_ok}/{len(pts)} 풀림 · 손목 FK 오차 최대 {max(errs) if errs else 0:.1f} mm")
