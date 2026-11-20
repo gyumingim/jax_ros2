@@ -117,6 +117,17 @@ def _arm_launch(p):
     return "exec " + " ".join(shlex.quote(a) for a in args)
 
 
+def _arm_homed(p):
+    args = ["ros2", "launch", "arm_control", "arm_homed.launch.py",
+            f"servo_channel:={_iface(p.get('servo_channel'), 'servo_channel')}",
+            f"max_speed_deg_s:={_num(p.get('max_speed_deg_s'), 'max_speed_deg_s', 0.1, 360)}"]
+    for k in ("calibration_file", "home_file"):
+        v = (p.get(k) or "").strip()
+        if v:
+            args.append(f"{k}:={v}")
+    return "exec " + " ".join(shlex.quote(a) for a in args)
+
+
 def _stm_bridge(p):
     ch = _iface(p.get("servo_channel"), "servo_channel")
     return f"exec ros2 run stm_bridge stm_bridge_node --ros-args -p servo_channel:={ch}"
@@ -160,21 +171,31 @@ SERVICES = [
             params=[Param("servo_channel", "servo_channel", "can0"),
                     Param("max_speed_deg_s", "max_speed_deg_s", "30.0", "°/s"),
                     Param("calibration_file", "calibration_file", "", "비우면 패키지 기본")],
-            conflicts=("ak45", "stm_bridge", "arm_control"),
+            conflicts=("ak45", "stm_bridge", "arm_control", "arm_homed"),
             procs=("ak45_node", "stm_bridge_node", "arm_control_node"),
+            stop_warn=AK45_STOP_WARN),
+    Service("arm_homed", "arm_homed.launch.py (원점 guard 포함)", _arm_homed, group="노드",
+            help="arm.launch.py 와 같고 homing_guard 가 arm_control_node 와 ak45_node 사이에 낀다. "
+                 "원점을 잡기 전·전원 재투입 뒤에는 AK45 명령이 막힌다(아래 '원점' 칸).",
+            params=[Param("servo_channel", "servo_channel", "can0"),
+                    Param("max_speed_deg_s", "max_speed_deg_s", "30.0", "°/s"),
+                    Param("calibration_file", "calibration_file", "", "비우면 패키지 기본"),
+                    Param("home_file", "home_file", "", "비우면 패키지 homing.json")],
+            conflicts=("arm_launch", "ak45", "stm_bridge", "arm_control"),
+            procs=("ak45_node", "stm_bridge_node", "arm_control_node", "homing_guard"),
             stop_warn=AK45_STOP_WARN),
     Service("ak45", "ak45_node", lambda p: "exec ros2 launch ak45_ros2 ak45_node.launch.py", group="노드",
             help="AK45 4개(ID 1~4). /joint_states, /diagnostics 발행, /ak45/command 수신.",
-            conflicts=("arm_launch",), procs=("ak45_node",), stop_warn=AK45_STOP_WARN),
+            conflicts=("arm_launch", "arm_homed"), procs=("ak45_node",), stop_warn=AK45_STOP_WARN),
     Service("stm_bridge", "stm_bridge_node", _stm_bridge, group="노드",
             help="/servo/command → STM32 서보 CAN 프레임(StdId 5).",
             params=[Param("servo_channel", "servo_channel", "can0")],
-            conflicts=("arm_launch",), procs=("stm_bridge_node",)),
+            conflicts=("arm_launch", "arm_homed"), procs=("stm_bridge_node",)),
     Service("arm_control", "arm_control_node", _arm_control, group="노드",
             help="/arm_control/joint_command → /ak45/command, /servo/command. calibrate --ros 와 같이 켜지 않는다.",
             params=[Param("max_speed_deg_s", "max_speed_deg_s", "30.0", "°/s"),
                     Param("calibration_file", "calibration_file", "", "비우면 패키지 기본")],
-            conflicts=("arm_launch",), procs=("arm_control_node",)),
+            conflicts=("arm_launch", "arm_homed"), procs=("arm_control_node",)),
     Service("vision", "vision_node", _vision, group="노드",
             help="둘 중 하나만: fixed_pose(시험용) 또는 result_json(카메라 inference.json 경로).",
             params=[Param("fixed_pose", "fixed_pose", "[0.10, -0.30, 20.0]", "[x m, y m, yaw °]"),
@@ -199,17 +220,17 @@ SERVICES = [
 # 보정은 키보드 대화형(z/f/v/w)이라 웹에서 돌리지 않는다. 화면에는 명령 안내만.
 CALIBRATE_GUIDE = {
     "needs": ["ak45", "stm_bridge"],
-    "forbid": ["arm_launch", "arm_control"],
+    "forbid": ["arm_launch", "arm_homed", "arm_control"],
     "commands": [
         f"source /opt/ros/{ROS_DISTRO}/setup.bash && source {WS}/install/setup.bash",
         "ros2 run arm_control calibrate --ros",
     ],
-    "note": "ak45_node 와 stm_bridge_node 만 켜고(위 버튼), arm_control_node·arm.launch.py 는 끈 상태에서 터미널로 실행. "
+    "note": "ak45_node 와 stm_bridge_node 만 켜고(위 버튼), arm_control_node·arm.launch.py·arm_homed.launch.py 는 끈 상태에서 터미널로 실행. "
             "키: z 영점 / f 방향 / v 확인 / w 저장.",
 }
 
 # 대시보드 밖(터미널)에서 떠 있는지 볼 실행 파일 이름
-WATCH_PROCS = ("ak45_node", "stm_bridge_node", "arm_control_node", "vision_node", "calibrate")
+WATCH_PROCS = ("ak45_node", "stm_bridge_node", "arm_control_node", "vision_node", "calibrate", "homing_guard")
 
 
 def visible_services():

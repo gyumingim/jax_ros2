@@ -1,4 +1,5 @@
-// JAX 팔 대시보드 — 상태는 WS(/ws, 0.5초마다 전체 스냅샷), 안 되면 /api/state 폴링. 모터 명령 버튼은 없음(읽기 + 프로세스 관리).
+// JAX 팔 대시보드 — 상태는 WS(/ws, 0.5초마다 전체 스냅샷), 안 되면 /api/state 폴링.
+// 모터 각도 명령 버튼은 없음(읽기 + 프로세스 관리 + homing_guard 원점 잡기/쉬게 하기 서비스).
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, attrs = {}, ...kids) => {
@@ -69,6 +70,7 @@ function render() {
   renderMotors();
   renderServices();
   renderCalib();
+  renderHoming();
   $("#foot").textContent = `워크스페이스 ${S.info.ws} · ROS ${S.info.distro} · 레포 ${S.info.repo} · 로그 ${S.info.logs} · ${S.info.platform}`;
 }
 
@@ -198,6 +200,90 @@ function renderCalib() {
   n.className = "note " + (bad.length ? "bad" : miss.length ? "warn" : "");
   n.textContent = bad.length ? `끄세요: ${bad.join(", ")} (calibrate 와 같은 모터에 명령)` :
     miss.length ? `아직 안 켬: ${miss.join(", ")}` : "준비됨: 터미널에서 calibrate --ros 실행";
+}
+
+// ---------- 원점 (homing_guard) ----------
+// 카드는 한 번 만들고(확인창 중에 다시 그려져도 버튼이 안 사라지게) 글자만 바꾼다.
+const H = { rows: {} };
+function homeAsk(joint) {
+  const poses = S.home_poses || {};
+  const pose = joint === "all"
+    ? Object.entries(poses).map(([k, v]) => `${k} ${v}°`).join(", ") || "전부 sim 0°"
+    : `${joint} sim ${poses[joint] ?? 0}°`;
+  return `${joint === "all" ? "원점 없는 관절 전부" : joint}: 관절을 기준 자세(homing.json home_sim_deg: ${pose})에 두었나요?
+` +
+    "지금 위치를 그 자세로 삼는다. 다른 자세에서 누르면 그만큼 틀어진 원점이 된다.";
+}
+const RELEASE_HELP = "쉬게 하기: guard 가 이 관절 명령 전달만 끊고 원점을 지운다. ak45_node 는 마지막 target 을 계속 잡고 있다 " +
+  "(실제로 힘을 빼려면 ak45_node 종료 — 팔이 떨어질 수 있음).";
+async function homingDo(action, joint) {
+  if (action === "home" && !confirm(homeAsk(joint))) return;
+  if (action === "release" && !confirm(`${joint === "all" ? "전부" : joint} 쉬게 하기?
+
+${RELEASE_HELP}`)) return;
+  await post(`/api/homing/${action}`, { joint });
+}
+function buildHoming() {
+  const box = $("#homing");
+  H.msg = el("div", { class: "note" });
+  H.bHomeAll = el("button", { class: "btn", onclick: () => homingDo("home", "all") }, "전부 원점");
+  H.bRelAll = el("button", { class: "btn line", onclick: () => homingDo("release", "all") }, "전부 쉬게");
+  H.list = el("div", { class: "hlist" });
+  H.card = el("div", { class: "card wide" },
+    el("h3", {}, "AK45 원점", H.chip = el("span", { class: "chip" })),
+    el("p", { class: "help" }, "homing_guard(arm_homed.launch.py)가 원점 잡기 전·전원 재투입 뒤·홀드가 끝난 뒤에는 AK45 명령을 막는다. " +
+      "관절을 기준 자세에 두고 '원점 잡기'. " + RELEASE_HELP),
+    el("div", { class: "row" }, H.bHomeAll, H.bRelAll), H.msg, H.list);
+  box.append(H.card);
+}
+function homingRow(name) {
+  const r = { };
+  r.badge = el("span", { class: "chip" });
+  r.reason = el("div", { class: "note" });
+  r.kv = el("div", { class: "kv" });
+  r.bHome = el("button", { class: "btn", onclick: () => homingDo("home", name) }, "원점 잡기");
+  r.bRel = el("button", { class: "btn line", onclick: () => homingDo("release", name) }, "쉬게 하기");
+  r.root = el("div", { class: "hrow" },
+    el("div", { class: "hhead" }, el("b", {}, name), r.badge, el("span", { class: "spacer" }), r.bHome, r.bRel),
+    r.reason, r.kv);
+  return r;
+}
+const f2 = (x, u = "°") => x == null ? "—" : `${Number(x).toFixed(2)}${u}`;
+function renderHoming() {
+  if (!H.card) buildHoming();
+  const h = (S.ros && S.ros.homing) || { available: false };
+  const guardOn = h.available && h.seen && h.age <= 3;
+  let chipCls = "", chipTxt = "guard 없음", msg = "", msgCls = "warn";
+  if (!h.available) { msg = `${h.reason || "ROS 없음"} — 원점 칸은 ROS 를 source 하고 서버를 켜야 보인다.`; msgCls = ""; chipTxt = "ROS 없음"; }
+  else if (!h.seen) msg = "homing_guard 가 안 켜짐: 위 '켜기/끄기'에서 arm_homed.launch.py 를 켜세요.";
+  else if (h.age > 3) { msg = `원점 상태가 ${h.age.toFixed(0)}초 전 것 (homing_guard 꺼짐?). arm_homed.launch.py 를 켜세요.`; chipTxt = "오래됨"; chipCls = "warn"; }
+  else if (h.all_homed) { chipTxt = "전부 원점"; chipCls = "on"; }
+  else { chipTxt = `원점 ${h.joints.filter((j) => j.homed).length}/${h.joints.length}`; chipCls = "bad"; }
+  H.chip.className = "chip " + chipCls; H.chip.innerHTML = '<span class="dot"></span>'; H.chip.append(chipTxt);
+  H.msg.textContent = msg; H.msg.className = "note " + (msg ? msgCls : "");
+  $("#homing-note").textContent = guardOn ? `/arm_control/homing ${h.age.toFixed(1)}초 전` : "";
+  H.bHomeAll.disabled = H.bRelAll.disabled = !guardOn;
+  const joints = h.seen ? h.joints : Object.keys(S.home_poses || {}).map((j) => ({ joint: j }));
+  const seenNames = new Set(joints.map((j) => j.joint));
+  for (const [n, r] of Object.entries(H.rows)) if (!seenNames.has(n)) { r.root.remove(); delete H.rows[n]; }
+  for (const j of joints) {
+    let r = H.rows[j.joint];
+    if (!r) { r = H.rows[j.joint] = homingRow(j.joint); H.list.append(r.root); }
+    r.bHome.disabled = r.bRel.disabled = !guardOn;
+    r.badge.innerHTML = "";
+    if (!guardOn || j.homed == null) { r.badge.className = "chip"; r.badge.append("—"); r.reason.textContent = ""; r.kv.replaceChildren(); continue; }
+    r.badge.className = "chip " + (j.homed ? "on" : "bad");
+    r.badge.append(j.homed ? "✅ 원점" : "⛔ 원점 없음");
+    r.reason.textContent = j.reason || "";
+    r.reason.className = "note " + (j.homed ? "" : "bad");
+    const age = j.feedback_lost ? "끊김" : j.feedback_age_s == null ? "없음" : `${j.feedback_age_s.toFixed(2)}초`;
+    r.kv.replaceChildren(...[
+      kv("모터", j.motor), kv("기준 자세", `sim ${j.home_sim_deg ?? 0}°`),
+      kv("오프셋", j.homed ? f2(j.offset_deg) : "—"), kv("세션 zero", f2(j.session_zero_deg)),
+      kv("calibration zero", f2(j.calibration_zero_deg)), kv("피드백", `${f2(j.raw_deg)} · ${age}`),
+      kv("command_active", j.command_active == null ? "—" : j.command_active ? "예" : "아니오"),
+    ].flat());
+  }
 }
 
 connect();

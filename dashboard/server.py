@@ -1,4 +1,4 @@
-"""JAX 팔 대시보드: 노드 켜기/끄기/로그 + AK45 상태(읽기 전용).
+"""JAX 팔 대시보드: 노드 켜기/끄기/로그 + AK45 상태(읽기 전용) + 원점(homing_guard 서비스 부르기).
 
     python3 dashboard/server.py                 # http://localhost:8080 (이 PC에서만)
     python3 dashboard/server.py --host 0.0.0.0  # 같은 네트워크의 폰·노트북에서도 (보호 없음, 주의)
@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse   # 
 from fastapi.staticfiles import StaticFiles   # noqa: E402
 
 from procman import IS_LINUX, LOG_DIR, ProcessManager, tail_file   # noqa: E402
-from ros_monitor import RosMonitor   # noqa: E402
+from ros_monitor import HOMING_SRV, RosMonitor   # noqa: E402
 from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, REPO, ROS_DISTRO, WS   # noqa: E402
 
 pm = ProcessManager()
@@ -51,6 +51,27 @@ def _can_watch():
         time.sleep(2)
 
 
+HOMING_FILE = REPO / "arm_control" / "homing.json"
+
+
+def _home_poses():
+    """homing.json 의 home_sim_deg {관절: 도}. 없거나 깨지면 {}."""
+    try:
+        d = json.loads(HOMING_FILE.read_text(encoding="utf-8"))
+        return {str(k): float(v) for k, v in (d.get("home_sim_deg") or {}).items()}
+    except Exception:
+        return {}
+
+
+def _homing_call(action, b):
+    """action: home | release. b["joint"]: 관절 이름 또는 "all"."""
+    joint = str((b if isinstance(b, dict) else {}).get("joint") or "").strip()
+    allowed = set(_home_poses()) | set(ros.homing_joints())
+    if joint != "all" and joint not in allowed:
+        return {"ok": False, "error": f"모르는 관절 {joint!r} (허용: all, {', '.join(sorted(allowed)) or '없음'})"}
+    return ros.call_trigger(f"{HOMING_SRV}{action}_{joint}", timeout=2.0)
+
+
 def state():
     return {
         "t": time.time(),
@@ -59,6 +80,7 @@ def state():
         "ros": ros.snapshot(),
         "can": dict(can_state, up_cmd=CAN_UP_CMD),
         "calibrate": CALIBRATE_GUIDE,
+        "home_poses": _home_poses(),
         "info": {"ws": WS, "distro": ROS_DISTRO, "repo": str(REPO), "logs": str(LOG_DIR),
                  "platform": sys.platform},
     }
@@ -103,6 +125,16 @@ async def api_svc(sid: str, action: str, req: Request):
 @app.post("/api/stop")
 def api_stop():
     return pm.stop_all()
+
+
+@app.post("/api/homing/home")
+async def api_homing_home(req: Request):
+    return JSONResponse(await asyncio.to_thread(_homing_call, "home", await _body(req)))
+
+
+@app.post("/api/homing/release")
+async def api_homing_release(req: Request):
+    return JSONResponse(await asyncio.to_thread(_homing_call, "release", await _body(req)))
 
 
 @app.get("/api/log/{sid}")

@@ -1,6 +1,6 @@
 # dashboard — 노드 켜기/끄기 + AK45 상태 웹 화면
 
-터미널 여러 개 대신 브라우저 한 화면에서 `can0` 올리기, `ak45_node`·`stm_bridge_node`·`arm_control_node`(또는 `arm.launch.py` 전체)·`vision_node` 켜기/끄기/재시작, 로그 보기, vcan 시험을 한다. **모터를 움직이는 버튼은 없다**(읽기 + 프로세스 관리만).
+터미널 여러 개 대신 브라우저 한 화면에서 `can0` 올리기, `ak45_node`·`stm_bridge_node`·`arm_control_node`(또는 `arm.launch.py` / `arm_homed.launch.py` 전체)·`vision_node` 켜기/끄기/재시작, 로그 보기, vcan 시험, AK45 원점 잡기/쉬게 하기를 한다. **모터 각도를 명령하는 버튼은 없다**(읽기 + 프로세스 관리 + homing_guard 의 원점 서비스만).
 
 ## 실행 (로봇 PC, Ubuntu 24.04 / Jazzy)
 
@@ -30,16 +30,20 @@ python3 dashboard/server.py
 - **AK45 상태**: `/diagnostics`·`/joint_states` 구독. 모터 4개 카드(위치°, 온도, 에러 코드, 워치독, target, command_active, 오차, 전류, 속도) + CAN 버스 카드(state, 에러 프레임, 버스오프). 3초 넘게 안 오면 '오래됨'. rclpy 가 없으면 'ROS 없음'만 보이고 나머지는 그대로 돈다.
 - **켜기/끄기**: 항목마다 상태(켜짐 / 죽음+종료코드 / 가동 시간 / pid), 파라미터 칸, 켜기·끄기·재시작, 실제 실행한 명령, 로그 마지막 30줄(`/api/log/<id>?n=1000` 더 보기).
 - **보정**: `calibrate --ros` 는 키보드 대화형이라 웹에서 돌리지 않는다. 명령 안내 + 'ak45_node + stm_bridge_node 켜기' 버튼 + `arm_control_node`/`arm.launch.py` 가 켜져 있으면 빨간 경고.
-- **원점(homing)**: 빈 자리(다음 단계).
+- **원점(homing)**: `homing_guard`(`arm_homed.launch.py`)의 `/arm_control/homing`(std_msgs/String JSON, transient local) 구독. 관절 4개 줄마다 ✅ 원점 / ⛔ 원점 없음 + 이유, 모터, 기준 자세(sim °), 오프셋, 세션 zero, calibration zero, 피드백 값·나이, command_active.
+  - **원점 잡기**(관절마다, 위에 **전부 원점**): 확인창 "관절을 기준 자세(homing.json home_sim_deg)에 두었나요?" → `/arm_control/home_<관절>` / `home_all`(std_srvs/Trigger). guard 의 답(경고 포함)이 알림으로 뜬다.
+  - **쉬게 하기**(관절마다, 위에 **전부 쉬게**): `/arm_control/release_<관절>` / `release_all`. guard 가 그 관절 **명령 전달만 끊고** 원점을 지운다. ak45_node 는 마지막 target 을 계속 잡고 있다 — 실제로 힘을 빼려면 ak45_node 를 끈다(팔이 떨어질 수 있음).
+  - guard 가 안 켜져 있으면(상태 토픽 없음, 또는 3초 넘게 안 옴) 카드에 'arm_homed.launch.py 를 켜세요', 버튼은 꺼짐.
+  - API: `POST /api/homing/home`, `POST /api/homing/release`, 몸통 `{"joint": "<관절>" | "all"}`. 관절 이름은 guard 상태 또는 `arm_control/homing.json` 에 있는 것만 받는다. 서비스 타임아웃 2초, 서비스가 없으면 'homing_guard 가 안 켜짐' 오류.
 
 ## 동작 규칙
 
 - 항목마다 새 프로세스 그룹: `bash -lc "source /opt/ros/<distro>/setup.bash; source <ws>/install/setup.bash; exec stdbuf -oL -eL ros2 …"`. 로그는 `dashboard/logs/<id>.log`(git 무시).
 - 끄기: 그룹에 **SIGINT → 5초 → SIGTERM → 3초 → SIGKILL**. 어느 단계에서 끝났는지 카드에 표시. SIGKILL 까지 갔으면 빨간 글씨(`ak45_node` 가 프레임이 끊기면 SIGINT 로 안 끝나는 알려진 문제, 루트 README·STATUS.md).
-- 같이 켜면 안 되는 것은 켜기를 거절: `arm.launch.py` ↔ 개별 `ak45`/`stm_bridge`/`arm_control`. 대시보드 밖(터미널)에서 같은 노드가 이미 떠 있어도 거절.
+- 같이 켜면 안 되는 것은 켜기를 거절: `arm.launch.py` ↔ `arm_homed.launch.py` ↔ 개별 `ak45`/`stm_bridge`/`arm_control` (서로 전부). 보정 칸은 `arm_homed.launch.py` 가 켜져 있어도 빨간 경고. 대시보드 밖(터미널)에서 같은 노드가 이미 떠 있어도 거절.
 - `can0 올리기`: 이미 UP 이면 그대로, 아니면 `sudo -n` → `pkexec`(로봇 PC 화면에 암호창) 순서. 둘 다 안 되면 로그에 복사할 명령 `sudo ip link set can0 up type can bitrate 1000000`.
 - 대시보드 서버를 꺼도 노드는 **그대로 둔다**(끄면 팔이 떨어질 수 있어서). 다시 켜면 `logs/pids.json` 으로 다시 붙잡는다(Linux).
-- 대시보드는 `jax_dashboard` 라는 ROS 노드로 `/diagnostics`, `/joint_states` 를 구독한다. `arm_control/tests/check_topics.sh` 를 돌릴 때는 대시보드를 끄거나 ROS 없이 켠다(구독자가 하나 늘어 표와 달라질 수 있음).
+- 대시보드는 `jax_dashboard` 라는 ROS 노드로 `/diagnostics`, `/joint_states`, `/arm_control/homing` 을 구독하고, 원점 버튼을 누를 때만 homing_guard 서비스 클라이언트를 만든다. `arm_control/tests/check_topics.sh` 를 돌릴 때는 대시보드를 끄거나 ROS 없이 켠다(구독자가 하나 늘어 표와 달라질 수 있음).
 
 ## 항목 추가
 
@@ -61,16 +65,24 @@ Service("my_node", "내 노드", lambda p: f"exec ros2 run my_pkg my_node --ros-
 - 파라미터 검사: `fixed_pose` 형식 틀림·`; rm -rf /` 섞임·`fixed_pose`+`result_json` 둘 다 → 거절, `servo_channel:=can0;x`·`max_speed 999` → 거절. 만들어진 bash 스크립트 전부 `bash -n` 통과.
 - 시험 끝에 서버·가짜 프로세스 모두 끔.
 
+### 원점 패널 (2026-11-20)
+
+- Windows(ROS 없음, `--port 8094`): `/api/state` 의 `ros.homing` = `{available: false, reason: "ROS 없음 (rclpy import 실패…)"}`, `home_poses` 4관절. `POST /api/homing/home {"joint":"elbow"}`·`release {"joint":"all"}` → `ok:false` 'ROS 없음 … 원점 서비스를 못 부름'. `{"joint":"../x"}`·`[1]`(빈 이름) → '모르는 관절' 거절. `app.js` `node --check` 통과.
+- WSL Ubuntu 22.04 + ROS **Humble**(로봇 PC 는 Jazzy), colcon 빌드 없이 `homing_guard.HomingGuard` 를 python 으로 직접 띄우고 가짜 `/joint_states`(ak45_4 = 30°, 나머지 0°)를 보냄. 대시보드는 venv(fastapi 0.162)에서 `--port 8095`:
+  - 상태 4관절 'not homed since start' 수신 → `home elbow` ok(오프셋 +30, 20° 넘음 경고 문구 그대로 전달) → `home all` → all_homed true → `release elbow` → elbow 'released (rest)' → `release all` → 전부 원점 없음. `wrist` 거절.
+  - guard 를 끈 뒤: 상태 나이가 계속 늘어남(화면은 3초 넘으면 '오래됨, arm_homed.launch.py 를 켜세요'), `home elbow` → 약 1초 뒤 '/arm_control/home_elbow 없음: homing_guard 가 안 켜짐'.
+- 시험 끝에 서버·guard 프로세스 모두 끔.
+
 ## 확인 안 한 것
 
 - **Linux 쪽 전부**: 실제 `ros2 launch/run` 켜기·끄기, 프로세스 그룹 SIGINT/SIGTERM/SIGKILL, `ak45_node` 가 안 끝나는 경우 표시, `can0` 올리기(sudo -n / pkexec), `ip -json` can0 상태 칩, 터미널 노드 감지(/proc), `pids.json` 다시 붙잡기, rclpy 구독과 AK45 카드, `launch_vcan.sh` 버튼(레포가 `<ws>/src/` 안에 있어야 한다).
 - 폰 화면은 CSS 만 맞춰 두었고 실제 폰으로 보지 않았다.
+- 원점 카드 화면 자체(브라우저로 열어 보지 않음: 확인창·버튼 꺼짐·배지). Jazzy 에서 `ros2 launch arm_control arm_homed.launch.py` 를 대시보드로 켜기/끄기. 대시보드가 guard 보다 늦게 켜져도 transient local 로 바로 받는지(guard 가 2 Hz 로 다시 보내서 이번 시험으로는 구별 안 됨).
 - Ubuntu apt 의 fastapi 버전(0.101)에서 도는지.
 
 ## 다음 단계
 
 1. 로봇 PC 에서 위 '확인 안 한 것' 시험(먼저 `JAX_DASH_DEMO=1` 가짜 항목, 다음 vcan 시험 버튼, 그다음 실물).
-2. **원점(homing) 패널**: `homing` 브랜치의 AK45 원점 guard 노드(전원 재투입 시 원점 다시 잡기, 원점 서비스, homing 상태 토픽)가 들어오면 `services.py` 에 항목 추가, `ros_monitor.py` 의 `homing` 칸에 상태 토픽 구독, 화면 '원점' 칸에 상태와 원점 서비스 버튼.
-3. **모터 명령 패널**(이번엔 일부러 안 만듦): 작은 각도(2°) 한 관절 명령, 누르는 동안만 움직이기, 원점 확인 후에만 활성, 속도 제한 표시.
-4. '정지'의 뜻 정하기: 지금은 노드 종료 = 브레이크 0A(팔 떨어짐). 홀드 유지 정지(현재 위치를 target 으로)가 필요한지.
-5. 서보(`/servo/state`) 칸, `/object_pose` 표시, systemd 자동 실행과 연결.
+2. **모터 명령 패널**(이번엔 일부러 안 만듦): 작은 각도(2°) 한 관절 명령, 누르는 동안만 움직이기, 원점 확인 후에만 활성, 속도 제한 표시.
+3. '정지'의 뜻 정하기: 지금은 노드 종료 = 브레이크 0A(팔 떨어짐). 홀드 유지 정지(현재 위치를 target 으로)가 필요한지.
+4. 서보(`/servo/state`) 칸, `/object_pose` 표시, systemd 자동 실행과 연결.
