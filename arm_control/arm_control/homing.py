@@ -4,9 +4,14 @@ Why: an AK45-36 with a single encoder may lose its zero every time its power goe
 encoder or not is still unknown, ak45_ros2/docs/ros2.md 10-7). calibration.json's zero_deg is then
 only what the zero was the first time, not what it is now.
 
-So every AK45 starts NOT homed, and is homed again after each power cycle:
-  - power cycle = the motor's /joint_states feedback stopped for more than gap_s, or two feedbacks in
-    a row are more than jump_deg apart. The joint goes back to not homed (reason in `reason`).
+A zero is good only while one hold lasts (robot_arm v2's rule: rest the arm, and the next use homes
+again). Every AK45 starts NOT homed, and goes back to not homed (reason in `reason`) when:
+  - the guard starts (a new stack = a new session),
+  - its /joint_states feedback stopped for more than gap_s, or two feedbacks in a row are more than
+    jump_deg apart (power cycle),
+  - ak45_node stopped sending it commands: /diagnostics ak45/<name> command_active went 1 -> 0
+    (command timeout, temperature lock, feedback or watchdog lost, send error),
+  - it was released (rest) on request.
   - homing = the joint is put by hand (or by the dashboard) in its known home pose, home_sim_deg (sim
     angle, default 0), and home() is asked: session zero = feedback now - sign * scale * home_sim_deg.
     Refused without feedback, or with feedback older than max_age_s.
@@ -32,6 +37,7 @@ class MotorHoming:
     raw_deg: float = None         # last feedback, raw motor degrees
     seen: float = None            # when (monotonic s)
     lost: bool = False            # feedback stopped for more than gap_s
+    active: bool = None           # last /diagnostics command_active (None: none seen yet)
 
     @property
     def session_zero_deg(self):
@@ -119,6 +125,23 @@ class Homing:
             out.append(msg + ("; NOT homed any more" if was else ""))
         return out
 
+    def command_active(self, name, active):
+        """ak45_node's command_active for one motor. Returns a message when the hold just ended
+        (1 -> 0), and the joint is then not homed."""
+        h = self.m.get(name)
+        if h is None:
+            return None
+        was_active, h.active = h.active, active
+        if was_active and not active:
+            msg = f"{h.joint.joint} ({name}): ak45_node stopped sending it commands (command_active 1 -> 0)"
+            was = self._unhome(h, msg)
+            return msg + ("; hold ended, NOT homed any more" if was else "")
+        return None
+
+    def release(self, name):
+        """Rest: the joint is not homed and its commands stop at the guard. Returns whether it was homed."""
+        return self._unhome(self.m[name], "released (rest): home it again before use")
+
     def home(self, name, now):
         """(ok, message). The motor must be at its home pose now."""
         h = self.m[name]
@@ -163,5 +186,6 @@ class Homing:
                 "raw_deg": None if h.raw_deg is None else round(h.raw_deg, 3),
                 "feedback_age_s": None if h.seen is None else round(now - h.seen, 3),
                 "feedback_lost": h.lost,
+                "command_active": h.active,
             }
         return {"all_homed": self.all_homed(), "joints": joints}

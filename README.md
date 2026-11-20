@@ -90,7 +90,11 @@ ros2 topic echo /arm_control/homing                                    # 관절�
 
 - 미원점 관절: 명령은 경고 후 버리고, 피드백을 `arm_control_node`에 넘기지 않는다(그래서 "no /joint_states … waits").
 - 원점 = 지금 피드백 − sign·scale·home_sim_deg. 피드백이 없거나 0.5 s보다 오래되면 거부. `calibration.json`의 `zero_deg`와 20° 넘게 다르면 경고만 한다.
-- 전원 재투입 감지: 그 모터의 `/joint_states`가 1.0 s 넘게 끊기거나(`gap_s`), 연속 두 값이 60° 넘게 튀면(`jump_deg`) 미원점으로 되돌리고, 피드백이 돌아오면 `ak45_node`에 "지금 자리 유지" 명령을 보낸다. **다시 원점을 잡아야 움직인다.**
+- **원점은 한 번의 홀드가 이어지는 동안만 유효하다**(쓸 때마다 다시 잡는다). 아래 중 하나면 미원점으로 돌아가고 **다시 원점을 잡아야 움직인다**:
+  1. guard(스택)가 새로 시작됨
+  2. 그 모터의 `/joint_states`가 1.0 s 넘게 끊김(`gap_s`) 또는 연속 두 값이 60° 넘게 튐(`jump_deg`) — 전원 재투입. 피드백이 돌아오면 `ak45_node`에 "지금 자리 유지" 명령을 보낸다
+  3. `ak45_node`가 그 모터 명령 송신을 멈춤: `/diagnostics`의 `ak45/<이름>` `command_active`가 1→0(타임아웃·온도 잠김·피드백/워치독 끊김·송신 실패)
+  4. 쉼 요청: `ros2 service call /arm_control/release_all std_srvs/srv/Trigger`(또는 `release_<관절>`). guard가 그 관절 명령 전달을 끊는다. **`ak45_node`는 마지막 목표를 계속 홀드하므로 실제로 힘을 빼려면 `ak45_node`를 종료해야 한다**(먼저 팔을 받친다, 아래 "주의")
 - 원점 잡은 뒤의 명령은 guard가 피드백에서부터 `max_speed_deg_s`로 다시 램프한다(옛 목표로 튀지 않게).
 - `play_trajectory`/`pick_place`를 따로 띄울 때는 `--ros-args -r /joint_states:=/ak45/joint_states_homed`를 붙인다(감시가 보정된 각도를 보게). 미원점 관절이 있어도 시작은 거부하지 않는다 — guard가 명령을 막는다.
 - `calibrate --ros`는 guard를 거치지 않는다(원래대로 `ak45_node`에 직접).

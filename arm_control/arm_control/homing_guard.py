@@ -12,6 +12,9 @@ arm_control_node is the same node as in arm.launch.py; arm_homed.launch.py remap
   - homed: command + offset goes to ak45_node, feedback - offset comes back (offset = session zero -
     calibration.json zero_deg). Commands are ramped again here at max_speed_deg_s from the motor's
     feedback, so a joint homed again never jumps to a target arm_control_node kept from before.
+  - a zero is good only while one hold lasts. Not homed again when: the guard starts; ak45_node's
+    /diagnostics says it stopped sending that motor commands (command_active 1 -> 0); release_* was
+    called (rest); or a power cycle is seen (below). Its ramp and target here are dropped each time.
   - power cycle seen (feedback gone for gap_s, or a jump of jump_deg): not homed again, its ramp and
     target here are dropped, and when its feedback comes back ak45_node is told to hold the motor
     where it is (ak45_node keeps resending the last target it got, which after a power cycle points
@@ -22,7 +25,9 @@ Interfaces (for a dashboard too):
                                transient local (a late subscriber gets the last one)
     /arm_control/home_all      std_srvs/Trigger: home every AK45 that is not homed, at its home pose
     /arm_control/home_<joint>  std_srvs/Trigger: home one (home_shoulder_roll, home_elbow, ...)
-    /arm_control/unhome_all    std_srvs/Trigger: forget every session zero (home again from scratch)
+    /arm_control/release_all   std_srvs/Trigger: rest every AK45: not homed, its commands stop here
+    /arm_control/release_<joint>  the same for one. ak45_node still holds the last target it got (it
+                               cannot be told to let go); to really take the torque off, stop ak45_node
 Home poses: homing.json `home_sim_deg` (sim degrees per joint, missing = 0).
 """
 import json
@@ -33,6 +38,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import JointState
+from diagnostic_msgs.msg import DiagnosticArray
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -45,6 +51,7 @@ IN_COMMAND = "/ak45/command_unguarded"
 OUT_COMMAND = "/ak45/command"
 IN_STATES = "/joint_states"
 OUT_STATES = "/ak45/joint_states_homed"
+DIAGNOSTICS = "/diagnostics"
 STATUS = "/arm_control/homing"
 SERVICE_PREFIX = "/arm_control/"
 
@@ -67,11 +74,15 @@ class HomingGuard(Node):
             String, STATUS, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(JointState, IN_STATES, self.on_state, 10)
         self.create_subscription(JointState, IN_COMMAND, self.on_command, 10)
+        self.create_subscription(DiagnosticArray, DIAGNOSTICS, self.on_diagnostics, 10)
         self.create_service(Trigger, SERVICE_PREFIX + "home_all", self.srv_home_all)
-        self.create_service(Trigger, SERVICE_PREFIX + "unhome_all", self.srv_unhome_all)
+        self.create_service(Trigger, SERVICE_PREFIX + "release_all",
+                            lambda req, res: self.srv_release(res, list(self.homing.m)))
         for n, h in self.homing.m.items():
             self.create_service(Trigger, f"{SERVICE_PREFIX}home_{h.joint.joint}",
                                 lambda req, res, n=n: self.srv_home(res, [n]))
+            self.create_service(Trigger, f"{SERVICE_PREFIX}release_{h.joint.joint}",
+                                lambda req, res, n=n: self.srv_release(res, [n]))
         self.create_timer(1.0 / hz, self.on_timer)
         self._tick, self._status_every = 0, max(1, int(hz / 2))
         names = ", ".join(f"{h.joint.joint}={n} home sim {h.home_sim_deg:g}" for n, h in self.homing.m.items())
@@ -124,6 +135,26 @@ class HomingGuard(Node):
             o.header = msg.header
             o.name, o.position = out_n, out_p
             self.state_pub.publish(o)
+        if changed:
+            self.publish_status()
+
+    def on_diagnostics(self, msg):
+        """ak45_node's /diagnostics: status name ak45/<ak45 name>, key command_active "1"/"0"."""
+        changed = False
+        for st in msg.status:
+            if not st.name.startswith("ak45/"):
+                continue
+            n = st.name[len("ak45/"):]
+            if n not in self.homing.m:
+                continue
+            v = next((kv.value for kv in st.values if kv.key == "command_active"), None)
+            if v not in ("0", "1"):
+                continue
+            text = self.homing.command_active(n, v == "1")
+            if text:
+                self.get_logger().warning(text)
+                self._forget(n)
+                changed = True
         if changed:
             self.publish_status()
 
@@ -198,15 +229,16 @@ class HomingGuard(Node):
     def srv_home_all(self, req, res):
         return self.srv_home(res, [n for n, h in self.homing.m.items() if not h.homed])
 
-    def srv_unhome_all(self, req, res):
-        for n, h in self.homing.m.items():
-            self.homing._unhome(h, "unhomed by request")
+    def srv_release(self, res, names):
+        released = [self.homing.m[n].joint.joint for n in names if self.homing.release(n)]
+        for n in names:
             self._forget(n)
-        self.get_logger().warning("every AK45 NOT homed (unhome_all)")
+        text = (f"released (rest, NOT homed): {', '.join(released) or 'none were homed'}. ak45_node still "
+                "holds the last target; stop ak45_node to take the torque off")
+        self.get_logger().warning(text)
         self.publish_status()
-        res.success, res.message = True, "every AK45 is not homed now"
+        res.success, res.message = True, text
         return res
-
 
 def main(args=None):
     rclpy.init(args=args)
