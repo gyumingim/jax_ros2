@@ -23,6 +23,7 @@ from pathlib import Path
 SUB = Path("motion1") / "src"
 TOL_POS = 0.005               # 풀림 판정: 위치 5 mm (env.reachable 의 position_tolerance)
 TOL_ROT = math.radians(1.5)   # 손 방향 1.5°
+FAST_ITERS = 80               # 드래그 중 빠른 풀이의 반복 수 (직전 해에서 시작)
 
 
 # ============================================================ worker (자식 프로세스)
@@ -166,13 +167,40 @@ class _Solver:
         return out, lim
 
     def solve(self, b):
+        """fix_deg {관절: 각} 이 있으면 그 관절을 그 각에 묶고(범위를 [v, v] 로) 나머지로 푼다. 7 관절에 손 자세 6 값이라
+        팔 모양이 하나 남는데(팔꿈치 위치), 하나를 묶으면 거의 하나로 정해진다. 묶어서 안 풀리면 풀고 다시 풀어 비교한다."""
+        fix = {k: float(v) for k, v in (b.get("fix_deg") or {}).items() if v is not None}
+        ranges = dict(b.get("ranges_deg") or {})
+        for j, v in fix.items():
+            if j not in self.arm or not math.isfinite(v):
+                return {"ok": False, "kind": "input", "reason": f"고정할 관절 {j!r} 이 이상함"}
+            i = self.arm.index(j)
+            lo, hi = (math.degrees(float(x)) for x in self.base_range[i])
+            if ranges.get(j):
+                lo, hi = max(lo, float(ranges[j][0])), min(hi, float(ranges[j][1]))
+            if not lo - 1e-6 <= v <= hi + 1e-6:
+                return {"ok": False, "kind": "input", "reason": f"{j} 고정값 {v:g}° 가 범위 {lo:g}~{hi:g}° 밖"}
+        if not fix:
+            return {**self._solve_once(b, ranges, ()), "fixed": {}}
+        r = self._solve_once(b, {**ranges, **{j: [v, v] for j, v in fix.items()}}, tuple(fix))
+        r["fixed"] = fix
+        if not r.get("ok") and r.get("kind") != "below_table":
+            u = self._solve_once(b, ranges, ())
+            r["unfixed"] = {k: u.get(k) for k in ("ok", "pos_err_mm", "ang_err_deg", "joints", "flip", "hand_turn", "reason")}
+            if u.get("ok"):
+                names = ", ".join(f"{j} {u['joints'][j]:+.1f}°" for j in fix)
+                r["kind"] = "fixed"
+                r["reason"] = (f"어깨 옆 고정({', '.join(f'{v:g}°' for v in fix.values())}) 때문 — 고정을 풀면 풀림 ({names}, 오차 {u['pos_err_mm']} mm). "
+                               f"고정한 채 가장 가까운 해는 {r.get('pos_err_mm')} mm · {r.get('ang_err_deg')}° 차이")
+        return r
+
+    def _solve_once(self, b, ranges, fixed):
         np, R, E = self.np, self.R, self.E
         mode = b.get("mode") or "grasp"
         if mode not in ("grasp", "vertical"):
             return {"ok": False, "reason": f"mode 는 grasp | vertical ({mode!r})"}
         p = [float(b[k]) for k in ("x", "y", "z")]
         yaw = float(b.get("yaw_deg") or 0.0)
-        ranges = b.get("ranges_deg") or {}
         cur = b.get("current_deg") or {}
         current = None
         if all(n in cur for n in self.arm):
@@ -209,7 +237,7 @@ class _Solver:
         q = best["q"]
         site, rot = self.fk(q)
         grip = site - self.dz(mode) * rot[:, 2]
-        at_lim = [self.arm[i] for i in range(len(self.arm)) if q[i] <= lim[i][0] + 1e-3 or q[i] >= lim[i][1] - 1e-3]
+        at_lim = [self.arm[i] for i in range(len(self.arm)) if self.arm[i] not in fixed and (q[i] <= lim[i][0] + 1e-3 or q[i] >= lim[i][1] - 1e-3)]
         out.update(joints={n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, q)},
                    pos_err_mm=round(float(np.linalg.norm(grip - point)) * 1000, 1),
                    ang_err_deg=round(math.degrees(best["re"]), 2),
@@ -230,6 +258,43 @@ class _Solver:
             out["kind"], out["reason"] = self.why(mode, yaw, point, current, ranges, best)
         out["ms"] = round((time.time() - t0) * 1000)
         return out
+
+    def fast(self, b):
+        """드래그 중 빠른 풀이: 직전 해(seed_deg)에서 한 번만, 같은 손 모양(flip)·가장 가까운 손 돌림으로. 반복 FAST_ITERS."""
+        np, R, E = self.np, self.R, self.E
+        t0 = time.time()
+        mode = b.get("mode") or "grasp"
+        p = [float(b[k]) for k in ("x", "y", "z")]
+        yaw = float(b.get("yaw_deg") or 0.0)
+        ranges = dict(b.get("ranges_deg") or {})
+        fix = {k: float(v) for k, v in (b.get("fix_deg") or {}).items()}
+        ranges.update({j: [v, v] for j, v in fix.items()})
+        seed_d = b.get("seed_deg") or {}
+        if not all(n in seed_d for n in self.arm):
+            return {"ok": False, "fast": True, "kind": "input", "reason": "빠른 풀이에 시작 자세가 없음"}
+        if p[2] + R.MAP_D < 0.0:
+            return {"ok": False, "fast": True, "kind": "below_table", "reason": "책상 아래"}
+        lim = self.set_ranges(ranges)
+        flip = bool(b.get("flip"))
+        prev = float(b.get("hand_turn") or 0.0)
+        y = R.fold_yaw(yaw + R.SIM_FROM_REAL_YAW)
+        turn = min((y, y + 90.0, y - 90.0), key=lambda t: abs(t - prev))
+        rot = self.hand_rot(mode, turn, flip)
+        point = np.asarray(self.to_sim(p))
+        seed = np.clip(np.radians([float(seed_d[n]) for n in self.arm]), lim[:, 0], lim[:, 1])
+        q, pe, re_ = self.solve_from(seed, point + self.dz(mode) * rot[:, 2], rot, its=FAST_ITERS)
+        site, srot = self.fk(q)
+        self.d.qpos[self.fadr] = self.open_fingers
+        self.mj.mj_kinematics(self.m, self.d)
+        low = self.lowest_finger_z() - self.table_z
+        grip = site - self.dz(mode) * srot[:, 2]
+        ok = pe <= TOL_POS and re_ <= TOL_ROT
+        return {"ok": bool(ok), "fast": True, "mode": mode, "flip": flip, "hand_turn": round(float(turn), 2), "fixed": fix,
+                "joints": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, q)},
+                "pos_err_mm": round(float(np.linalg.norm(grip - point)) * 1000, 1), "ang_err_deg": round(math.degrees(re_), 2),
+                "finger_low_mm": round(low * 1000, 1), "warn": [] if low >= -0.001 else [f"손가락이 책상에 {-low * 1000:.0f} mm 파묻힘"],
+                "open_fingers_deg": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.fingers, self.open_fingers)},
+                "reason": "풀림 (빠른 풀이)" if ok else "빠른 풀이가 못 따라감 — 손을 떼면 전체 풀이", "ms": round((time.time() - t0) * 1000, 1)}
 
     def why(self, mode, yaw, point, current, ranges, best):
         """실패 이유를 사람 말로: 위치부터 안 닿나 → 손 비틀기 서보(±88)만 풀면 되나 → 그 손 방향이 안 되나."""
@@ -274,7 +339,7 @@ def _worker(ik_dir):
         try:
             b = json.loads(line)
             op = b.get("op")
-            r = s.solve(b) if op == "solve" else s.fk_req(b) if op == "fk" else {"ok": False, "reason": f"모르는 op {op!r}"}
+            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else {"ok": False, "reason": f"모르는 op {op!r}"}
         except Exception as e:
             r = {"ok": False, "reason": f"풀이 중 오류: {type(e).__name__}: {e}", "kind": "error"}
         print(json.dumps(r), flush=True)
@@ -343,7 +408,7 @@ SOLVER = HandIK()
 
 
 def solve(ik_dir, body, ranges_deg, current_deg):
-    """POST /api/ik/hand. body: {x, y, z 실좌표 m | z_table_cm, yaw_deg, mode}."""
+    """POST /api/ik/hand. body: {x, y, z 실좌표 m | z_table_cm, yaw_deg, mode, fix_deg?: {관절: 각}}."""
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음 (JAX_IK_DIR)"}
     b = body if isinstance(body, dict) else {}
@@ -354,14 +419,28 @@ def solve(ik_dir, body, ranges_deg, current_deg):
         else:
             z = float(b["z_table_cm"]) / 100.0 - 0.4775
         yaw = float(b.get("yaw_deg") or 0.0)
+        fix = b.get("fix_deg") or {}
+        if not isinstance(fix, dict) or len(fix) > 7:
+            raise ValueError
+        fix = {str(k): float(v) for k, v in fix.items()}
         if not all(math.isfinite(v) for v in (x, y, z, yaw)) or max(abs(x), abs(y), abs(z)) > 2.0:
             raise ValueError
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "reason": "x, y (m), z (m) 또는 z_table_cm, yaw_deg 숫자 (|x|,|y|,|z| ≤ 2 m)"}
     mode = b.get("mode") or "grasp"
+    if b.get("fast"):
+        seed = b.get("seed_deg")
+        if not isinstance(seed, dict):
+            return {"ok": False, "fast": True, "reason": "seed_deg 없음"}
+        try:
+            return SOLVER.call(ik_dir, {"op": "fast", "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "fix_deg": fix,
+                                        "ranges_deg": ranges_deg, "seed_deg": {str(k): float(v) for k, v in seed.items()},
+                                        "flip": bool(b.get("flip")), "hand_turn": float(b.get("hand_turn") or 0.0)}, timeout=10.0)
+        except Exception as e:
+            return {"ok": False, "fast": True, "reason": str(e), "kind": "error"}
     try:
         return SOLVER.call(ik_dir, {"op": "solve", "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode,
-                                    "ranges_deg": ranges_deg, "current_deg": current_deg})
+                                    "ranges_deg": ranges_deg, "current_deg": current_deg, "fix_deg": fix})
     except Exception as e:
         return {"ok": False, "reason": str(e), "kind": "error"}
 
