@@ -302,7 +302,7 @@ class _Solver:
     def use_analytic(self, mode, ref, lim):
         """손 각도 무시 + 손목 중앙 기준 + shoulder_yaw 고정(범위 [v, v]) + 나머지 3 관절은 움직임 → 해석 IK.
         JAX_IK_NUMERIC=1 이면 예전 수치 방식(비교용)."""
-        if mode != "position" or ref != "wrist" or os.environ.get("JAX_IK_NUMERIC") == "1":
+        if mode != "position" or os.environ.get("JAX_IK_NUMERIC") == "1":
             return False
         w = lim[:, 1] - lim[:, 0]
         return w[self.arm.index("shoulder_yaw")] < 1e-9 and all(w[self.arm.index(n)] > 1e-9 for n in A3)
@@ -339,6 +339,39 @@ class _Solver:
                 if float(np.linalg.norm(self.wrist_pos() - point)) < TOL_ANALYTIC:
                     out.append(self.point_down(q, lim))
         return out, len(raw)
+
+    def analytic_tip(self, point, hold, lim, mode, iters=10):
+        """기준점 = 집는 점(손끝 사이)인데 역기구학은 손목 중앙으로 (사용자 2026-11-20): 손목 목표 w 를 집는 점 + 수직 위
+        (손목↔집는 점 거리) 에서 시작 → 해석 IK(앞 4 관절) + 손목 2 관절로 손 최대한 아래 → 실제 집는 점 오차만큼 w 를 옮겨
+        다시 (손이 살짝 기울어도 집는 점이 목표에 오게). 가지마다 따로, 매번 직전 해에 가장 가까운 해를 잇는다.
+        돌려줌 (q 목록, 첫 손목 목표의 해 수)."""
+        np = self.np
+        dz = self.dz(mode)
+
+        def tip(q):
+            site, rot = self.fk(q)
+            return site - dz * rot[:, 2]
+        w0 = np.asarray(point, dtype=float) + np.array([0.0, 0.0, self.wrist_above_site + dz])
+        qs, n_raw = self.analytic_position(w0, hold, lim)
+        out = []
+        for q in qs:
+            w = w0.copy()
+            for _ in range(iters):
+                e = point - tip(q)
+                if float(np.linalg.norm(e)) < 2e-4:
+                    break
+                nxt = []
+                for k in (1.0, 0.5, 0.25):   # 그 손목 자리가 안 닿으면 반만 옮겨 다시
+                    nxt, _ = self.analytic_position(w + k * e, hold, lim)
+                    if nxt:
+                        w = w + k * e
+                        break
+                if not nxt:
+                    break
+                q = min(nxt, key=lambda c: float(np.abs(c - q).max()))
+            if not any(float(np.abs(q - o).max()) < 1e-4 for o in out):
+                out.append(q)
+        return out, n_raw
 
     def solve_position(self, seed, point, ref, its=300):
         """손 각도 무시: 기준점(손목 중앙 / site) 위치 3 만 맞춘다. 손목 3 관절은 seed 값 그대로(움직이지 않음),
@@ -384,12 +417,21 @@ class _Solver:
             # 손목 3 관절 = 지금 값(current, 없으면 HOME) 그대로. 시작점: 직전 보낸 해·지금·HOME·0 의 앞 4 관절
             hold = current if current is not None else np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
             if self.use_analytic(mode, ref, lim):
-                qs, n_raw = self.analytic_position(point_sim, np.clip(hold, lim[:, 0], lim[:, 1]), lim)
-                self.analytic = {"n_raw": n_raw, "n": len(qs)}
+                hold_c = np.clip(hold, lim[:, 0], lim[:, 1])
+                if ref == "wrist":
+                    qs, n_raw = self.analytic_position(point_sim, hold_c, lim)
+                else:
+                    qs, n_raw = self.analytic_tip(point_sim, hold_c, lim, mode)
+                ok_q = []
                 for q in qs:
-                    _, rot = self.fk(q)
-                    out.append({"q": q, "pe": float(np.linalg.norm(self.wrist_pos() - point_sim)), "re": 0.0, "turn": 0.0, "flip": False,
+                    site, rot = self.fk(q)
+                    pe = float(np.linalg.norm((self.wrist_pos() if ref == "wrist" else site - self.dz(mode) * rot[:, 2]) - point_sim))
+                    if pe <= TOL_POS:
+                        ok_q.append(q)
+                    out.append({"q": q, "pe": pe, "re": 0.0, "turn": 0.0, "flip": False,
                                 "rot": rot, "tilt": self.axis_tilt(rot), "analytic": True})
+                qs = ok_q
+                self.analytic = {"n_raw": n_raw, "n": len(qs)}
                 if qs:
                     return out, lim
                 # 해가 없으면(안 닿음) 가장 가까운 자세·이유를 위해 예전 수치 풀이도 (수치가 풀면 analytic_miss = 해석 쪽 버그)
@@ -400,6 +442,7 @@ class _Solver:
                 if ref == "wrist":
                     q = self.point_down(q, lim)
                     self.fk(q); pe = float(np.linalg.norm(self.wrist_pos() - point_sim))
+                # (집는 점 기준 수치 풀이는 손목 3 관절을 지금 값 그대로 — 해석 쪽이 안 닿을 때 가장 가까운 자세 보기용)
                 _, rot = self.fk(q)
                 out.append({"q": q, "pe": pe, "re": 0.0, "turn": 0.0, "flip": False, "rot": rot, "tilt": self.axis_tilt(rot)})
             return out, lim
@@ -608,12 +651,19 @@ class _Solver:
         ref = "wrist" if b.get("ref") == "wrist" else "grip"
         an = None
         if self.use_analytic(mode, ref, lim):   # 전체 풀이와 같은 해석 IK, 기준 자세 = seed(직전 해)
-            qs, n_raw = self.analytic_position(point, seed, lim)
+            if ref == "wrist":
+                qs, n_raw = self.analytic_position(point, seed, lim)
+            else:
+                qs, n_raw = self.analytic_tip(point, seed, lim, mode)
             cands = []
             for q in qs:
-                self.fk(q); self.d.qpos[self.fadr] = self.open_fingers
+                site, rot = self.fk(q)
+                pe = float(np.linalg.norm((self.wrist_pos() if ref == "wrist" else site - self.dz(mode) * rot[:, 2]) - point))
+                if pe > TOL_POS:
+                    continue
+                self.d.qpos[self.fadr] = self.open_fingers
                 self.mj.mj_kinematics(self.m, self.d)
-                cands.append({"q": q, "pe": float(np.linalg.norm(self.wrist_pos() - point)), "low": self.lowest_finger_z() - self.table_z,
+                cands.append({"q": q, "pe": pe, "low": self.lowest_finger_z() - self.table_z,
                               "dist": float(np.abs(q - seed).max()), "sum": float(np.abs(q - seed).sum())})
             clean = [c for c in cands if c["low"] >= -0.001]
             bc = None
@@ -626,10 +676,11 @@ class _Solver:
                 q, pe = bc["q"], bc["pe"]
             else:   # 안 닿음: 가장 가까운 자세(수치)만 보여 줌
                 q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
-                q = self.point_down(q, lim)
+                if ref == "wrist":
+                    q = self.point_down(q, lim)
             re_ = 0.0
             tilt = self.axis_tilt(self.fk(q)[1])
-            an = {"method": "analytic", "n_solutions": len(qs), "n_raw": n_raw}
+            an = {"method": "analytic", "n_solutions": len(cands), "n_raw": n_raw}
         elif mode == "position":   # 손목 기준이면 손목 2 관절 = 손이 최대한 아래 (아니면 seed 값 그대로)
             q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
             if ref == "wrist":
@@ -776,24 +827,30 @@ class _Solver:
         a6 = d.xaxis[m.joint("wrist_yaw").id].copy(); a6 /= np.linalg.norm(a6)
         h = d.site_xmat[self.site].reshape(3, 3)[:, 2].copy()
         lo6, hi6 = float(lim[i6, 0]), float(lim[i6, 1])
-        t6 = np.linspace(lo6, hi6, max(2, int(math.degrees(hi6 - lo6)) + 1))[:, None]
-        v = a6 * (h @ a6) * (1 - np.cos(t6)) + np.cos(t6) * h + np.sin(t6) * np.cross(a6, h)   # (n, 3)
-        z = np.array([0.0, 0.0, 1.0])
-        A = (v @ a5) * a5[2]
-        B = v[:, 2] - A
-        C = np.cross(a5, v)[:, 2]
         lo5, hi5 = float(lim[i5, 0]), float(lim[i5, 1])
-        cands = [np.full(len(v), lo5), np.full(len(v), hi5)]
-        ph = np.arctan2(C, B)
-        for k in (-2, 0, 2):
-            c = ph + k * math.pi
-            cands.append(np.where((c >= lo5) & (c <= hi5), c, lo5))
-        best, b5, b6 = -2.0, 0.0, 0.0
-        for c in cands:
-            val = A + B * np.cos(c) + C * np.sin(c)
-            j = int(np.argmax(val))
-            if float(val[j]) > best:
-                best, b5, b6 = float(val[j]), float(c[j]), float(t6[j, 0])
+        z = np.array([0.0, 0.0, 1.0])
+
+        def best_of(t6):
+            v = a6 * (h @ a6) * (1 - np.cos(t6)) + np.cos(t6) * h + np.sin(t6) * np.cross(a6, h)   # (n, 3)
+            A = (v @ a5) * a5[2]
+            B = v[:, 2] - A
+            C = np.cross(a5, v)[:, 2]
+            cands = [np.full(len(v), lo5), np.full(len(v), hi5)]
+            ph = np.arctan2(C, B)
+            for k in (-2, 0, 2):
+                c = ph + k * math.pi
+                cands.append(np.where((c >= lo5) & (c <= hi5), c, lo5))
+            best, b5, b6 = -2.0, 0.0, 0.0
+            for c in cands:
+                val = A + B * np.cos(c) + C * np.sin(c)
+                j = int(np.argmax(val))
+                if float(val[j]) > best:
+                    best, b5, b6 = float(val[j]), float(c[j]), float(t6[j, 0])
+            return best, b5, b6
+        # q6: 1° 격자 → 가장 좋은 칸 ±1° 를 0.01° 로 다시 (1° 격자만이면 집는 점이 수 mm 튄다, 2026-11-20 밤)
+        best, b5, b6 = best_of(np.linspace(lo6, hi6, max(2, int(math.degrees(hi6 - lo6)) + 1))[:, None])
+        d1 = math.radians(1.0)
+        best, b5, b6 = best_of(np.linspace(max(lo6, b6 - d1), min(hi6, b6 + d1), 201)[:, None])
         self._down_q56 = (b5, b6)
         return math.degrees(math.acos(max(-1.0, min(1.0, best))))
 
@@ -829,9 +886,18 @@ class _Solver:
                 qs.append(q)
         if not qs:
             return 0, None, 0
-        tilt = min(self.hand_down_tilt(q, lim) for q in qs)
-        # 사용자 2026-11-20: 손목 중앙이 그 위치로 갈 수 있으면 집을 수 있다고 판정 (손 수직 검사는 판정에 안 씀, 기울기는 정보로만)
-        return 2, tilt, len(qs)
+        # 사용자 2026-11-20 밤: 기준점 = 집는 점(손끝 사이). 집는 점을 큐브 중심(책상 위 2.5 cm)에 두고, 손목 중앙으로 푸는
+        # analytic_tip(손 최대한 아래 + 기울어진 만큼 손목을 옮겨 다시)으로 5 mm 안에 맞으면 집을 수 있음.
+        tipp = np.asarray(self.to_sim([x, y, 0.025 - self.R.MAP_D]))
+        best = None
+        for q in self.analytic_tip(tipp, q0, lim, "position")[0]:
+            site, rot = self.fk(q)
+            pe = float(np.linalg.norm(site - tipp))
+            if best is None or pe < best[0]:
+                best = (pe, self.axis_tilt(rot))
+        if best is not None and best[0] <= TOL_POS:
+            return 2, best[1], len(qs)
+        return 1, (best[1] if best else None), len(qs)
 
     def graspmap(self, b):
         """op graspmap: 책상 위 격자 (x0..x1, y0..y1, step) 마다 grasp_eval. rows[j] = y 한 줄의 코드 문자열 ('2'/'1'/'0')."""
@@ -858,7 +924,7 @@ class _Solver:
         t0 = time.time()
         S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
         c, tilt, ns = self.grasp_eval(S, float(b["x"]), float(b["y"]), verify=True)
-        why = {2: "집을 수 있음", 1: f"손목은 닿지만 손을 수직으로 못 내림 (최소 {tilt:.0f}°)" if tilt is not None else "", 0: "팔이 안 닿음"}[c]
+        why = {2: "집을 수 있음", 1: "손목은 닿지만 손끝(집는 점)을 큐브에 못 맞춤", 0: "팔이 안 닿음"}[c]
         return {"ok": True, "graspable": c == 2, "code": c, "reason": why, "tilt_min_deg": None if tilt is None else round(tilt, 1),
                 "n_solutions": ns, "z_table_m": self.grasp_z(), "x": float(b["x"]), "y": float(b["y"]),
                 "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000, 1)}

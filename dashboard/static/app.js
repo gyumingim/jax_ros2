@@ -741,7 +741,7 @@ async function graspLoad() {
     if (my !== G.seq) return;
     if (!d.ok) { G.data = null; if (G.note) G.note.textContent = "⚠ 집을 수 있는 곳 계산 실패: " + (d.reason || "?"); graspPaint(); return; }
     G.data = d;
-    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손목 책상 위 ${(d.z_table_m * 100).toFixed(0)} cm · 어깨 옆 ${d.shoulder_yaw}°`;
+    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손끝(집는 점)을 큐브 중심(책상 위 2.5 cm)에 · 어깨 옆 ${d.shoulder_yaw}°`;
     graspPaint();
   } catch (e) { if (my === G.seq && G.note) G.note.textContent = "⚠ 집을 수 있는 곳을 못 받음 (서버)"; }
 }
@@ -1042,11 +1042,12 @@ function buildHandIk() {
   f.x = hkSlider("x (왼쪽 +)", "m", -0.25, 0.35, 0.005, 0.1, 3);
   f.y = hkSlider("y (앞 −)", "m", -0.45, 0.05, 0.005, -0.3, 3);
   // 기준점: 손목 중앙(기본, 손목 굽힘·비틀기 축의 교점) / 손가락 사이(집는 점). 높이 = 그 기준점의 책상 위 높이
-  f.z = hkSlider("높이 (손목 중앙, 책상 위)", "cm", 25, 65, 0.5, HK_WRIST_Z0, 1);
-  f.ref = el("select", {}, el("option", { value: "wrist" }, "손목 중앙 (기본)"), el("option", { value: "grip" }, "손가락 사이 (집는 점)"));
+  // 사용자 2026-11-20 밤: 기준점 = 손끝(집는 점) 기본, 역기구학은 손목 중앙으로 풀고 손이 기운 만큼 손목을 옮겨 맞춤
+  f.z = hkSlider("높이 (집는 점, 책상 위)", "cm", 0, 40, 0.5, 2.5, 1);
+  f.ref = el("select", {}, el("option", { value: "grip" }, "손끝 사이 (집는 점, 기본)"), el("option", { value: "wrist" }, "손목 중앙"));
   f.ref.addEventListener("change", () => hkRefChanged());
   f.yaw = hkSlider("손 방향 (잡을 큐브 yaw)", "°", -45, 45, 1, 0, 0);
-  f.mode = el("select", {}, el("option", { value: "position" }, "손 각도 무시 (위치만, 손목 관절 그대로, 기본)"),
+  f.mode = el("select", {}, el("option", { value: "position" }, "위치만 (손은 손목으로 최대한 아래, 기본)"),
     el("option", { value: "vertical" }, "수직 (기울기 0°)"),
     el("option", { value: "auto" }, "손가락 아래 (기울기 자동, 0~상한)"),
     el("option", { value: "grasp" }, "−40° 고정 (팀 IK 원래 값)"));
@@ -1574,8 +1575,8 @@ function renderPose() {
   P.gb.hidden = !vo;
   P.gb.textContent = !gv ? "집기 판정 중…" : gv.graspable ? "집을 수 있음 ✅" : "못 집음 ❌";
   P.gb.className = "chip" + (gv ? (gv.graspable ? " on" : " bad") : "");
-  P.gb.title = gv ? `${gv.reason} · 해석 IK: 손목 책상 위 ${(gv.z_table_m * 100).toFixed(0)} cm, 해 ${gv.n_solutions}개` +
-    (gv.tilt_min_deg != null ? `, 손 수직에서 최소 ${gv.tilt_min_deg}°` : "") + ` · 어깨 옆 ${gv.shoulder_yaw}°` : "";
+  P.gb.title = gv ? `${gv.reason} · 해석 IK: 손끝을 큐브 중심에, 해 ${gv.n_solutions}개` +
+    (gv.tilt_min_deg != null ? `, 손 기울기 ${gv.tilt_min_deg}°` : "") + ` · 어깨 옆 ${gv.shoulder_yaw}°` : "";
   mapVision(o && o.frame_id === "shoulder_roll_axis" && !stale ? o : null);
 }
 function graspVis(o) {   // 지금 비전 큐브 자리의 판정 (자리가 1 mm 넘게 바뀌었으면 아직 없음)
