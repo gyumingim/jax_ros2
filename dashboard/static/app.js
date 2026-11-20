@@ -35,6 +35,9 @@ async function post(url, body, quiet) {
 function stopAll() { post("/api/stop"); }
 $("#btn-stop").onclick = stopAll;
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") stopAll(); });
+// 슬라이더 파란 채움(--p): 사용자가 움직일 때와 코드가 값을 바꿀 때 모두
+function rangeFill(e) { const lo = parseFloat(e.min) || 0, hi = parseFloat(e.max) || 0, v = parseFloat(e.value) || 0; e.style.setProperty("--p", (hi > lo ? (v - lo) / (hi - lo) * 100 : 0) + "%"); }
+document.addEventListener("input", (ev) => { if (ev.target && ev.target.type === "range") rangeFill(ev.target); });
 const vb = () => VIRT() ? el("span", { class: "vbadge" }, "가상") : null;
 
 // ---------- 모드 (실물 / 가상) ----------
@@ -56,7 +59,7 @@ const rosLabel = () => (S && S.ros.conn && S.ros.conn.state === "connected") ? "
 $("#btn-ros").onclick = rosConnect;
 
 // ---------- 탭 ----------
-const TABS = [["conn", "연결"], ["angle", "각도 제어"], ["ik", "역기구학"]];
+const TABS = [["conn", "연결", "켜기"], ["angle", "각도 제어", "관절 움직이기"], ["ik", "역기구학", "집기 계획"]];
 const OLD_TABS = { ak: "conn", servo: "angle", finger: "angle", arm: "angle", vision: "ik" };   // 예전 주소
 const TAB_IDS = new Set(TABS.map((t) => t[0]));
 const TAB_KEY = "jaxdash.tab";
@@ -79,8 +82,8 @@ function showTab(id) {
 }
 (function buildTabs() {
   const nav = $("#tabs");
-  for (const [id, label] of TABS) {
-    const b = el("a", { class: "tab", href: "#" + id, role: "tab" }, label, el("span", { class: "tdot" }));
+  for (const [id, label, sub] of TABS) {
+    const b = el("a", { class: "tab", href: "#" + id, role: "tab" }, label, el("small", { class: "tsub" }, sub), el("span", { class: "tdot" }));
     tabBtns[id] = b;
     nav.append(b);
   }
@@ -92,7 +95,7 @@ function renderTabDots() {
   for (const [id] of TABS) {
     const svcs = S.services.filter((s) => s.tab === id);
     const on = svcs.filter((s) => s.alive).length;
-    const dead = svcs.some((s) => !s.alive && s.exit_code != null && s.exit_code !== 0);
+    const dead = svcs.some((s) => s.kind !== "once" && !s.alive && s.exit_code != null && s.exit_code !== 0);   // 한 번짜리(계획 거절 = 코드 1)는 빨간 점 아님
     const d = tabBtns[id].querySelector(".tdot");
     d.className = "tdot " + (on ? "on" : dead ? "bad" : "");
     d.textContent = on ? String(on) : "";
@@ -134,8 +137,10 @@ function render() {
   $("#virtbar").hidden = !v;
   $("#mode-real").className = v ? "" : "on";
   $("#mode-virtual").className = v ? "on v" : "";
-  $("#warnbar").innerHTML = v ? "⚠ (가상) 전부 정지 = 가상 노드 종료. 가상 ak45_node 가 끝나면 가상 팔이 떨어진다 — 실물에서는 <b>홀드가 풀려 팔이 떨어질 수 있다.</b>"
-    : "⚠ 전부 정지 = 노드 종료. ak45_node 가 끝나면 AK45 에 브레이크 0A → <b>홀드가 풀려 팔이 떨어질 수 있다.</b> 먼저 팔을 받친다.";
+  const wb = $("#warnbar");
+  wb.innerHTML = v ? "⚠ 전부 정지 = (가상) 노드 종료 → 가상 팔이 떨어진다. 실물이면 <b>팔이 떨어질 수 있다.</b>"
+    : "⚠ 전부 정지 = 노드 종료 → 실물은 <b>팔이 떨어질 수 있다.</b> 먼저 팔을 받친다.";
+  wb.title = "ak45_node 가 끝나면 AK45 에 브레이크 0A → 홀드가 풀린다.";
   const sg = $("#suggestbar");
   if (!v && S.mode && !S.mode.ros_possible) {
     if (sg.hidden) { sg.hidden = false; sg.replaceChildren(`이 PC엔 ROS 없음 (${S.mode.ros_setup} 없음) — 실물 모드는 못 쓴다. `,
@@ -352,10 +357,11 @@ function renderServices() {
   for (const s of S.services) {
     let c = cards[s.id];
     if (!c) {
-      c = cards[s.id] = buildService(s);
+      c = cards[s.id] = s.id === "pick_dry" ? buildPick(s) : buildService(s);
       (document.getElementById("svc-" + s.tab) || $("#svc-conn")).append(c.root);
     }
     updateService(c, s);
+    if (c.updateExtra) c.updateExtra(s);
   }
 }
 function buildService(s) {
@@ -415,7 +421,99 @@ function updateService(c, s) {
   }
   const text = lines.join("\n");
   if (c.log.textContent !== text) { c.log.textContent = text; if (atBottom) c.log.scrollTop = c.log.scrollHeight; }
-  if ((s.alive || (s.tab === "ik" && text)) && !c.opened) { c.logbox.open = true; c.opened = true; }
+  if (!c.keepClosed && (s.alive || (s.tab === "ik" && text)) && !c.opened) { c.logbox.open = true; c.opened = true; }
+}
+
+// ---------- 역기구학 탭: pick_place --dry-run (큐브 칸 → 계획 돌려 보기 → 결과 한 줄) ----------
+// updateService 가 쓰는 칸(chip·status·note·cmd·log·logbox·bStart·bStop·fields)은 buildService 와 같은 이름으로 만든다.
+function buildPick(s) {
+  const c = { fields: {}, keepClosed: true };
+  const P0 = Object.fromEntries(s.params.map((p) => [p.key, p]));
+  const fld = (k, lab, unit, w) => {
+    const p = P0[k] || { value: "", hint: "", label: k };
+    const inp = el("input", { value: p.value, placeholder: k === "d" || k === "ik" ? "비우면 기본" : "", inputmode: k === "ik" ? null : "decimal" });
+    c.fields[k] = inp;
+    return el("label", { class: "field", title: `${p.label}${p.hint ? " (" + p.hint + ")" : ""}`, style: w ? `width:${w}` : null },
+      el("span", {}, lab, unit ? el("small", {}, " " + unit) : null), inp);
+  };
+  c.chip = el("span", { class: "chip" });
+  c.vb = el("span", { class: "vbadge", hidden: true }, "가상");
+  c.status = el("div", { class: "note" });
+  c.note = el("div", { class: "note" });
+  c.cmd = el("div", { class: "cmd", hidden: true });
+  c.log = el("pre", { class: "logbox tall" });
+  c.logbox = el("details", { class: "log" }, el("summary", {}, "출력 보기"), c.log,
+    el("div", { class: "row" }, el("a", { href: `/api/log/${s.id}?n=1000`, target: "_blank", class: "help" }, "로그 1000줄 보기")));
+  const params = () => Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.value]));
+  c.bStart = el("button", { class: "btn", onclick: () => post(`/api/svc/${s.id}/start`, { params: params() }) }, "▶ 계획 돌려 보기");
+  c.bStop = el("button", { class: "btn red", onclick: () => post(`/api/svc/${s.id}/stop`) }, "■ 중단");
+  c.result = el("div", { class: "result" });
+  c.root = el("div", {},
+    el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브와 놓을 자리"),
+    el("div", { class: "card" },
+      el("div", { class: "frow" }, el("b", {}, "큐브"), fld("cube_x", "x", "m"), fld("cube_y", "y", "m"), fld("cube_yaw", "yaw", "°")),
+      el("div", { class: "frow" }, el("b", {}, "놓을 자리"), fld("target_x", "x", "m"), fld("target_y", "y", "m")),
+      el("div", { class: "help", style: "margin:8px 0 0" }, "로봇 좌표: +x = 로봇 왼쪽, 앞 = −y, yaw = 위에서 반시계"),
+      el("div", { id: "objpose" }),
+      el("details", { class: "log" }, el("summary", {}, "고급"),
+        el("div", { class: "frow" }, fld("max_speed", "max_speed", "°/s"), fld("d", "d 어깨~책상", "m")),
+        fld("ik", "IK 경로 (team-jax/IK)", ""),
+        el("p", { class: "help", style: "margin-top:8px" }, `[${s.group}] ${s.help}`), c.cmd)),
+    el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "계획 돌려 보기"),
+    el("div", { class: "card" },
+      el("div", { class: "row", style: "align-items:center;margin-top:0" }, c.bStart, c.bStop, c.vb, c.chip),
+      el("div", { class: "help", style: "margin:8px 0 0" }, "시뮬에서만 계획·검사한다 — 모터는 안 움직인다."),
+      c.result, c.status, c.note, c.logbox));
+  c.updateExtra = (sv) => {
+    c.bStop.hidden = !sv.alive;
+    c.chip.hidden = !sv.alive && sv.available;   // 끝난 뒤엔 결과 줄이 대신 말한다 (코드 1 = 거절이지 고장이 아님)
+    for (const inp of Object.values(c.fields)) inp.disabled = sv.alive;
+    const [txt, cls] = pickSummary(sv);
+    c.result.textContent = txt; c.result.className = "result " + cls; c.result.hidden = !txt;
+    c.status.hidden = !sv.alive;
+  };
+  return c;
+}
+const JNAME = (n) => (JLABEL[n] || /^finger/.test(n)) ? `${jLabel(n)}(${n})` : n;
+function lastRun(s) {
+  const lines = s.log || [];
+  let k = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (/^===== .* 켜기: /.test(lines[i])) { k = i; break; }
+  return k >= 0 ? lines.slice(k) : (s.exit_code == null ? [] : lines);
+}
+function pickSummary(s) {
+  if (s.alive) return ["⏳ 계획 중… (보통 10~30초)", "run"];
+  const lines = lastRun(s);
+  if (!lines.length || s.exit_code == null) return [s.available ? "아직 안 돌림 — 위 칸을 확인하고 '계획 돌려 보기'" : (s.why || ""), ""];
+  const t = T.traj, extra = t ? ` (시뮬 ${(t.positions.length * t.dt).toFixed(1)}초${t.final_error_m != null ? ` · 놓은 오차 ${(t.final_error_m * 1000).toFixed(1)} mm` : ""})` : "";
+  const fmt = (x) => `${Math.round(x)}°`.replace("-", "−");
+  if (s.exit_code === 0) return ["✅ 통과: 계획·검사 모두 OK" + extra, "ok"];
+  if (s.exit_code === 3) {
+    const r = lines.find((l) => /^refused: /.test(l));
+    return ["⛔ 팔이 못 닿음" + (r ? ": " + r.replace(/^refused: /, "") : ""), "bad"];
+  }
+  if (s.exit_code === 1) {
+    const reasons = [];
+    for (const l of lines) {
+      let m = /^check: (\w+) goes ([-\d.]+)\.\.([-\d.]+) deg but the calibration allows ([-\d.]+)\.\.([-\d.]+)/.exec(l);
+      if (m) {
+        const [lo, hi, alo, ahi] = [m[2], m[3], m[4], m[5]].map(parseFloat);
+        const out = lo < alo - 0.05 ? lo : hi;
+        reasons.push(`${JNAME(m[1])} 이 ${fmt(out)}까지 가는데 허용 범위는 ${fmt(alo)}~${fmt(ahi)}`);
+        continue;
+      }
+      m = /^refused: (?!fix the above)(.*)/.exec(l);
+      if (m) { reasons.push("시뮬 실패: " + m[1]); continue; }
+      m = /^check: (?!calibration not verified)(.*)/.exec(l);
+      if (m) reasons.push(m[1]);
+    }
+    const unv = lines.find((l) => /^check: calibration not verified/.test(l));
+    if (unv) { const n = unv.split(":").pop().split(",").filter((x) => x.trim()).length; reasons.push(`보정 미확인 관절 ${n}개`); }
+    return ["⛔ 거절: " + (reasons.join(" · ") || "출력 보기 참고") + (t ? " — 궤적은 오른쪽 3D 에서 볼 수 있음" : ""), "bad"];
+  }
+  if (s.exit_code === 5) return ["■ 중간에 멈춤", "warn"];
+  const err = [...lines].reverse().find((l) => /Error|error|Traceback/.test(l));
+  return [`⚠ 실행 실패 (코드 ${s.exit_code})${err ? ": " + err.slice(0, 160) : ""} — 출력 보기`, "bad"];
 }
 
 // ---------- 보정 안내 ----------
@@ -459,15 +557,16 @@ async function homingDo(action, joint) {
 }
 function buildHoming() {
   H.msg = el("div", { class: "note" });
-  H.bHomeAll = el("button", { class: "btn", onclick: () => homingDo("home", "all") }, "전부 원점");
-  H.bRelAll = el("button", { class: "btn line", onclick: () => homingDo("release", "all") }, "전부 쉬게");
+  H.bHomeAll = el("button", { class: "btn", onclick: () => homingDo("home", "all"), title: "원점 없는 관절 전부: 지금 위치를 기준 자세로 삼는다" }, "전부 원점 잡기");
+  H.bRelAll = el("button", { class: "btn line", onclick: () => homingDo("release", "all"), title: RELEASE_HELP }, "전부 쉬게");
   H.list = el("div", { class: "hlist" });
   H.vb = el("span", { class: "vbadge", hidden: true }, "가상");
+  H.guide = el("div", { class: "lead" });
   H.card = el("div", { class: "card" },
-    el("h3", {}, H.vb, "AK45 원점", H.chip = el("span", { class: "chip" })),
-    el("p", { class: "help" }, "homing_guard(arm_homed.launch.py)가 원점 잡기 전·전원 재투입 뒤·홀드가 끝난 뒤에는 AK45 명령을 막는다. " +
-      "관절을 기준 자세에 두고 '원점 잡기'. " + RELEASE_HELP),
-    el("div", { class: "row" }, H.bHomeAll, H.bRelAll), H.msg, H.list);
+    el("h3", { title: "homing_guard(arm_homed.launch.py)가 원점 잡기 전·전원 재투입 뒤·홀드가 끝난 뒤에는 AK45 명령을 막는다." },
+      H.vb, "AK45 원점", H.chip = el("span", { class: "chip" })),
+    H.guide, el("div", { class: "row" }, H.bHomeAll, H.bRelAll), H.msg,
+    el("details", { class: "log" }, el("summary", {}, "관절별 원점"), el("p", { class: "help" }, RELEASE_HELP), H.list));
   $("#homing").append(H.card);
 }
 function homingRow(name) {
@@ -486,15 +585,23 @@ function renderHoming() {
   H.vb.hidden = !VIRT();
   const h = (S.ros && S.ros.homing) || { available: false };
   const guardOn = h.available && h.seen && h.age <= 3;
-  let chipCls = "", chipTxt = "guard 없음", msg = "", msgCls = "warn";
-  if (!h.available) { msg = `${h.reason || "ROS 없음"} — 연결 탭에서 ROS 연결(또는 가상 모드).`; msgCls = ""; chipTxt = "ROS 없음"; }
-  else if (!h.seen) msg = "homing_guard 가 안 켜짐: 연결 탭에서 arm_homed.launch.py 를 켜세요.";
-  else if (h.age > 3) { msg = `원점 상태가 ${h.age.toFixed(0)}초 전 것 (homing_guard 꺼짐?). 연결 탭에서 arm_homed.launch.py 를 켜세요.`; chipTxt = "오래됨"; chipCls = "warn"; }
-  else if (h.all_homed) { chipTxt = "전부 원점"; chipCls = "on"; }
-  else { chipTxt = `원점 ${h.joints.filter((j) => j.homed).length}/${h.joints.length}`; chipCls = "bad"; }
+  const poses = Object.values(S.home_poses || {});
+  const zero = poses.every((x) => !x);
+  H.guide.textContent = `팔을 기준 자세(${zero ? "시뮬 0°" : "homing.json"})에 두고 누르세요.`;
+  let chipCls = "", chipTxt = "—", msg = "", msgCls = "warn";
+  const armSvc = svcById("arm_launch").alive || svcById("arm_control").alive;
+  if (!h.available) { msg = VIRT() ? "연결 탭 ③ 팔 켜기 먼저" : "연결 탭 ② ROS 연결 먼저"; msgCls = ""; chipTxt = "ROS 없음"; }
+  else if (!h.seen) chipTxt = "검사 꺼짐", msg = armSvc ? "원점 검사 없이 켜짐 (arm.launch) — 원점 잡기는 연결 탭 ③ 팔 켜기(arm_homed)로" : "연결 탭 ③ 팔 켜기 먼저";
+  else if (h.age > 3) { msg = `원점 정보가 ${h.age.toFixed(0)}초 전 것 — 연결 탭 ③ 팔이 켜져 있는지 보세요.`; chipTxt = "오래됨"; chipCls = "warn"; }
+  else {
+    const n = h.joints.filter((j) => j.homed).length;
+    chipTxt = `원점 ${n}/${h.joints.length}`; chipCls = h.all_homed ? "on" : "bad";
+    if (!h.all_homed) { msg = "원점 없는 AK45 는 움직이지 않는다."; msgCls = ""; }
+  }
   setChip(H.chip, chipTxt, chipCls);
+  H.chip.title = guardOn ? `/arm_control/homing ${h.age.toFixed(1)}초 전` : "";
   H.msg.textContent = msg; H.msg.className = "note " + (msg ? msgCls : "");
-  $("#homing-note").textContent = guardOn ? `/arm_control/homing ${h.age.toFixed(1)}초 전` : "";
+  $("#homing-note").textContent = "";
   H.bHomeAll.disabled = H.bRelAll.disabled = !guardOn;
   const joints = h.seen ? h.joints : Object.keys(S.home_poses || {}).map((j) => ({ joint: j }));
   const seen = new Set(joints.map((j) => j.joint));
@@ -563,7 +670,7 @@ function setVal(n, v, asBase) {
   A.val[n] = v;
   if (asBase) A.base[n] = v;
   const r = A.rows[n];
-  if (r) { r.range.value = v; r.num.value = (Math.round(v * 10) / 10).toString(); }
+  if (r) { r.range.value = v; rangeFill(r.range); r.num.value = (Math.round(v * 10) / 10).toString(); }
 }
 function onUser(n, v) {
   const cal = calJ(), j = cal[n];
@@ -576,18 +683,20 @@ function onUser(n, v) {
   }
   renderAngles();
 }
+const JLABEL = { shoulder_roll: "어깨 roll", shoulder_yaw: "어깨 yaw", upper_arm_roll: "위팔 roll", elbow: "팔꿈치",
+  wrist_pitch: "손목 pitch", wrist_yaw: "손목 yaw", hand_roll: "손 roll", finger_rotation: "손가락 회전" };
+const jLabel = (n) => JLABEL[n] || n.replace(/^finger(\d)_joint(\d)$/, "손가락$1 마디$2");
 function angleRow(j) {
   const r = {}, rg = j.cmd_range_deg || [0, 0];
   const motor = j.motor === "ak45" ? `AK45 ID ${j.id}` : `서보 ${j.name} · ID ${j.id}`;
-  r.range = el("input", { type: "range", min: rg[0], max: rg[1], step: 0.5, value: 0 });
-  r.num = el("input", { type: "number", min: rg[0], max: rg[1], step: 0.5, value: 0 });
+  r.range = el("input", { type: "range", min: rg[0], max: rg[1], step: 0.5, value: 0, "aria-label": jLabel(j.joint) });
+  r.num = el("input", { type: "number", min: rg[0], max: rg[1], step: 0.5, value: 0, "aria-label": jLabel(j.joint) + " °" });
   r.range.addEventListener("input", () => onUser(j.joint, parseFloat(r.range.value)));
   r.num.addEventListener("change", () => onUser(j.joint, parseFloat(r.num.value)));
-  r.send = el("button", { class: "btn", onclick: () => sendJoints([j.joint]) }, "보내기");
-  r.cur = el("span", {}); r.sentT = el("span", {}); r.why = el("span", {});
-  r.root = el("div", { class: "jrow" },
-    el("div", { class: "jn" }, j.joint, el("small", {}, `${motor} · ${rg[0]}~${rg[1]}°${j.verified ? "" : " · 미확인"}`)),
-    r.range, r.num, r.send, el("div", { class: "jinfo" }, r.cur, r.sentT, r.why));
+  r.send = el("button", { class: "btn line small", onclick: () => sendJoints([j.joint]) }, "보내기");
+  r.cur = el("span", { class: "jcur" }); r.why = el("div", { class: "jwhy" });
+  r.root = el("div", { class: "jrow", title: `${j.joint} · ${motor} · ${rg[0]}~${rg[1]}°${j.verified ? "" : " · 보정 미확인"}${j.note ? "\n" + j.note : ""}` },
+    el("div", { class: "jn" }, jLabel(j.joint)), r.range, r.num, r.cur, r.send, r.why);
   return r;
 }
 function buildAngles() {
@@ -595,31 +704,43 @@ function buildAngles() {
   if (!Object.keys(cal).length) return false;
   A.gate = el("div", { class: "gate" });
   A.vb = el("span", { class: "vbadge", hidden: true }, "가상");
-  A.bAll = el("button", { class: "btn", onclick: () => sendJoints(Object.keys(cal).filter((n) => Math.abs((A.val[n] ?? 0) - (A.base[n] ?? 0)) > 1e-9)) }, "바뀐 것 전부 보내기");
-  A.bSync = el("button", { class: "btn line", onclick: syncToActual }, "현재 자세로 슬라이더 맞추기");
-  A.bReset = el("button", { class: "btn line", onclick: () => { for (const n of Object.keys(cal)) setVal(n, A.base[n] ?? 0); renderAngles(); } }, "바꾼 것 되돌리기");
+  A.bAll = el("button", { class: "btn", onclick: () => sendJoints(Object.keys(cal).filter((n) => Math.abs((A.val[n] ?? 0) - (A.base[n] ?? 0)) > 1e-9)) }, "바뀐 것 보내기");
+  A.bSync = el("button", { class: "btn line", onclick: syncToActual, title: "슬라이더를 지금 팔 자세로 (AK45 = 피드백, 서보 = 마지막으로 보낸 값)" }, "지금 자세로 맞추기");
+  A.bReset = el("button", { class: "btn line", onclick: () => { for (const n of Object.keys(cal)) setVal(n, A.base[n] ?? 0); renderAngles(); }, title: "아직 안 보낸 슬라이더 변경을 취소" }, "바꾼 것 취소");
   const linkBox = el("input", { type: "checkbox" });
   linkBox.addEventListener("change", () => { A.link = linkBox.checked; });
+  A.servoNotes = [];
+  const servoNote = () => { const n = el("div", { class: "note warn", hidden: true }); A.servoNotes.push(n); return n; };
   const grp = (title, names, extra) => {
     const card = el("div", { class: "card jgroup" }, el("h3", {}, title), extra || null);
     for (const n of names) if (cal[n]) { const r = A.rows[n] = angleRow(cal[n]); card.append(r.root); }
     return card;
   };
   const ak = Object.values(cal).filter((j) => j.motor === "ak45").map((j) => j.joint);
-  const fingers = el("div", { class: "card jgroup" }, el("h3", {}, "손가락 (서보 7개)"),
-    el("label", { class: "help", style: "display:flex;gap:6px;align-items:center" }, linkBox, "손가락 1·2·3 같이 움직이기 (joint1 끼리, joint2 끼리)"));
+  const fbody = el("div", {},
+    el("label", { class: "help", style: "display:flex;gap:6px;align-items:center;margin:6px 0" }, linkBox, "손가락 1·2·3 같이 움직이기"));
   for (const [label, names] of FINGER_SETS) {
-    fingers.append(el("div", { class: "help", style: "margin:8px 0 0;font-weight:700;color:#1f2a44" }, label));
-    for (const n of names) if (cal[n]) { const r = A.rows[n] = angleRow(cal[n]); fingers.append(r.root); }
+    fbody.append(el("div", { class: "fset" }, label));
+    for (const n of names) if (cal[n]) { const r = A.rows[n] = angleRow(cal[n]); fbody.append(r.root); }
   }
+  const fingers = el("details", { class: "card jgroup fold" }, el("summary", {}, "손가락 (서보 7개)"), servoNote(), fbody);
   box.append(el("div", { class: "card jgroup" },
     el("h3", {}, A.vb, "보내기"),
-    el("p", { class: "help" }, "슬라이더는 3D 의 파란 목표만 바꾼다. 모터로 가는 것은 '보내기' 뿐: /arm_control/joint_command (sim 관절명, rad) → " +
-      "arm_control_node(calibration 변환·클립, max_speed 램프) → arm_homed 면 homing_guard(원점 검사) → ak45_node / stm_bridge_node."),
-    A.gate, el("div", { class: "row" }, A.bAll, A.bSync, A.bReset)),
-    grp("AK45 (어깨·팔꿈치)", ak), grp("손목 (서보)", WRIST), fingers);
+    A.gate, el("div", { class: "row" }, A.bAll, A.bSync, A.bReset),
+    el("details", { class: "log" }, el("summary", {}, "자세히"),
+      el("p", { class: "help" }, "슬라이더는 3D 의 파란 목표만 바꾼다. 모터로 가는 것은 '보내기' 뿐: /arm_control/joint_command (sim 관절명, rad) → " +
+        "arm_control_node(calibration 변환·클립, max_speed 램프) → arm_homed 면 homing_guard(원점 검사) → ak45_node / stm_bridge_node. " +
+        "각도는 시뮬 관절각(°). 줄에 마우스를 올리면 모터 ID·범위가 보인다."))),
+    grp("어깨·팔꿈치 (AK45)", ak), grp("손목 (서보)", WRIST, servoNote()), fingers);
   for (const [n, j] of Object.entries(cal)) setVal(n, clampR(j, (S.pose || {})[n] ? S.pose[n].deg : 0), true);
   return true;
+}
+function shortGate(g) {
+  if (g.ok) return `${VIRT() ? "(가상) " : ""}보낼 수 있음${g.homed_mode ? " · 원점 없는 AK45 는 막힘" : " · 원점 검사 없음"}`;
+  const r = g.reason || "";
+  if (/arm_control_node 가 안 켜짐/.test(r)) return "못 보냄: 팔이 안 켜짐 — 연결 탭 ③ 팔 켜기";
+  if (/ROS/.test(r) && !(S.ros || {}).available) return "못 보냄: ROS 연결 안 됨 — 연결 탭 ② (또는 위 '가상')";
+  return "못 보냄: " + r;
 }
 function renderAngles() {
   if (!A.built) A.built = buildAngles();
@@ -627,9 +748,9 @@ function renderAngles() {
   const g = S.gate || { joints: {} }, cal = calJ();
   A.vb.hidden = !VIRT();
   A.gate.className = "gate " + (g.ok ? "on" : "bad");
-  A.gate.textContent = g.ok ? `${VIRT() ? "(가상) " : ""}보낼 수 있음 — arm_control_node 구독 중${g.homed_mode ? " · homing_guard 사용 중(원점 없는 AK45 는 막힘)" : " · homing_guard 없음(arm.launch / arm_control: AK45 원점 검사 없음)"}`
-    : `보내기 꺼짐: ${g.reason}`;
-  let dirty = 0;
+  A.gate.textContent = shortGate(g);
+  A.gate.title = g.ok ? (g.homed_mode ? "homing_guard 사용 중(원점 없는 AK45 는 막힘)" : "homing_guard 없음(arm.launch / arm_control: AK45 원점 검사 없음)") : g.reason || "";
+  let dirty = 0, servoNote = "";
   for (const [n, r] of Object.entries(A.rows)) {
     const jg = g.joints[n] || {}, p = (S.pose || {})[n];
     const isDirty = Math.abs((A.val[n] ?? 0) - (A.base[n] ?? 0)) > 1e-9;
@@ -637,45 +758,45 @@ function renderAngles() {
     r.root.classList.toggle("dirty", isDirty);
     r.send.disabled = !jg.ok;
     r.send.title = jg.ok ? "이 관절만 보내기" : jg.reason || "";
-    r.cur.textContent = p ? `현재 ${f1(p.deg)} (${p.src}${p.age > 3 ? ", " + fmtAge(p.age) : ""})` : "현재 —";
-    r.sentT.textContent = A.sent[n] != null ? `보낸 값 ${f1(A.sent[n])}` : "";
-    r.why.textContent = !jg.ok ? (jg.reason || "") : jg.note || "";
-    r.why.className = !jg.ok ? "bad" : jg.note ? "warn" : "";
-    if (cal[n] && cal[n].note && !r.noted) { r.noted = true; r.root.title = cal[n].note; }
+    r.cur.textContent = p ? f1(p.deg) : "—";
+    r.cur.className = "jcur" + (p && p.age > 3 && cal[n] && cal[n].motor === "ak45" ? " old" : "");   // 서보 = 보낸 값이라 오래돼도 정상
+    r.cur.title = "지금 값" + (p ? ` (${p.src}${p.age > 3 ? ", " + fmtAge(p.age) : ""})` : " 없음") + (A.sent[n] != null ? ` · 보낸 값 ${f1(A.sent[n])}` : "");
+    const isServo = cal[n] && cal[n].motor === "servo";
+    if (isServo && jg.ok && jg.note && !servoNote) servoNote = jg.note;
+    const why = !jg.ok ? (jg.reason || "") : (!isServo && jg.note) || "";
+    r.why.textContent = why; r.why.hidden = !why;
+    r.why.className = "jwhy " + (!jg.ok ? "bad" : "warn");
   }
+  for (const e of A.servoNotes) { e.hidden = !servoNote; e.textContent = servoNote ? "⚠ " + servoNote.replace(/^첫 명령: /, "서보 첫 명령: ") : ""; }
   A.bAll.disabled = !g.ok || !dirty;
-  A.bAll.textContent = dirty ? `바뀐 것 ${dirty}개 보내기` : "바뀐 것 전부 보내기";
+  A.bAll.textContent = dirty ? `바뀐 것 ${dirty}개 보내기` : "바뀐 것 보내기";
 }
 
 // ---------- 역기구학 탭: 비전 / 가상 큐브 ----------
 const P = {};
 function renderPose() {
   const r = S.ros, box = $("#objpose");
+  if (!box) return;
   if (!P.root) {
-    P.chip = el("span", { class: "chip" }); P.vchip = el("span", { class: "chip" }); P.big = el("div", { class: "big", style: "font-size:18px" });
-    P.note = el("div", { class: "note" });
-    P.bUse = el("button", { class: "btn line", onclick: usePose }, "/object_pose 값을 cube 칸에 넣기");
+    P.chip = el("span", { class: "chip" }); P.val = el("span", { class: "help", style: "margin:0" });
+    P.bUse = el("button", { class: "btn line small", onclick: usePose, title: "/object_pose (frame shoulder_roll_axis) 값을 큐브 칸에 넣는다. frame camera 는 못 넣음. vision_node 켜기/끄기는 연결 탭 '고급'." }, "비전 값 넣기");
     P.vin = {};
     const fld = (k, v, lab) => { const i = el("input", { value: v }); P.vin[k] = i; return el("label", { class: "field" }, lab, i); };
-    P.virt = el("div", { hidden: true },
-      el("div", { class: "help", style: "margin-top:8px" }, el("span", { class: "vbadge" }, "가상"), " 가상 큐브: 가상 vision_node 가 이 값을 /object_pose 로 1 Hz 발행"),
+    P.virt = el("details", { class: "log", hidden: true }, el("summary", {}, "가상 큐브 놓기"),
+      el("div", { class: "help", style: "margin-top:6px" }, el("span", { class: "vbadge" }, "가상"), " 가상 vision_node 가 이 값을 /object_pose 로 1 Hz 발행"),
       el("div", { class: "minirow" }, fld("x", "0.10", "x m"), fld("y", "-0.30", "y m"), fld("z", "-0.4525", "z m"), fld("yaw", "20", "yaw °"),
-        el("button", { class: "btn line", onclick: () => post("/api/virtual/cube", Object.fromEntries(Object.entries(P.vin).map(([k, i]) => [k, parseFloat(i.value)]))) }, "가상 큐브 놓기")));
-    P.root = el("div", { class: "card" }, el("h3", {}, "vision_node", P.vchip, "/object_pose", P.chip), P.big, P.note,
-      el("div", { class: "row" }, P.bUse), P.virt,
-      el("p", { class: "help" }, "frame shoulder_roll_axis = 로봇 좌표(pick_place --cube 와 같은 틀). camera = 카메라 좌표 그대로라 cube 칸에 못 넣음. vision_node 켜기/끄기는 연결 탭."));
-    box.replaceChildren(P.root);
+        el("button", { class: "btn line", onclick: () => post("/api/virtual/cube", Object.fromEntries(Object.entries(P.vin).map(([k, i]) => [k, parseFloat(i.value)]))) }, "놓기")));
+    P.root = el("div", { class: "vline" }, el("b", {}, "비전"), P.chip, P.val, el("span", { class: "spacer" }), P.bUse);
+    box.replaceChildren(P.root, P.virt);
   }
   const vs = svcById("vision");
-  setChip(P.vchip, vs.alive ? "켜짐" : "꺼짐", vs.alive ? "on" : "");
   P.virt.hidden = !VIRT();
   const o = r.available ? r.object_pose : null;
-  $("#pose-note").textContent = !r.available ? "· ROS 없음" : o ? `· ${fmtAge(o.age)} 받음` : "· 아직 없음";
   const stale = o && o.age > 3;
-  setChip(P.chip, !o ? "없음" : stale ? "오래됨" : "받는 중", !o ? "" : stale ? "warn" : "on");
-  P.big.textContent = o ? `x ${o.x.toFixed(3)} · y ${o.y.toFixed(3)} · z ${o.z.toFixed(3)} · yaw ${o.yaw_deg.toFixed(1)}° · ${o.frame_id || "(빈 frame)"}` : "—";
-  P.note.textContent = !r.available ? (r.reason || "ROS 없음") : !o ? "vision_node 가 안 켜졌거나 아직 발행 전 (1 Hz)" : stale ? `${o.age.toFixed(0)}초 전 값 (vision_node 꺼짐?)` : "";
-  P.note.className = "note " + (stale ? "warn" : "");
+  setChip(P.chip, !r.available ? "ROS 없음" : o ? (stale ? "오래됨" : "받는 중") : vs.alive ? "기다리는 중" : "꺼짐", !o ? "" : stale ? "warn" : "on");
+  P.chip.title = `vision_node ${vs.alive ? "켜짐" : "꺼짐"} · /object_pose ${!r.available ? (r.reason || "ROS 없음") : o ? fmtAge(o.age) + " 받음" : "아직 없음"}`;
+  P.val.textContent = o ? `x ${o.x.toFixed(3)} · y ${o.y.toFixed(3)} · yaw ${o.yaw_deg.toFixed(0)}°${o.frame_id !== "shoulder_roll_axis" ? ` (${o.frame_id || "빈 frame"})` : ""}` : "";
+  P.val.title = o ? `z ${o.z.toFixed(3)} · frame ${o.frame_id || "(빈)"}` : "";
   P.bUse.disabled = !o || o.frame_id !== "shoulder_roll_axis";
 }
 function usePose() {
@@ -683,7 +804,7 @@ function usePose() {
   if (!o || !c) return;
   const set = (k, v) => { if (c.fields[k] && !c.fields[k].disabled) c.fields[k].value = v; };
   set("cube_x", o.x.toFixed(3)); set("cube_y", o.y.toFixed(3)); set("cube_yaw", o.yaw_deg.toFixed(1));
-  toast("cube 칸을 채웠다. ▶ 실행(--dry-run)");
+  toast("큐브 칸을 채웠다. 이제 ▶ 계획 돌려 보기");
 }
 
 // ---------- 역기구학 탭: 궤적 재생 ----------
@@ -694,7 +815,7 @@ async function loadTraj() {
     T.info = d;
     T.traj = d.ok ? d.traj : null;
     T.frame = 0; T.playing = false;
-    if (T.slider) { T.slider.max = T.traj ? T.traj.positions.length - 1 : 0; T.slider.value = 0; }
+    if (T.slider) { T.slider.max = T.traj ? T.traj.positions.length - 1 : 0; T.slider.value = 0; rangeFill(T.slider); }
   } catch (e) { T.info = { ok: false, error: "궤적을 못 받음" }; }
 }
 function trajPose(k) {
@@ -719,7 +840,9 @@ function buildTraj() {
   } }, "가상 팔로 재생");
   T.vstop = el("button", { class: "btn line", onclick: () => post("/api/ik/stop_virtual") }, "재생 멈춤");
   T.vrow = el("div", { class: "tbar", hidden: true }, el("span", { class: "vbadge" }, "가상"), T.vplay, T.vstop, T.vinfo = el("span", { class: "num" }));
-  box.append(T.status, el("div", { class: "tbar" }, T.bPlay, T.slider, T.num), el("div", { class: "tbar" }, "속도", sp, vsel), T.vrow);
+  sp.title = "재생 속도";
+  box.append(el("div", { class: "tbar" }, T.bPlay, T.slider, sp), el("div", { class: "tbar" }, T.status, el("span", { class: "spacer" }), T.num), T.vrow,
+    el("details", { class: "log" }, el("summary", {}, "보기 바꾸기"), el("div", { class: "tbar" }, vsel)));
   setInterval(stepTraj, 50);
 }
 function stepTraj() {
@@ -727,7 +850,7 @@ function stepTraj() {
   const now = performance.now(), dt = (now - (T.last || now)) / 1000; T.last = now;
   T.frame = Math.min(T.traj.positions.length - 1, T.frame + dt * T.speed / T.traj.dt);
   if (T.frame >= T.traj.positions.length - 1) T.playing = false;
-  T.slider.value = Math.round(T.frame);
+  T.slider.value = Math.round(T.frame); rangeFill(T.slider);
   updateIkView();
 }
 function trajScene() {
@@ -745,12 +868,14 @@ function renderTraj() {
   const t = T.traj, i = T.info || {};
   if (t) {
     const n = t.positions.length;
-    T.status.textContent = `궤적: ${t.status} (${t.reason || ""}) · ${n} 프레임 · sim ${(n * t.dt).toFixed(1)}초` +
-      (t.final_error_m != null ? ` · 놓은 오차 ${(t.final_error_m * 1000).toFixed(1)} mm` : "") + (i.mtime ? ` · ${new Date(i.mtime * 1000).toLocaleTimeString()}` : "");
+    T.status.textContent = `${i.mtime ? new Date(i.mtime * 1000).toLocaleTimeString() + " 계획" : "궤적"}${t.status === "playable" ? "" : " · " + t.status}`;
+    T.status.title = `궤적: ${t.status} (${t.reason || ""}) · ${n} 프레임 · sim ${(n * t.dt).toFixed(1)}초` +
+      (t.final_error_m != null ? ` · 놓은 오차 ${(t.final_error_m * 1000).toFixed(1)} mm` : "");
     T.status.className = "note " + (t.status === "playable" ? "" : "warn");
-    T.num.textContent = `${Math.round(T.frame)}/${n - 1} · ${(T.frame * t.dt).toFixed(2)}초`;
+    T.num.textContent = `${(T.frame * t.dt).toFixed(1)} / ${((n - 1) * t.dt).toFixed(1)}초`;
   } else {
-    T.status.textContent = `궤적 없음 — ${i.error || "pick_place --dry-run 을 실행하면 여기서 재생된다"}. 큐브·놓을 자리만 표시.`;
+    T.status.textContent = "궤적 없음 — ② 계획 돌려 보기";
+    T.status.title = i.error || "";
     T.status.className = "note warn";
     T.num.textContent = "";
   }
@@ -795,8 +920,9 @@ function renderViewers() {
   const o = S.ros.available ? S.ros.object_pose : null;
   VW.angle.setObject(o && o.frame_id === "shoulder_roll_axis" ? { x: o.x, y: o.y, z: o.z, yaw: o.yaw_deg } : null);
   const nPose = Object.keys(S.pose || {}).length;
-  $("#v3d-angle-note").textContent = (VIRT() ? "(가상) " : "") + (nPose ? `현재 자세: ${nPose}개 관절 값 (AK45 = 피드백, 서보 = 마지막으로 보낸 값). 값 없는 관절은 0°.`
-    : "현재 자세 값 없음 — 0° 로 그림 (ROS·노드 꺼짐)");
+  const vn = $("#v3d-angle-note");
+  vn.textContent = nPose ? "" : "지금 자세 값 없음 — 0° 로 그림";
+  vn.title = `${VIRT() ? "(가상) " : ""}현재 자세: ${nPose}개 관절 값 (AK45 = 피드백, 서보 = 마지막으로 보낸 값). 값 없는 관절은 0°.`;
 }
 function updateIkView() {
   if (!VW.ik || !S) return;

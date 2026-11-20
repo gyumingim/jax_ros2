@@ -157,7 +157,7 @@ export class Viewer {
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     container.prepend(this.renderer.domElement);
     const scene = this.scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xeef2f7);
+    scene.background = new THREE.Color(0xf2f4f6);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.8); sun.position.set(1, -1.5, 2); scene.add(sun);
     const cam = this.camera = new THREE.PerspectiveCamera(40, 1, 0.01, 20);

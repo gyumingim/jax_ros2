@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JAX 팔 대시보드</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/static/pretendard.min.css">
 <link rel="stylesheet" href="/static/app.css">
 <script type="importmap">
 { "imports": { "three": "/static/vendor/three-0.160.0/three.module.js",
@@ -27,8 +28,8 @@
   <div class="spacer"></div>
   <button class="btn-stop" id="btn-stop" title="켜진 항목 전부 끄기 (Esc)">■ 전부 정지<small>모든 노드 끄기 · Esc</small></button>
 </header>
-<div class="warnbar" id="warnbar">⚠ 전부 정지 = 노드 종료. ak45_node 가 끝나면 AK45 에 브레이크 0A → <b>홀드가 풀려 팔이 떨어질 수 있다.</b> 먼저 팔을 받친다.</div>
-<div class="virtbar" id="virtbar" hidden>가상 모드 — 화면의 모든 값·움직임은 <b>가상 팔</b>이다. 실물 모터·CAN·ROS 와 상관없음.</div>
+<div class="warnbar" id="warnbar">⚠ 전부 정지 = 노드 종료 → 실물은 <b>팔이 떨어질 수 있다.</b> 먼저 팔을 받친다.</div>
+<div class="virtbar" id="virtbar" hidden>가상 모드 — 실물 모터와 상관없는 가상 팔</div>
 <div class="warnbar" id="suggestbar" hidden></div>
 <div class="warnbar bad" id="straybar" hidden></div>
 <nav class="tabs" id="tabs" role="tablist"></nav>
@@ -52,14 +53,14 @@
   <section class="page" id="page-angle" data-tab="angle">
     <div class="split">
       <div class="split-l">
-        <h2 class="sec">원점 (homing) <small id="homing-note"></small></h2>
+        <h2 class="sec"><span class="snum">1</span>원점 잡기 <small id="homing-note"></small></h2>
         <div id="homing"></div>
-        <h2 class="sec">관절 각도 <small>시뮬 관절각 °, 슬라이더는 '보내기' 를 눌러야 나간다</small></h2>
+        <h2 class="sec"><span class="snum">2</span>움직이기</h2>
         <div id="angles"></div>
       </div>
       <div class="split-r">
         <div class="card v3d-card">
-          <h3>3D <span class="help" style="margin:0">불투명 = 실제 현재 자세 · <span style="color:#2f66d0">파란 반투명</span> = 슬라이더 목표</span></h3>
+          <h3>3D <span class="legend"><b>진한 팔</b> = 지금 · <span style="color:#2f66d0;font-weight:700">파란 반투명</span> = 보낼 목표</span></h3>
           <div class="v3d" id="v3d-angle"></div>
           <div class="note" id="v3d-angle-note"></div>
         </div>
@@ -70,21 +71,18 @@
   <section class="page" id="page-ik" data-tab="ik">
     <div class="split">
       <div class="split-l">
-        <h2 class="sec">pick_place 계획·검사 <small>--dry-run 만 (모터 안 움직임)</small></h2>
         <div id="svc-ik"></div>
-        <h2 class="sec">비전 <small id="pose-note"></small></h2>
-        <div id="objpose"></div>
       </div>
       <div class="split-r">
         <div class="card v3d-card">
-          <h3>3D 궤적 <span class="help" style="margin:0">주황 = 큐브 · 초록 = 놓을 자리 · 보라 = /object_pose</span></h3>
+          <h3>3D 궤적 <span class="legend"><span style="color:#ea580c;font-weight:700">주황</span> 큐브 · <span style="color:#16a34a;font-weight:700">초록</span> 놓을 자리 · <span style="color:#a855f7;font-weight:700">보라</span> 비전</span></h3>
           <div class="v3d" id="v3d-ik"></div>
           <div id="traj-ctl"></div>
         </div>
       </div>
     </div>
   </section>
-  <footer class="foot" id="foot"></footer>
+  <details class="foot"><summary>정보</summary><div id="foot"></div></details>
 </main>
 <div class="toasts" id="toasts"></div>
 <script src="/static/app.js"></script>
