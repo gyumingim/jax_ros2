@@ -54,7 +54,7 @@ def main():
     check("no parameter: nothing published", len(got) == 0, f"{len(got)} messages")
     check("no parameter: not even a publisher on /object_pose", pubs == 0, f"{pubs} publishers")
 
-    for bad in ("[0.1, 0.2]", "[0.1, -0.3, 20.0, 5.0]", "[.nan, 0.0, 0.0]", "[.inf, 0.0, 0.0]", "abc"):
+    for bad in ("[0.1, 0.2]", "[0.1, -0.3, 0.0, 20.0, 5.0]", "[.nan, 0.0, 0.0]", "[.inf, 0.0, 0.0]", "abc"):
         got, pubs = run_case(node, 3.5, f"fixed_pose:={bad}")
         check(f"fixed_pose:={bad}: nothing published", len(got) == 0 and pubs == 0, f"{len(got)} messages")
 
@@ -75,6 +75,9 @@ def main():
               round(degrees(2 * atan2(q.z, q.w)), 6))
         check("quaternion has unit length", abs(q.z ** 2 + q.w ** 2 - 1.0) < 1e-12)
         check("stamp is set", m.header.stamp.sec > 0)
+
+    got, _ = run_case(node, 3.5, "fixed_pose:=[0.10, -0.30, 0.05, 20.0]")
+    check("four numbers [x, y, z, yaw]: z 0.05", got and round(got[-1][1].pose.position.z, 6) == 0.05)
 
     got, _ = run_case(node, 3.5, "fixed_pose:=[1, 2, -90]")
     check("integer list [1, 2, -90] is accepted, yaw -90", got and round(

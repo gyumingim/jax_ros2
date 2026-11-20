@@ -2,13 +2,13 @@
 
     ros2 run vision_node vision_node --ros-args -p fixed_pose:="[0.10, -0.30, 20.0]"
 
-fixed_pose = [x, y, yaw]: x, y in metres, yaw in DEGREES (counter-clockwise seen from above, like
-`pick_place --cube x y yaw`). Without the parameter, or with one that is not three finite numbers,
-nothing is published.
+fixed_pose = [x, y, yaw] or [x, y, z, yaw]: x, y, z in metres, yaw in DEGREES (counter-clockwise seen
+from above, like `pick_place --cube x y yaw`). With three numbers z is 0.0. Without the parameter, or
+with one that is not three or four finite numbers, nothing is published.
 
 /object_pose  geometry_msgs/PoseStamped at 1 Hz, frame_id "shoulder_roll_axis": origin = centre of the
 right shoulder roll motor's axis, x = robot's left (+), y = back (+, the front is -y), z = up. The
-rotation is a yaw about z only. fixed_pose has no height, so position.z is 0.0 and means nothing.
+rotation is a yaw about z only. A three-number fixed_pose has no height, so position.z is 0.0.
 
 Camera mode (parameter result_json = path of SteroDepthSeg's inference.json; it is rewritten about
 once a second by z_phone_stereo.py, which runs in its own venv: this node only reads the file):
@@ -68,20 +68,21 @@ class VisionNode(Node):
             return
         if pose is None or (isinstance(pose, (list, tuple)) and len(pose) == 0):
             self.get_logger().info("no fixed_pose: nothing is published (no result_json either)")
-        elif (not isinstance(pose, (list, tuple)) or len(pose) != 3
+        elif (not isinstance(pose, (list, tuple)) or len(pose) not in (3, 4)
               or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and isfinite(v) for v in pose)):
-            self.get_logger().error(f"fixed_pose must be three finite numbers [x, y, yaw], got {pose!r}; "
-                                    "nothing is published")
+            self.get_logger().error(f"fixed_pose must be [x, y, yaw] or [x, y, z, yaw] (finite numbers), "
+                                    f"got {pose!r}; nothing is published")
         else:
-            self.pose = tuple(float(v) for v in pose)
+            v = [float(p) for p in pose]
+            self.pose = (v[0], v[1], 0.0, v[2]) if len(v) == 3 else tuple(v)   # (x, y, z, yaw)
             self.pub = self.create_publisher(PoseStamped, TOPIC, 10)
             self.create_timer(PERIOD_S, self.on_timer)
             self.get_logger().info(f"{TOPIC} at {1 / PERIOD_S:g} Hz, {FRAME_ID}: x {self.pose[0]:g} m, "
-                                   f"y {self.pose[1]:g} m, yaw {self.pose[2]:g} deg")
+                                   f"y {self.pose[1]:g} m, z {self.pose[2]:g} m, yaw {self.pose[3]:g} deg")
 
     def on_timer(self):
-        x, y, yaw = self.pose
-        self.publish_pose(x, y, 0.0, yaw, FRAME_ID)
+        x, y, z, yaw = self.pose
+        self.publish_pose(x, y, z, yaw, FRAME_ID)
 
     def publish_pose(self, x, y, z, yaw_deg, frame_id):
         msg = PoseStamped()

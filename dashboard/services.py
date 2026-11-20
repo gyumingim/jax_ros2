@@ -149,8 +149,8 @@ def _vision(p):
         raise ValueError("fixed_pose 와 result_json 중 하나만 채운다")
     a = ["ros2", "run", "vision_node", "vision_node", "--ros-args"]
     if fp:
-        if not re.fullmatch(rf"\[{_NUM},{_NUM},{_NUM}\]", fp):
-            raise ValueError("fixed_pose 형식: [x_m, y_m, yaw_deg] 예 [0.10, -0.30, 20.0]")
+        if not re.fullmatch(rf"\[{_NUM},{_NUM},({_NUM},)?{_NUM}\]", fp):
+            raise ValueError("fixed_pose 형식: [x_m, y_m, z_m, yaw_deg] 예 [0.10, -0.30, 0.05, 20.0] (z 빼면 0)")
         a += ["-p", f"fixed_pose:={fp}"]
     else:
         a += ["-p", f"result_json:={rj}"]
@@ -198,7 +198,7 @@ SERVICES = [
             conflicts=("arm_launch", "arm_homed"), procs=("arm_control_node",)),
     Service("vision", "vision_node", _vision, group="노드",
             help="둘 중 하나만: fixed_pose(시험용) 또는 result_json(카메라 inference.json 경로).",
-            params=[Param("fixed_pose", "fixed_pose", "[0.10, -0.30, 20.0]", "[x m, y m, yaw °]"),
+            params=[Param("fixed_pose", "fixed_pose", "[0.10, -0.30, 0.0, 20.0]", "[x m, y m, z m, yaw °]"),
                     Param("result_json", "result_json", "", "…/inference.json")],
             procs=("vision_node",)),
     Service("vcan_test", "vcan 시험 (launch_vcan.sh)", _vcan, kind="once", group="시험",
