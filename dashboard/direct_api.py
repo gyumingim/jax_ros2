@@ -91,6 +91,21 @@ class Direct:
 DIRECT = Direct()
 
 
+def analytic_fatal(traj):
+    """대시보드 해석 IK 계획(pick_plan.py, planner "analytic")이 자기 검사(손가락↔큐브·책상, 관절 한계, 길 못 찾음)에
+    걸렸으면 실물 재생은 force 로도 안 된다 (팀 ROS 경로 play.check_trajectory 는 그대로 — 이것은 대시보드에서만 더함).
+    거절 이유 글 또는 None."""
+    if traj.get("planner") != "analytic":
+        return None
+    status = traj.get("status") or "?"
+    fb = (traj.get("checks") or {}).get("joint_space_fallback") or []
+    if status != "playable" or traj.get("playable") is False:
+        return f"계획 검사 실패 ({status}): {traj.get('reason', '')} — 실물에선 force 로도 재생 안 함. 다른 자리로 다시 계획"
+    if fb:
+        return "계획 일부가 관절 공간 직선(길 못 찾음): " + ", ".join(map(str, fb)) + " — 실물에선 재생 안 함"
+    return None
+
+
 def play_real(trajectory, b):
     if not DIRECT.connected():
         return {"ok": False, "error": "팔 연결 안 됨 (직접 CAN)"}
@@ -100,6 +115,9 @@ def play_real(trajectory, b):
     traj = t["traj"]
     from arm_control.play import check_trajectory
     arm = DIRECT.arm
+    fatal = analytic_fatal(traj)
+    if fatal:
+        return {"ok": False, "error": f"재생 거절: {fatal}"}
     fatal, problems = check_trajectory(traj, arm.cal)
     if fatal:
         return {"ok": False, "error": f"재생 거절: {fatal}"}
