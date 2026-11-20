@@ -496,7 +496,7 @@ def _hand_ik(b, op):
     cur = {k: v["deg"] for k, v in actual_pose(backend().snapshot(), cal).items()}
     if op == "fk":
         js = b.get("joints") if isinstance(b.get("joints"), dict) else cur
-        return hand_ik.fk(_ik_dir(), js, b.get("mode") or "grasp") | {"joints_used": js}
+        return hand_ik.fk(_ik_dir(), js, b.get("mode") or "auto") | {"joints_used": js}
     return hand_ik.solve(_ik_dir(), b, ranges, cur)
 
 

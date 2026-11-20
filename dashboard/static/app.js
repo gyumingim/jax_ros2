@@ -790,7 +790,8 @@ function checkText(r) {
 
 // ---------- 역기구학 탭: 손 위치로 보내기 (POST /api/ik/hand → 유령 → 각도 보내기와 같은 /api/joint/send) ----------
 // 점 = 손이 쥐는 큐브의 중심(실좌표, m). z 는 '책상 위 cm' 로 받는다(책상 = 어깨 아래 D 0.4775 m, realcoords.MAP_D).
-// 손 방향: grasp = 실물 셋업의 큐브 잡는 자세(손가락 아래 + −40° 기울임), vertical = 손끝 수직(기울기 0).
+// 손 방향: auto(기본) = 손가락 아래, 손가락 사이 축 둘레 기울기를 ±상한(기본 60°) 안에서 IK 가 고름(수직에 가까운 것 먼저),
+// vertical = 손끝 수직(기울기 0), grasp = 팀 IK 원래 값(−40° 고정).
 // 풀기는 자동: 슬라이더를 끄는 동안 = 빠른 풀이(직전 해에서 한 번, fast: true, 최신 것만), 손을 떼거나 숫자를 바꾸면 300 ms 뒤 전체 풀이.
 const HK = { last: null, good: null, fullSeq: 0, fullAt: 0, inflight: false, pending: false, timer: null, busy: false,
   warned: false, check: null, sentAt: 0, mapD: 0.4775, ghostBad: false, fastT: [], fastLat: [], fastSrv: [],
@@ -800,9 +801,9 @@ const hkSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function hkVals() {
   if (!HK.f) return null;
   const n = (e) => { const v = parseFloat(e.value); return Number.isFinite(v) ? v : null; };
-  const x = n(HK.f.x.num), y = n(HK.f.y.num), zc = n(HK.f.z.num), yaw = n(HK.f.yaw.num), fv = n(HK.f.fixv);
+  const x = n(HK.f.x.num), y = n(HK.f.y.num), zc = n(HK.f.z.num), yaw = n(HK.f.yaw.num), fv = n(HK.f.fixv), tm = n(HK.f.tmax);
   if (x == null || y == null || zc == null) return null;
-  return { x, y, z_table_cm: zc, z: zc / 100 - HK.mapD, yaw_deg: yaw ?? 0, mode: HK.f.mode.value,
+  return { x, y, z_table_cm: zc, z: zc / 100 - HK.mapD, yaw_deg: yaw ?? 0, mode: HK.f.mode.value, tilt_max_deg: tm ?? 60,
     fix_deg: HK.f.fix.checked ? { shoulder_yaw: fv ?? 0 } : {} };
 }
 function hkSetXY(x, y, live) {
@@ -879,8 +880,11 @@ function buildHandIk() {
   f.y = hkSlider("y (앞 −)", "m", -0.45, 0.05, 0.005, -0.3, 3);
   f.z = hkSlider("높이 (책상 위)", "cm", 0, 40, 0.5, 2.5, 1);
   f.yaw = hkSlider("손 방향 (잡을 큐브 yaw)", "°", -45, 45, 1, 0, 0);
-  f.mode = el("select", {}, el("option", { value: "grasp" }, "큐브 잡는 자세 (손가락 아래, −40° 기울임)"),
-    el("option", { value: "vertical" }, "손끝 수직 아래 (기울기 0°) — 시험"));
+  f.mode = el("select", {}, el("option", { value: "auto" }, "손가락 아래 (기울기 자동, 0~상한)"),
+    el("option", { value: "vertical" }, "수직만 (기울기 0°)"),
+    el("option", { value: "grasp" }, "−40° 고정 (팀 IK 원래 값)"));
+  f.tmax = el("input", { type: "number", min: 0, max: 90, step: 5, value: 60, style: "width:64px", title: "기울기 자동일 때 손가락 사이 축 둘레 기울기 상한 (양쪽)" });
+  f.tmax.addEventListener("input", () => hkEdit(false));
   f.fix = el("input", { type: "checkbox", checked: "" });
   f.fixv = el("input", { type: "number", min: 0, max: 45, step: 1, value: 0, style: "width:70px" });
   f.open = el("input", { type: "checkbox" });
@@ -918,7 +922,7 @@ function buildHandIk() {
         el("b", { style: "color:#2f66d0" }, "파란 유령"), "으로 보인다 (못 풀면 ", el("b", { style: "color:#dc2626" }, "빨강"), " + 마지막 좋은 해). [보내기] 로 팔을 그 자세로. 손가락은 그대로."),
       el("div", { class: "row", style: "margin-top:0" }, pickMap, fromCube),
       f.x.row, f.y.row, f.z.row, f.yaw.row,
-      el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 자세"), f.mode),
+      el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 자세"), f.mode, el("span", {}, " 기울기 상한 ±"), f.tmax, el("span", {}, "°")),
       el("label", { class: "chk", style: "display:flex;gap:6px;align-items:center;margin:4px 0 0" }, f.fix, "어깨 옆으로 벌리기 고정 (shoulder_yaw)", f.fixv, "°"),
       el("p", { class: "help", style: "margin:4px 0 0" }, "손이 바닥을 봐도 답이 하나가 아니다: 손 위치·방향은 6개 값인데 관절이 7개라 같은 손 자세를 만드는 팔 모양이 여러 개(팔꿈치 위치가 남음)이고, 손도 반 바퀴 돌린 두 가지가 있어 계산이 하나를 고른다. " +
         "고정을 켜면 관절이 6개가 되어 거의 하나로 정해진다 (대신 닿는 곳이 줄어든다 — 안 풀리면 이유에 '고정 때문' 이 뜬다)."),
@@ -927,7 +931,9 @@ function buildHandIk() {
       el("div", { class: "row", style: "align-items:center" }, HK.bSend, HK.bCheck, HK.bSolve, HK.vb),
       HK.res, HK.meta, HK.rate, HK.gate, HK.chk,
       el("details", { class: "log" }, el("summary", {}, "자세히"),
-        el("p", { class: "help" }, "점 = 손이 쥐는 큐브의 중심. 파지 중심(end_effector)은 손 축 따라 21.5 mm 위 (env.pick_pose 와 같음, 손끝 수직이면 0). " +
+        el("p", { class: "help" }, "점 = 손이 쥐는 큐브의 중심. 파지 중심(end_effector)은 손 축 따라 21.5 mm 위 (env.pick_pose 와 같음, '수직만' 이면 0). " +
+          "기울기 자동: 손가락이 닫히는 축(손가락 1·2 ↔ 3) 둘레로 기울여도 패드는 같은 두 면에 닿으므로 그 축 둘레 회전은 자유로 두고(위치 3 + 손가락 축 방향 2 만 맞춤), " +
+          "기울기는 ±상한 안에서, 남는 자유도로 수직 쪽으로 당긴다. 후보 중 수직에 가까운 것(10° 단위) → 지금 자세에서 가까운 것. " +
           "손 방향 = 이 손이 쥘 큐브의 yaw (지도와 같은 기준, 위에서 반시계). 전체 풀이: 큐브의 세 면 × 손 그대로/반 바퀴 × 시작점 5개, 관절 한계(calibration 의 보낼 수 있는 범위, 손 비틀기 ±88°) 안에서 " +
           "위치 5 mm · 방향 1.5° 안이면 풀림, 그중 지금 자세에서 가장 가까운 해. 끄는 중엔 빠른 풀이(직전 해에서 한 번, 같은 손 모양). team-jax/IK env.py·ik.py 를 그대로 쓴다. " +
           "[보내기] = 각도 제어 탭과 같은 /api/joint/send (같은 막힘 규칙·확인창). 지금 자세 → 목표까지 관절마다 직선으로 가며, 중간 경로의 충돌은 검사하지 않는다."))));
@@ -941,7 +947,7 @@ function hkRender() {
   const cur = r && hkSame(v, r.req);
   HK.vb.hidden = !VIRT();
   if (r) {
-    const hand = r.flip ? "손 반 바퀴" : "손 그대로";
+    const hand = (r.flip ? "손 반 바퀴" : "손 그대로") + (r.tilt_deg != null ? ` · 기울기 ${degS(r.tilt_deg)}` : "");
     const sy = r.joints ? ` · 어깨 옆 ${f1(r.joints.shoulder_yaw)}` : "";
     if (r.ok) {
       HK.res.textContent = `✅ 풀림${r.fast ? " (빠른)" : ""} · 오차 ${r.pos_err_mm} mm · 방향 ${r.ang_err_deg}° · ${hand}, 손 돌림 ${degS(r.hand_turn)}${sy}` +
@@ -979,7 +985,7 @@ function hkRender() {
 }
 async function hkFk(manual) {
   const t = HK.sentReq || hkVals();
-  const mode = (t && t.mode) || "grasp";
+  const mode = (t && t.mode) || "auto";
   let r;
   try { r = await (await fetch("/api/ik/fk", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode }) })).json(); }
   catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
