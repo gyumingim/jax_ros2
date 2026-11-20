@@ -858,7 +858,7 @@ function hkFlog(ev, o) {
 }
 function hkSolLog(r) {   // 풀이 응답 요약
   return r ? { kind: r.fast ? "fast" : "full", ok: !!r.ok, pos_err: r.pos_err_mm, ang_err: r.ang_err_deg, flip: r.flip, turn: r.hand_turn, tilt: r.tilt_deg,
-    q: hkR1(r.joints), ms: r.ms, reason: r.ok ? undefined : r.reason, req: r.req && { x: r.req.x, y: r.req.y, zc: r.req.z_table_cm, yaw: r.req.yaw_deg } } : null;
+    q: hkR1(r.joints), ms: r.ms, reason: r.ok ? undefined : r.reason, meth: r.method, nsol: r.n_solutions, req: r.req && { x: r.req.x, y: r.req.y, zc: r.req.z_table_cm, yaw: r.req.yaw_deg } } : null;
 }
 async function hkFlogFlush() {
   if (!HK.flogQ.length) return;
@@ -1026,6 +1026,9 @@ function buildHandIk() {
   HK.rate = el("div", { class: "hkmeta" });
   HK.gate = el("div", { class: "hkmeta" });
   HK.chk = el("div", { class: "hkmeta" });
+  // 해석 IK(위치만 + 어깨 옆 고정): 답 목록에서 다른 해 골라 보내기 (고급)
+  HK.solsBody = el("div", { class: "hkmeta" });
+  HK.sols = el("details", { class: "log", hidden: true }, el("summary", {}, "고급: 다른 해 고르기 (해석 IK 의 답 목록)"), HK.solsBody);
   const root = el("div", { class: "hk" },
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "3"), "손 위치로 보내기"),
     el("div", { class: "card" },
@@ -1042,7 +1045,7 @@ function buildHandIk() {
       el("label", { class: "chk", style: "display:flex;gap:6px;align-items:center;margin:4px 0 0" }, f.open, "보낼 때 손가락도 벌리기 (집기 전 자세)"),
       el("label", { class: "chk", style: "display:flex;gap:6px;align-items:center;margin:4px 0 0" }, f.followBox, "팔도 바로 따라가기 (0.2초마다 보냄, 20° 넘게 바뀌면 안 보냄)"),
       el("div", { class: "row", style: "align-items:center" }, HK.bSend, HK.bCheck, HK.bSolve, HK.vb),
-      HK.res, HK.meta, HK.rate, HK.gate, HK.chk,
+      HK.res, HK.meta, HK.rate, HK.gate, HK.chk, HK.sols,
       el("details", { class: "log" }, el("summary", {}, "자세히"),
         el("p", { class: "help" }, "점 = 손이 쥐는 큐브의 중심. 파지 중심(end_effector)은 손 축 따라 21.5 mm 위 (env.pick_pose 와 같음, '수직만' 이면 0). " +
           "기울기 자동: 손가락이 닫히는 축(손가락 1·2 ↔ 3) 둘레로 기울여도 패드는 같은 두 면에 닿으므로 그 축 둘레 회전은 자유로 두고(위치 3 + 손가락 축 방향 2 만 맞춤), " +
@@ -1064,12 +1067,13 @@ function hkRender() {
   if (r) {
     const hand = (r.flip ? "손 반 바퀴" : "손 그대로") + (r.tilt_deg != null ? ` · 기울기 ${degS(r.tilt_deg)}` : "");
     const sy = r.joints ? ` · 어깨 옆 ${f1(r.joints.shoulder_yaw)}` : "";
+    const an = r.method === "analytic" && r.n_solutions ? ` · 해석 IK: 답 ${r.n_solutions}개 중 ${r.picked != null ? `${r.picked + 1}번(직접 고름)` : "최소 회전"}` : "";
     if (r.ok) {
       // 지금 자세(피드백, 빠진 관절은 직전 보낸 해)에서 가장 많이 도는 관절
       const pz = S.pose || {}, sj = HK.followSent || HK.sentJ || {};
       const now7 = Object.fromEntries(ARM7.map((n) => [n, pz[n] ? pz[n].deg : sj[n]]));
       const mv = hkDiff(r.joints, now7);
-      HK.res.textContent = `✅ 풀림${r.fast ? " (빠른)" : ""} — 지금 자세에서 최대 ${mv.d == null || mv.d > 900 ? "?" : mv.d.toFixed(0)}° 회전${mv.j && mv.d < 900 ? ` (${jLabel(mv.j).replace(/ \(.*\)$/, "")})` : ""}\n오차 ${r.pos_err_mm} mm · 방향 ${r.ang_err_deg}° · ${hand}, 손 돌림 ${degS(r.hand_turn)}${sy}` +
+      HK.res.textContent = `✅ 풀림${r.fast ? " (빠른)" : ""} — 지금 자세에서 최대 ${mv.d == null || mv.d > 900 ? "?" : mv.d.toFixed(0)}° 회전${mv.j && mv.d < 900 ? ` (${jLabel(mv.j).replace(/ \(.*\)$/, "")})` : ""}\n오차 ${r.pos_err_mm} mm · 방향 ${r.ang_err_deg}° · ${hand}, 손 돌림 ${degS(r.hand_turn)}${sy}${an}` +
         (r.warn && r.warn.length ? "\n⚠ " + r.warn.join(" · ") : "") + (!cur ? (HK.busy || HK.inflight ? "\n⏳ 다시 푸는 중…" : "\n(값이 바뀜)") : "");
       HK.res.className = "result hkres " + (!cur || (r.warn && r.warn.length) ? "warn" : "ok");
     } else {
@@ -1081,6 +1085,7 @@ function hkRender() {
       (r.max_move_deg != null ? ` · 지금에서 최대 ${r.max_move_deg}° 이동` : "") + (r.at_limit && r.at_limit.length ? ` · 한계에 닿은 관절: ${r.at_limit.join(", ")}` : "") +
       (r.finger_low_mm != null ? ` · 벌린 손가락 끝 책상 위 ${r.finger_low_mm} mm` : "") + (r.load_s ? ` · 모델 읽기 ${r.load_s}초` : "") + (r.ms != null ? ` · 풀이 ${r.ms} ms` : "") : "";
   } else if (HK.busy) { HK.res.textContent = "⏳ 푸는 중… (처음엔 MuJoCo 모델을 읽느라 몇 초 더)"; HK.res.className = "result hkres run"; }
+  hkSolsRender(r);
   const avg = (a) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
   const now = performance.now(), recent = HK.fastT.filter((t) => now - t <= 2000).length / 2;
   HK.rate.textContent = HK.fastLat.length ? `실시간 풀이: ${recent.toFixed(1)} 회/초 (최근 2초) · 왕복 ${avg(HK.fastLat).toFixed(0)} ms · 서버 풀이 ${avg(HK.fastSrv).toFixed(1)} ms` : "";
@@ -1102,6 +1107,24 @@ function hkRender() {
     HK.chk.textContent = c.ok ? `지금 ${w ? "손목 중앙" : "손이 쥐는 점"} (FK): x ${cm(pt[0])} · y ${cm(pt[1])} cm · 책상 위 ${((pt[2] + HK.mapD) * 100).toFixed(1)} cm` +
       (c.diff_mm != null ? ` → 목표와 ${c.diff_mm.toFixed(1)} mm 차이` : "") + ` · 손 축 기울기 ${c.axis_tilt_deg}°` : "FK 못 함: " + (c.reason || "?");
   } else HK.chk.textContent = "";
+}
+// 해석 IK 답 목록 (전체 풀이 결과에만 있음). 고른 해로 HK.last 를 바꾸고 [보내기] 와 같은 길로 보낸다
+function hkSolsRender(r) {
+  if (!HK.sols) return;
+  const list = r && r.ok && r.solutions && r.solutions.length > 1 ? r.solutions : null;
+  HK.sols.hidden = !list;
+  if (!list || HK.solsFor === r) return;
+  HK.solsFor = r;
+  HK.solsBody.replaceChildren(...list.map((sol, k) => el("div", { class: "row", style: "align-items:center;margin:2px 0" },
+    el("button", { class: "btn line small", disabled: !sol.finger_ok || (r.picked == null ? sol.chosen : r.picked === k),
+      title: sol.finger_ok ? "이 해를 유령 자세로 두고 [보내기] (확인창 그대로)" : "벌린 손가락이 책상에 닿음 — 못 고름",
+      onclick: () => {
+        const base = r.base || r;
+        const r2 = { ...base, base, joints: sol.joints, max_move_deg: sol.max_move_deg, finger_low_mm: sol.finger_low_mm, picked: k };
+        HK.last = r2; HK.good = r2; hkRender(); updateIkView(); hkSend();
+      } }, (r.picked == null ? sol.chosen : r.picked === k) ? "지금 해" : "이 해 보내기"),
+    el("span", {}, `${k + 1}. 최대 ${sol.max_move_deg}° 회전 · 어깨 앞뒤 ${f1(sol.joints.shoulder_roll)} · 위팔 비틀기 ${f1(sol.joints.upper_arm_roll)} · 팔꿈치 ${f1(sol.joints.elbow)}` +
+      (sol.finger_ok ? "" : ` · 손가락 책상에 닿음(${sol.finger_low_mm} mm)`)))));
 }
 async function hkFk(manual) {
   const t = HK.sentReq || hkVals();
