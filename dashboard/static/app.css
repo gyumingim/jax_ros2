@@ -292,3 +292,5 @@ i.sw.hand { border: 2px solid #db2777; border-radius: 50%; width: 12px; height: 
 .hk .mctl .num { min-width: 64px; }
 .hk .hkres { white-space: pre-line; }
 .hk .hkmeta { font-size: 13px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+.hk .mctl input[type=number] { border: 1.5px solid transparent; background: var(--fill); border-radius: 10px; padding: 7px 9px; font: inherit; width: 80px; }
+.hk .frow .field input { width: 100%; }
