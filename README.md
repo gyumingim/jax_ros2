@@ -77,6 +77,24 @@ ros2 run arm_control calibrate --ros                 # ROS가 없는 곳: python
 > ⚠️ **`calibrate --ros`를 쓸 때는 `arm_control_node`를 띄우지 않는다**(그래서 `arm.launch.py`도 쓰지 않는다). 둘 다 같은 모터에 명령을 보내게 된다. `ak45_node`와 `stm_bridge_node`만 띄운다.
 > 서보 명령은 `/servo/command`를 받는 `stm_bridge`가 보여야 나간다. 5초 안에 안 보이면 "no subscriber on /servo/command … nothing sent"로 거절한다. 명령은 `arm_control/arm_control/calibrate.py` 맨 위에 있다. `z`/`f`/`v`/`w`로 영점·방향·확인·저장.
 
+### 원점 잡기 (homing_guard, 전원 재투입 대비)
+
+AK45-36이 단일 엔코더면 모터 전원이 꺼졌다 켜질 때 원점이 날아간다(듀얼 엔코더 여부 미확인, `ak45_ros2/docs/ros2.md` 10-7). `arm_homed.launch.py`는 `arm.launch.py`와 같지만 `arm_control_node`와 `ak45_node` 사이에 `homing_guard`를 끼워, **이번 실행에서 원점을 잡은 AK45만 움직이게** 한다. 기존 노드·`calibration.json`은 그대로다(`zero_deg`는 "처음 기대값"으로만 쓴다).
+
+```bash
+ros2 launch arm_control arm_homed.launch.py          # 시작하면 AK45 4개 모두 미원점
+# 팔을 원점 자세(homing.json의 home_sim_deg, 기본 시뮬 0°)에 두고:
+ros2 service call /arm_control/home_all std_srvs/srv/Trigger           # 또는 /arm_control/home_elbow 등 관절별
+ros2 topic echo /arm_control/homing                                    # 관절별 homed, 이유, 오프셋 (JSON)
+```
+
+- 미원점 관절: 명령은 경고 후 버리고, 피드백을 `arm_control_node`에 넘기지 않는다(그래서 "no /joint_states … waits").
+- 원점 = 지금 피드백 − sign·scale·home_sim_deg. 피드백이 없거나 0.5 s보다 오래되면 거부. `calibration.json`의 `zero_deg`와 20° 넘게 다르면 경고만 한다.
+- 전원 재투입 감지: 그 모터의 `/joint_states`가 1.0 s 넘게 끊기거나(`gap_s`), 연속 두 값이 60° 넘게 튀면(`jump_deg`) 미원점으로 되돌리고, 피드백이 돌아오면 `ak45_node`에 "지금 자리 유지" 명령을 보낸다. **다시 원점을 잡아야 움직인다.**
+- 원점 잡은 뒤의 명령은 guard가 피드백에서부터 `max_speed_deg_s`로 다시 램프한다(옛 목표로 튀지 않게).
+- `play_trajectory`/`pick_place`를 따로 띄울 때는 `--ros-args -r /joint_states:=/ak45/joint_states_homed`를 붙인다(감시가 보정된 각도를 보게). 미원점 관절이 있어도 시작은 거부하지 않는다 — guard가 명령을 막는다.
+- `calibrate --ros`는 guard를 거치지 않는다(원래대로 `ak45_node`에 직접).
+
 ### 주의
 
 - **종료하면 AK45가 힘을 놓는다.** `ak45_node`가 끝날 때 `ak45_can`이 Current Brake 0A 프레임을 ID 1~**6**에 보낸다(`NUM_MOTORS=6`이라 5·6은 받는 모터가 없다). 먼저 팔을 받친다. AK45는 확장 29비트 ID, STM 서보 보드는 표준 11비트 프레임만 받으므로(`main.c`의 IDE 검사) 지금은 충돌하지 않지만, **나중에 ID 5·6 AK45를 추가하면 이 브레이크 프레임이 그 모터에 간다.**

@@ -1,0 +1,9 @@
+{
+  "about": "Home pose of each AK45 joint for homing_guard (arm_control/homing.py): the sim angle, in degrees, the joint is put at before /arm_control/home_all or home_<joint>. Session zero = feedback - sign * scale * home_sim_deg. A joint not listed is homed at sim 0. 2026-11-20: all sim 0 (the arm hanging straight down, IK motion2 q=0) is an assumption; change it when a pose that is easier to hold by hand (or a hard stop) is chosen.",
+  "home_sim_deg": {
+    "shoulder_roll": 0.0,
+    "shoulder_yaw": 0.0,
+    "upper_arm_roll": 0.0,
+    "elbow": 0.0
+  }
+}
