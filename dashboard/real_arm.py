@@ -921,6 +921,12 @@ class RealArm:
                      and not self.homing.m[f"ak45_{self.joints[n].id}"].homed]
         if not_homed:
             return {"ok": False, "error": "원점 없는 AK45: " + ", ".join(not_homed) + " — 각도 제어 탭에서 원점 먼저"}
+        # 서보는 위치 피드백이 없어 한 번도 안 보낸 서보의 첫 명령은 램프 없이 바로 그 각으로 튄다(_tick). 재생이 그렇게 시작하지 않게
+        # 궤적의 서보가 모두 한 번은 보내졌어야(servo_sent) 재생한다.
+        unsent = [n for n in names if self.joints[n].motor == "servo" and self.joints[n].name not in self.servo_sent]
+        if unsent:
+            return {"ok": False, "error": "한 번도 안 보낸 서보: " + ", ".join(unsent) + " — 첫 명령은 램프 없이 바로 튄다. "
+                    "각도 제어 탭에서 이 서보들을 지금 자리 근처로 먼저 보낸 뒤 재생"}
         speed = min(float(max_speed), self.p["max_speed"])
         period, slow, peak = P.schedule(traj, speed)     # play.play 는 안 쓴다(아래 play_loop)
         n = len(traj["positions"])

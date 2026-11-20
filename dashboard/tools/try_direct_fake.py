@@ -198,6 +198,10 @@ def main():
     arm.play_trajectory(traj2, 30.0, hold=0.3)
     wait(lambda: not arm.play.get("running"), 15)
     fake.m[4].grab = False
+    rs = arm.play_trajectory({"joint_names": names + ["finger1_joint1"], "dt": 0.05,
+                              "positions": [p + [0.0] for p in pos], "status": "playable"}, 30.0, hold=0.2)
+    check("안 보낸 서보가 든 궤적 재생 거절", not rs["ok"] and "finger1_joint1" in rs.get("error", "") and not arm.play.get("running"),
+          rs.get("error", rs.get("msg")))
     check("재생 중 추종 벗어남 → 멈춤·그 자리 홀드", "ak45_4" in str(arm.play.get("reason")) and arm.ak["ak45_1"].cmd is not None,
           f"elbow 붙잡음 → {arm.play.get('reason')}")
 
