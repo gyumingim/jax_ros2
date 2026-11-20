@@ -831,7 +831,7 @@ function checkText(r) {
 
 // ---------- 역기구학 탭: 손 위치로 보내기 (POST /api/ik/hand → 유령 → 각도 보내기와 같은 /api/joint/send) ----------
 // 점 = 손이 쥐는 큐브의 중심(실좌표, m). z 는 '책상 위 cm' 로 받는다(책상 = 어깨 아래 D 0.4775 m, realcoords.MAP_D).
-// 손 방향: auto(기본) = 손가락 아래, 손가락 사이 축 둘레 기울기를 ±상한(기본 60°) 안에서 IK 가 고름(수직에 가까운 것 먼저),
+// 손 방향: auto(기본) = 손가락 아래, 손가락 사이 축 둘레 기울기를 ±상한(기본 60°) 안에서 IK 가 고름(지금 자세에서 최소 회전 먼저, 2° 안 동률이면 수직에 가까운 것),
 // vertical = 손끝 수직(기울기 0), grasp = 팀 IK 원래 값(−40° 고정).
 // 풀기는 자동: 슬라이더를 끄는 동안 = 빠른 풀이(직전 해에서 한 번, fast: true, 최신 것만), 손을 떼거나 숫자를 바꾸면 300 ms 뒤 전체 풀이.
 const HK = { last: null, good: null, fullSeq: 0, fullAt: 0, inflight: false, pending: false, timer: null, busy: false,
@@ -839,6 +839,32 @@ const HK = { last: null, good: null, fullSeq: 0, fullAt: 0, inflight: false, pen
   follow: false, followSent: null, followNote: "", followN: 0 };
 const ARM7 = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow", "wrist_pitch", "wrist_yaw", "hand_roll"];
 const hkSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// 따라가기 진단 로그: 켜져 있는 동안 틱·풀이 응답마다 한 줄 → 1초마다 POST /api/log/follow → dashboard/logs/follow.log
+const hkR1 = (o) => o ? Object.fromEntries(ARM7.filter((n) => o[n] != null).map((n) => [n, Math.round(o[n] * 10) / 10])) : null;
+const hkArm = () => { const p = (S && S.pose) || {}; return Object.fromEntries(ARM7.filter((n) => p[n]).map((n) => [n, Math.round(p[n].deg * 10) / 10])); };
+function hkDiff(a, b) {   // 관절별 차이 최대값과 그 관절 (각도는 ±180 감김 없이 그냥 차이: 관절 범위가 ±180 안)
+  let d = 0, j = null;
+  if (!a || !b) return { d: null, j: null };
+  for (const n of ARM7) { if (a[n] == null || b[n] == null) return { d: 999, j: n }; const x = Math.abs(a[n] - b[n]); if (x > d) { d = x; j = n; } }
+  return { d: Math.round(d * 10) / 10, j };
+}
+HK.flogQ = [];
+function hkFlog(ev, o) {
+  if (!HK.follow && !/^follow_/.test(ev)) return;
+  const v = hkVals();
+  HK.flogQ.push({ t: Math.round(performance.now()), ev, tgt: v && { x: v.x, y: v.y, zc: v.z_table_cm, yaw: v.yaw_deg, mode: v.mode, fix: v.fix_deg.shoulder_yaw ?? null },
+    arm: hkArm(), sent_ref: hkR1(HK.followSent), n_sent: HK.followN, ...o });
+  if (HK.flogQ.length > 400) HK.flogQ.splice(0, HK.flogQ.length - 400);
+}
+function hkSolLog(r) {   // 풀이 응답 요약
+  return r ? { kind: r.fast ? "fast" : "full", ok: !!r.ok, pos_err: r.pos_err_mm, ang_err: r.ang_err_deg, flip: r.flip, turn: r.hand_turn, tilt: r.tilt_deg,
+    q: hkR1(r.joints), ms: r.ms, reason: r.ok ? undefined : r.reason, req: r.req && { x: r.req.x, y: r.req.y, zc: r.req.z_table_cm, yaw: r.req.yaw_deg } } : null;
+}
+async function hkFlogFlush() {
+  if (!HK.flogQ.length) return;
+  const rows = HK.flogQ.splice(0);
+  try { await fetch("/api/log/follow", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rows }) }); } catch (e) { /* 로그는 버림 */ }
+}
 function hkVals() {
   if (!HK.f) return null;
   const n = (e) => { const v = parseFloat(e.value); return Number.isFinite(v) ? v : null; };
@@ -869,8 +895,13 @@ function hkEdit(live) {
 }
 async function hkFast() {
   if (HK.inflight) { HK.pending = true; return; }
-  const v = hkVals(), g = HK.good;
+  const v = hkVals();
+  let g = HK.good;
   if (!v || !g) return;
+  // 따라가기 중: 마지막 좋은 해가 보낸 해에서 20° 넘게 떨어진 다른 가지면(전체 풀이가 건너뜀) 보낸 해에서 이어 푼다
+  // (그 시작점이 한 번 못 따라가면 다음엔 마지막 좋은 해에서)
+  let fromSent = false;
+  if (HK.follow && HK.followSol && HK.followSent && !HK.sentSeedFail && hkDiff(g.joints, HK.followSent).d > 20) { g = HK.followSol; fromSent = true; }
   HK.inflight = true; HK.pending = false;
   const t0 = performance.now();
   let r;
@@ -880,11 +911,14 @@ async function hkFast() {
   } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
   const t1 = performance.now();
   HK.inflight = false;
+  if (HK.fullAt >= t0) hkFlog("solve_drop", { kind: "fast", why: "그사이 전체 풀이가 끝나 버림" });
   if (HK.fullAt < t0) {   // 그사이 전체 풀이가 끝났으면 이 빠른 결과는 버림
     HK.fastT.push(t1); HK.fastLat.push(t1 - t0); if (r.ms != null) HK.fastSrv.push(r.ms);
     for (const a of [HK.fastLat, HK.fastSrv]) if (a.length > 30) a.shift();
     while (HK.fastT.length && t1 - HK.fastT[0] > 2000) HK.fastT.shift();
     r.req = v; HK.last = r;
+    hkFlog("solve", { ...hkSolLog(r), seed_from: fromSent ? "보낸 해" : "마지막 좋은 해", seed: hkR1(g.joints), d_seed: hkDiff(r.joints, g.joints), d_sent: hkDiff(r.joints, HK.followSent) });
+    if (fromSent) HK.sentSeedFail = !r.ok;
     if (r.ok) { HK.good = r; HK.ghostBad = false; }
     else { HK.ghostBad = true; if (!HK.busy) hkSolve(); }   // 빠른 풀이가 못 따라가면(다른 팔 모양이 필요) 끄는 중에도 전체 풀이 한 번
     hkRender(); updateIkView();
@@ -898,11 +932,15 @@ async function hkSolve() {
   HK.busy = true; hkRender();
   let r;
   try {
-    r = await (await fetch("/api/ik/hand", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(v) })).json();
+    // 따라가기 중이면 직전 보낸 해 근처(같은 가지) 해를 먼저 고르게 near_deg 를 준다
+    // 기준 자세는 서버가 지금 팔(피드백)로 잡고, 빠진 관절(서보 안 보냄)은 직전 보낸 해로 채운다 + 이어 풀기 시작점
+    const ns = (HK.follow && HK.followSent) || HK.sentJ, near = ns ? Object.fromEntries(ARM7.filter((n) => ns[n] != null).map((n) => [n, ns[n]])) : null;
+    r = await (await fetch("/api/ik/hand", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(near ? { ...v, near_deg: near } : v) })).json();
   } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
-  if (my !== HK.fullSeq) return;   // 더 새 요청이 있음
+  if (my !== HK.fullSeq) { hkFlog("solve_drop", { kind: "full", why: "더 새 전체 풀이 요청이 있음" }); return; }   // 더 새 요청이 있음
   HK.busy = false; HK.fullAt = performance.now();
   r.req = v; HK.last = r; HK.check = null;
+  hkFlog("solve", { ...hkSolLog(r), d_prev: hkDiff(r.joints, HK.good && HK.good.joints), d_sent: hkDiff(r.joints, HK.followSent), n_good: r.n_good, max_move: r.max_move_deg });
   if (r.ok) { HK.good = r; HK.ghostBad = false; } else HK.ghostBad = true;
   hkRender(); updateIkView();
 }
@@ -937,7 +975,18 @@ function buildHandIk() {
     if (f.followBox.checked && !confirm((VIRT() ? "(가상 팔) " : "⚠ 실제 모터가 움직인다.\n\n") +
       "팔도 바로 따라가기: 풀린 자세를 0.2초마다 각도 보내기 길(같은 막힘·원점 규칙, arm_control 램프)로 보낸다.\n" +
       "한 번에 20° 넘게 바뀌는 해는 안 보낸다. 중간 경로 충돌 검사는 없다. 켤까요?")) { f.followBox.checked = false; return; }
-    HK.follow = f.followBox.checked; HK.followSent = null; HK.followNote = "";
+    hkFlog(f.followBox.checked ? "follow_on" : "follow_off", { why: f.followBox.checked ? "사용자 켬" : "사용자 끔" });
+    HK.follow = f.followBox.checked; HK.followSent = null; HK.followSol = null; HK.followNote = ""; HK.followLastWhy = "";
+    hkFlogFlush();
+    // 켤 때 팔이 유령 자세에서 20° 넘게 떨어져 있으면(예: HOME) 따라가기는 한 번도 못 보낸다 → 먼저 [보내기] 로 옮길지 묻기
+    const r = HK.last, pz = S.pose || {};
+    if (HK.follow && r && r.ok && hkSame(hkVals(), r.req)) {
+      const d = hkDiff(r.joints, Object.fromEntries(ARM7.map((n) => [n, pz[n] ? pz[n].deg : null])));
+      if (d.d > 20 && confirm(`팔이 유령 자세에서 ${d.d > 900 ? "?" : d.d.toFixed(0) + "°"} (${d.j}) 떨어져 있어 따라가기가 못 보낸다 (한 번에 20° 까지).
+먼저 [보내기] 로 유령 자세까지 옮길까요?`)) {
+        hkFlog("follow_on", { why: "켤 때 먼저 [보내기]", d: d.d, dj: d.j }); hkSend();
+      }
+    }
   });
   const preset = el("button", { class: "btn line small", onclick: () => { f.z.set(2.5); hkEdit(false); }, title: "큐브(5 cm) 중심 높이 = 책상 위 2.5 cm" }, "큐브 잡는 높이 (2.5 cm)");
   f.z.row.append(preset);
@@ -974,12 +1023,13 @@ function buildHandIk() {
       el("details", { class: "log" }, el("summary", {}, "자세히"),
         el("p", { class: "help" }, "점 = 손이 쥐는 큐브의 중심. 파지 중심(end_effector)은 손 축 따라 21.5 mm 위 (env.pick_pose 와 같음, '수직만' 이면 0). " +
           "기울기 자동: 손가락이 닫히는 축(손가락 1·2 ↔ 3) 둘레로 기울여도 패드는 같은 두 면에 닿으므로 그 축 둘레 회전은 자유로 두고(위치 3 + 손가락 축 방향 2 만 맞춤), " +
-          "기울기는 ±상한 안에서, 남는 자유도로 수직 쪽으로 당긴다. 후보 중 수직에 가까운 것(10° 단위) → 지금 자세에서 가까운 것. " +
+          "기울기는 ±상한 안에서, 남는 자유도로 수직 쪽으로 당긴다. 후보 고르기: 벌린 손가락이 책상에 닿는 해는 탈락 → 지금 자세(피드백, 서보는 보낸 값, 없으면 직전 보낸 해·HOME)에서 최소 회전(관절 최대 이동각) → 그 최소에서 2° 안이면 수직에 가까운 것. " +
           "손 방향 = 이 손이 쥘 큐브의 yaw (지도와 같은 기준, 위에서 반시계). 전체 풀이: 큐브의 세 면 × 손 그대로/반 바퀴 × 시작점 5개, 관절 한계(calibration 의 보낼 수 있는 범위, 손 비틀기 ±88°) 안에서 " +
           "위치 5 mm · 방향 1.5° 안이면 풀림, 그중 지금 자세에서 가장 가까운 해. 끄는 중엔 빠른 풀이(직전 해에서 한 번, 같은 손 모양). team-jax/IK env.py·ik.py 를 그대로 쓴다. " +
           "[보내기] = 각도 제어 탭과 같은 /api/joint/send (같은 막힘 규칙·확인창). 지금 자세 → 목표까지 관절마다 직선으로 가며, 중간 경로의 충돌은 검사하지 않는다."))));
   $("#handik").append(root);
   setInterval(hkFollowTick, 200);
+  setInterval(hkFlogFlush, 1000);
   hkEdit(false);
 }
 function hkRender() {
@@ -991,7 +1041,11 @@ function hkRender() {
     const hand = (r.flip ? "손 반 바퀴" : "손 그대로") + (r.tilt_deg != null ? ` · 기울기 ${degS(r.tilt_deg)}` : "");
     const sy = r.joints ? ` · 어깨 옆 ${f1(r.joints.shoulder_yaw)}` : "";
     if (r.ok) {
-      HK.res.textContent = `✅ 풀림${r.fast ? " (빠른)" : ""} · 오차 ${r.pos_err_mm} mm · 방향 ${r.ang_err_deg}° · ${hand}, 손 돌림 ${degS(r.hand_turn)}${sy}` +
+      // 지금 자세(피드백, 빠진 관절은 직전 보낸 해)에서 가장 많이 도는 관절
+      const pz = S.pose || {}, sj = HK.followSent || HK.sentJ || {};
+      const now7 = Object.fromEntries(ARM7.map((n) => [n, pz[n] ? pz[n].deg : sj[n]]));
+      const mv = hkDiff(r.joints, now7);
+      HK.res.textContent = `✅ 풀림${r.fast ? " (빠른)" : ""} — 지금 자세에서 최대 ${mv.d == null || mv.d > 900 ? "?" : mv.d.toFixed(0)}° 회전${mv.j && mv.d < 900 ? ` (${jLabel(mv.j).replace(/ \(.*\)$/, "")})` : ""}\n오차 ${r.pos_err_mm} mm · 방향 ${r.ang_err_deg}° · ${hand}, 손 돌림 ${degS(r.hand_turn)}${sy}` +
         (r.warn && r.warn.length ? "\n⚠ " + r.warn.join(" · ") : "") + (!cur ? (HK.busy || HK.inflight ? "\n⏳ 다시 푸는 중…" : "\n(값이 바뀜)") : "");
       HK.res.className = "result hkres " + (!cur || (r.warn && r.warn.length) ? "warn" : "ok");
     } else {
@@ -1056,32 +1110,46 @@ async function hkSend() {
   const joints = hkJoints(r);
   const res = await post("/api/joint/send", { joints });
   if (res.ok) {
-    HK.sentAt = performance.now(); HK.sentJ = joints; HK.sentReq = r.req; HK.check = null; HK.followSent = joints;
+    HK.sentAt = performance.now(); HK.sentJ = joints; HK.sentReq = r.req; HK.check = null; HK.followSent = joints; HK.followSol = r;
+    hkFlog("send_manual", { sol: hkSolLog(r), q_sent: hkR1(joints) });
     for (const [n, v] of Object.entries(joints)) { A.sent[n] = v; if (A.built) setVal(n, v, true); }
   }
   hkRender();
 }
 let hkFollowBusy = false;
 async function hkFollowTick() {
-  if (!HK.follow || hkFollowBusy || !S) return;
+  if (!HK.follow || !S) return;
+  const skip = (why, o) => {   // 같은 '변화 없음' 이 이어지면 한 번만
+    if (why === HK.followLastWhy && why === "변화 없음(<0.2°)") return;
+    HK.followLastWhy = why; hkFlog("tick", { sent: false, why, ...o });
+  };
+  if (hkFollowBusy) return skip("보내는 중(직전 POST 응답 대기)");
   const r = HK.last, g = S.gate || { joints: {} };
-  if (!r || !r.ok || !hkSame(hkVals(), r.req) || !ARM7.every((n) => ((g.joints || {})[n] || {}).ok)) return;
+  if (!r) return skip("풀이 없음");
+  if (!r.ok) return skip("풀이 실패", { sol: hkSolLog(r) });
+  if (!hkSame(hkVals(), r.req)) return skip("오래된 풀이(입력이 바뀜, 새 풀이 대기)", { sol: hkSolLog(r) });
+  const blk = ARM7.filter((n) => !((g.joints || {})[n] || {}).ok);
+  if (blk.length) return skip("보내기 막힘: " + blk.map((n) => `${n} ${(g.joints[n] || {}).reason || "?"}`).join(", "));
   const joints = hkJoints(r);
   const p = S.pose || {}, ref = HK.followSent || Object.fromEntries(ARM7.map((n) => [n, p[n] ? p[n].deg : null]));
-  let big = 0, any = 0;
-  for (const n of ARM7) {
-    if (ref[n] == null) { big = 999; break; }
-    const d = Math.abs(joints[n] - ref[n]); big = Math.max(big, d); any = Math.max(any, d);
+  const dd = hkDiff(joints, ref), big = dd.d;
+  if (big < 0.2) return skip("변화 없음(<0.2°)");
+  if (big > 20) {
+    HK.followNote = big > 900 ? `${dd.j} 지금 위치를 모름(서보는 보낸 적이 없음) — 안 보냄 ([보내기] 로 먼저 옮기기)`
+      : HK.followSent ? `이 점은 다른 팔 모양이라 ${big.toFixed(0)}° (${dd.j}) 바뀜 — 건너뜀 (이어지는 점에서 다시 따라감, 여기로 가려면 [보내기])`
+      : `지금 팔에서 ${big.toFixed(0)}° (${dd.j}) — 안 보냄 ([보내기] 로 먼저 옮기기)`;
+    return skip("20° 초과", { sol: hkSolLog(r), d: big, dj: dd.j, ref_from: HK.followSent ? "직전 보낸 해" : "지금 팔" });
   }
-  if (any < 0.2) return;
-  if (big > 20) { HK.followNote = `한 번에 ${big > 900 ? "?" : big.toFixed(0) + "°"} 바뀜 — 안 보냄 ([보내기] 로 먼저 옮기기)`; return; }
   HK.followNote = "";
   hkFollowBusy = true;
+  let res;
   try {
-    const res = await (await fetch("/api/joint/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ joints }) })).json();
-    if (res.ok) { HK.followSent = joints; HK.followN++; HK.sentAt = performance.now(); HK.sentJ = joints; HK.sentReq = r.req; for (const [n, v] of Object.entries(joints)) A.sent[n] = v; }
+    res = await (await fetch("/api/joint/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ joints }) })).json();
+    if (res.ok) { HK.followSent = joints; HK.followSol = r; HK.sentSeedFail = false; HK.followN++; HK.sentAt = performance.now(); HK.sentJ = joints; HK.sentReq = r.req; for (const [n, v] of Object.entries(joints)) A.sent[n] = v; }
     else { HK.followNote = res.error || "보내기 실패"; }
-  } catch (e) { HK.followNote = "서버 연결 실패"; }
+  } catch (e) { res = { ok: false, error: "서버 연결 실패" }; HK.followNote = "서버 연결 실패"; }
+  HK.followLastWhy = "";
+  hkFlog("tick", { sent: !!res.ok, why: res.ok ? "보냄" : "보내기 거절: " + (res.error || "?"), sol: hkSolLog(r), d: big, dj: dd.j, q_sent: hkR1(joints) });
   hkFollowBusy = false;
 }
 function renderHandIk() {
