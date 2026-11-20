@@ -505,6 +505,15 @@ async def api_ik_hand(req: Request):
     return JSONResponse(await asyncio.to_thread(_hand_ik, await _body(req), "solve"))
 
 
+@app.post("/api/ik/pair")
+async def api_ik_pair(req: Request):
+    """지도 판정: 큐브 집기·놓을 자리 놓기가 같은 파지로 둘 다 풀리나 (도달 맵 대신 실제 IK)."""
+    import hand_ik
+    cal = _calibration()
+    ranges = {j["joint"]: j["cmd_range_deg"] for j in cal.get("joints") or [] if j.get("cmd_range_deg")}
+    return JSONResponse(await asyncio.to_thread(hand_ik.pair, _ik_dir(), await _body(req), ranges))
+
+
 @app.post("/api/ik/fk")
 async def api_ik_fk(req: Request):
     return JSONResponse(await asyncio.to_thread(_hand_ik, await _body(req), "fk"))

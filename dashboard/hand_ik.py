@@ -31,6 +31,7 @@ TOL_ROT = math.radians(1.5)   # 손 방향 1.5°
 FAST_ITERS = 80               # 드래그 중 빠른 풀이의 반복 수 (직전 해에서 시작)
 MODES = ("auto", "grasp", "vertical")
 TILT_MAX_DEFAULT = 60.0       # auto 의 기울기 상한 (°)
+AUTO_TILT_INITS = (0.0, -40.0, 40.0)   # auto: 시작 기울기(처음 120 번 묶음) — 가지 고르기
 TILT_PULL = 0.05              # auto: 남는 자유도로 기울기를 0 쪽으로 당기는 세기 (한 반복에 t 의 몇 배)
 
 
@@ -224,10 +225,12 @@ class _Solver:
             best = min(best, float(np.linalg.norm(target - self.d.site_xpos[self.site])))
         return best
 
-    def seeds(self, current):
+    def seeds(self, current, few=False):
         np, E = self.np, self.E
         home = np.asarray(E.HOME_ARM_QPOS, dtype=float)
         out = ([current] if current is not None else []) + [home]
+        if few:
+            return out + [np.zeros(len(self.arm))]
         for hr in (-60.0, 0.0, 60.0):
             s = home.copy(); s[self.hand_roll] = math.radians(hr); out.append(s)
         out.append(np.zeros(len(self.arm)))
@@ -241,12 +244,22 @@ class _Solver:
         out = []
         for turn in turns:
             for flip in (False, True):
+                if mode == "auto":
+                    # 기울기 자유 풀이는 시작 가지에 따라 한계(±60) 쪽에 머물 때가 있어(어깨 옆 고정 시 24점 중 절반),
+                    # 처음 몇 번을 기울기 0 / ±40 에 묶고 시작해 가지를 고른 뒤 풀어 준다. 시작점은 지금·HOME·0 세 개.
+                    for s in self.seeds(current, few=True):
+                        s = np.clip(s, lim[:, 0], lim[:, 1])
+                        for t0 in AUTO_TILT_INITS:
+                            q, pe, re_, t = self.solve_free_tilt(s, point_sim, turn, flip, tilt_max,
+                                                                 tilt_init_deg=max(-tilt_max, min(tilt_max, t0)))
+                            tilt = math.degrees(t)
+                            rot = self.hand_rot(mode, turn, flip, max(-tilt_max, min(tilt_max, tilt)))
+                            out.append({"q": q, "pe": pe, "re": re_, "turn": turn, "flip": flip, "rot": rot, "tilt": tilt})
+                    continue
                 for s in self.seeds(current):
                     s = np.clip(s, lim[:, 0], lim[:, 1])
-                    if mode == "auto":
-                        q, pe, re_, t = self.solve_free_tilt(s, point_sim, turn, flip, tilt_max)
-                        tilt = math.degrees(t)
-                        rot = self.hand_rot(mode, turn, flip, max(-tilt_max, min(tilt_max, tilt)))
+                    if False:
+                        pass
                     else:
                         rot = self.hand_rot(mode, turn, flip)
                         q, pe, re_ = self.solve_from(s, point_sim + self.dz(mode) * rot[:, 2], rot)
@@ -412,6 +425,56 @@ class _Solver:
         return "orientation", (f"그 손 방향으로는 안 됨 — 위치만은 닿지만 {tilt} 손으로는 가장 가까운 해가 "
                                f"{miss:.0f} mm · {math.degrees(best['re']):.0f}° 차이")
 
+    def pair(self, b):
+        """지도 판정(도달 맵 대신 실제 IK): 큐브(x, y, yaw)를 집는 자세와 놓을 자리(x, y)에 놓는 자세가 **같은 파지**
+        (손 돌림·반 바퀴·기울기)로 둘 다 풀리나. 파지마다: 집기 = 기울기 자유 풀이(HOME 에서, 시작 기울기 0 -> -40 -> 40 중
+        처음 풀리는 것), 놓기 = 집기 해에서 시작해 그 기울기 그대로 6D. 큐브 중심 높이 = 책상 위 반 변(놓을 때도 같게 봄).
+        fix_deg·관절 한계는 손 위치 카드와 같다. 빠르게: 파지 6개 × 많아야 3 + 1 풀이."""
+        np, R, E = self.np, self.R, self.E
+        t0 = time.time()
+        cube, target = b["cube"], b["target"]
+        yaw = float(cube[2]) if len(cube) > 2 else 0.0
+        tilt_max = min(90.0, max(0.0, float(TILT_MAX_DEFAULT if b.get("tilt_max_deg") is None else b["tilt_max_deg"])))
+        ranges = dict(b.get("ranges_deg") or {})
+        fix = {k: float(v) for k, v in (b.get("fix_deg") or {}).items()}
+        ranges.update({j: [v, v] for j, v in fix.items()})
+        lim = self.set_ranges(ranges)
+        zc = -R.MAP_D + float(E.OBJECT_HALF_SIZE)
+        pc = np.asarray(self.to_sim([float(cube[0]), float(cube[1]), zc]))
+        pt = np.asarray(self.to_sim([float(target[0]), float(target[1]), zc]))
+        y = R.fold_yaw(yaw + R.SIM_FROM_REAL_YAW)
+        home = np.clip(np.asarray(E.HOME_ARM_QPOS, dtype=float), lim[:, 0], lim[:, 1])
+        tries, pick_ok = [], []
+        for turn in sorted({round(y, 6), round(y + 90.0, 6), round(y - 90.0, 6)}, key=abs):
+            for flip in (False, True):
+                pk = None
+                for t_init in AUTO_TILT_INITS:
+                    q, pe, re_, t = self.solve_free_tilt(home, pc, turn, flip, tilt_max, tilt_init_deg=t_init)
+                    if pe <= TOL_POS and re_ <= TOL_ROT:
+                        pk = (q, math.degrees(t)); break
+                row = {"hand_turn": turn, "flip": flip, "pick": pk is not None}
+                if pk:
+                    pick_ok.append(row)
+                    tilt = max(-tilt_max, min(tilt_max, pk[1]))
+                    q2, pe2, re2, _ = self.solve_free_tilt(pk[0], pt, turn, flip, tilt_max, its=300, tilt_init_deg=tilt, warm=300)
+                    row.update(tilt_deg=round(tilt, 1), place=bool(pe2 <= TOL_POS and re2 <= TOL_ROT),
+                               place_err_mm=round(pe2 * 1000, 1), place_ang_deg=round(math.degrees(re2), 2))
+                tries.append(row)
+                if row.get("place"):
+                    return {"ok": True, "both": True, "grasp": row, "tries": tries, "fixed": fix, "ms": round((time.time() - t0) * 1000)}
+        place_alone = None
+        if not pick_ok:   # 집기가 하나도 안 되면 놓을 자리만이라도 되나 (같은 풀이로)
+            place_alone = False
+            for turn in sorted({round(y, 6), round(y + 90.0, 6), round(y - 90.0, 6)}, key=abs):
+                for flip in (False, True):
+                    q, pe, re_, t = self.solve_free_tilt(home, pt, turn, flip, tilt_max, tilt_init_deg=0.0)
+                    if pe <= TOL_POS and re_ <= TOL_ROT:
+                        place_alone = True; break
+                if place_alone:
+                    break
+        return {"ok": True, "both": False, "pick_any": bool(pick_ok), "place_alone": place_alone, "tries": tries,
+                "fixed": fix, "ms": round((time.time() - t0) * 1000)}
+
     def fk_req(self, b):
         np = self.np
         js = b.get("joints_deg") or {}
@@ -437,7 +500,7 @@ def _worker(ik_dir):
         try:
             b = json.loads(line)
             op = b.get("op")
-            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else {"ok": False, "reason": f"모르는 op {op!r}"}
+            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else s.pair(b) if op == "pair" else {"ok": False, "reason": f"모르는 op {op!r}"}
         except Exception as e:
             r = {"ok": False, "reason": f"풀이 중 오류: {type(e).__name__}: {e}", "kind": "error"}
         print(json.dumps(r), flush=True)
@@ -548,6 +611,27 @@ def solve(ik_dir, body, ranges_deg, current_deg):
                                     "ranges_deg": ranges_deg, "current_deg": current_deg, "fix_deg": fix})
     except Exception as e:
         return {"ok": False, "reason": str(e), "kind": "error"}
+
+
+def pair(ik_dir, body, ranges_deg):
+    """POST /api/ik/pair {cube: [x, y, yaw], target: [x, y], fix_deg?, tilt_max_deg?} -> 같은 파지로 집기·놓기 둘 다 되나 (실제 IK)."""
+    if ik_dir is None:
+        return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
+    b = body if isinstance(body, dict) else {}
+    try:
+        cube = [float(v) for v in b["cube"]][:3]
+        target = [float(v) for v in b["target"]][:2]
+        fix = {str(k): float(v) for k, v in (b.get("fix_deg") or {}).items()}
+        tm = float(b.get("tilt_max_deg") if b.get("tilt_max_deg") is not None else TILT_MAX_DEFAULT)
+        if len(cube) < 2 or len(target) < 2 or not all(math.isfinite(v) and abs(v) <= 2.0 for v in cube[:2] + target):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        return {"ok": False, "reason": "cube [x, y, yaw], target [x, y] (m, °)"}
+    try:
+        return SOLVER.call(ik_dir, {"op": "pair", "cube": cube, "target": target, "fix_deg": fix, "tilt_max_deg": tm,
+                                    "ranges_deg": ranges_deg}, timeout=30.0)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
 
 
 def fk(ik_dir, joints_deg, mode="grasp"):

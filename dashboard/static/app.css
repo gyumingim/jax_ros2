@@ -244,7 +244,7 @@ svg.rmap { display: block; width: 100%; height: auto; cursor: crosshair; touch-a
 .rmap .mg { stroke: var(--line); stroke-width: 1; }
 .rmap .mt { font-size: 15px; fill: var(--muted); }
 .rmap .mlab { font-size: 16px; font-weight: 700; fill: var(--sub); }
-.rmap .rc.both { fill: #0b3d91; } .rmap .rc.ok { fill: var(--blue); } .rmap .rc.dim { fill: var(--fill-d); opacity: .45; } .rmap .rc.half { fill: #b5d4ff; } .rmap .rc.no { fill: var(--fill-d); }
+.rmap .rc.both { fill: #0b3d91; } .rmap .rc.ok { fill: var(--blue); } .rmap .rc.dim { fill: var(--fill-d); opacity: .45; } .rmap .rc.half { fill: #b5d4ff; } .rmap .rc.no { fill: var(--fill-d); } .rmap .rc.grid { fill: none; stroke: var(--fill-d); stroke-width: 1; }
 .rmap .mbody { fill: var(--fill); stroke: var(--fill-d); }
 .rmap .msh { fill: var(--text); }
 .rmap .mfront { stroke: var(--muted); stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }

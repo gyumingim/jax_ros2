@@ -522,9 +522,10 @@ function pickSummary(s) {
 }
 
 // ---------- 역기구학 탭: 2D 지도 (위에서 본 책상: 로봇 = 위, 앞(책상) = 아래, 로봇 왼쪽 = 화면 오른쪽) ----------
-// 칸 색 = GET /api/reachmap?yaw= (team-jax/IK reachmap_real_yaw.npz, 큐브 yaw 마다), 판정 = POST /api/reachmap/check (realcoords.plan).
+// 판정 = POST /api/ik/pair (실제 IK: 같은 파지로 집기·놓기 둘 다 풀리나 — 도달 맵 안 씀, 2026-11-20 사용자 "도달 지도 만들지 마라").
+// 격자 = GET /api/reachmap?yaw= 의 칸(칸 중심에 붙이기용). 옛 도달 맵 색칠·판정(realcoords.plan)은 '옛 도달 지도 보기'(기본 끔)로만.
 // 지도는 cube_x/y/yaw·target_x/y 칸을 쓰고 읽는다(양방향). '계획 돌려 보기'는 그 칸 값 그대로.
-const M = { mode: "cube", snap: true, data: null, yawKey: null, seq: 0, chkSeq: 0, c: null };
+const M = { mode: "cube", snap: true, data: null, yawKey: null, seq: 0, chkSeq: 0, c: null, old: false };
 const MS = 1000, MX0 = -0.28, MX1 = 0.38, MY0 = -0.45, MY1 = 0.075, ML = 36, MT = 8, MR = 10, MB = 52;   // 1 m = 1000 단위
 const MW = ML + (MX1 - MX0) * MS + MR, MH = MT + (MY1 - MY0) * MS + MB;
 const msx = (x) => ML + (x - MX0) * MS, msy = (y) => MT + (MY1 - y) * MS;
@@ -554,6 +555,8 @@ function buildMap(c) {
   seg.append(M.bCube, M.bTarget, M.bHand);
   const snap = el("input", { type: "checkbox", checked: "" });
   snap.addEventListener("change", () => { M.snap = snap.checked; });
+  const old = el("input", { type: "checkbox" });
+  old.addEventListener("change", () => { M.old = old.checked; mapPaint(); mapUpdate(); });
   M.yaw = el("input", { type: "range", min: -45, max: 45, step: 1, value: 0 });
   M.yawNum = el("span", { class: "num" });
   M.yaw.addEventListener("input", () => {
@@ -605,10 +608,11 @@ function buildMap(c) {
   mapMode("cube");
   return el("div", { class: "mapbox" },
     el("div", { class: "lead", style: "margin:0 0 10px" }, "지도에서 ", el("b", {}, "큐브"), " → ", el("b", {}, "놓을 자리"), " 순서로 누르세요."),
-    el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기")),
+    el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기"),
+      el("label", { class: "chk", title: "−40° 고정 파지로 만든 옛 reachmap_real_yaw.npz 색칠·판정 (다시 만들지 않음)" }, old, "옛 도달 지도 보기")),
     el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
-    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "됨 (큐브: 집을 수 있는 칸 / 놓을 자리: 이 큐브를 놓을 수 있는 칸)"),
-      el("span", {}, el("i", { class: "sw no" }), "안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
+    el("div", { class: "mlegend" }, el("span", {}, "판정은 실제 IK (아래 결과 줄) · 옛 지도 보기를 켜면 "), el("span", {}, el("i", { class: "sw ok" }), "옛 맵 됨"),
+      el("span", {}, el("i", { class: "sw no" }), "옛 맵 안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
       el("span", {}, el("i", { class: "sw vis" }), "비전")),
     M.guide, el("div", { class: "mwrap" }, M.svg), M.hover, M.res, M.err);
 }
@@ -630,6 +634,10 @@ function cubeCell() { const v = mapVals(); return v.cube ? mapCell(v.cube) : nul
 // 큐브를 찍은 뒤 '놓을 자리 고르기'면 그 큐브를 잡을 수 있는 파지로 놓기가 되는 칸만 파랗게, 나머지는 흐리게.
 function mapPaint() {
   const d = M.data; if (!d || !M.rects || !M.guide) return;
+  if (!M.old) {   // 옛 맵 끔: 격자만
+    for (const r of M.rects) r.setAttribute("class", "rc grid");
+    M.guide.hidden = true; return;
+  }
   const v = mapVals(), cc = v.cube ? mapCell(v.cube) : null;
   const pick = M.mode === "target" && v.cube;
   const keys = pick && cc ? new Set(cc.grasps.map(gKey)) : null;
@@ -677,7 +685,7 @@ function mapHover(p) {
     M.gHover.setAttribute("width", w); M.gHover.setAttribute("height", h); M.gHover.setAttribute("visibility", "visible");
   } else M.gHover.setAttribute("visibility", "hidden");
   M.hover.textContent = `x ${cm(p.x)} cm · y ${cm(p.y)} cm — ${p.y < 0 ? `앞으로 ${Math.abs(p.y * 100).toFixed(0)} cm` : "어깨 뒤"}, ` +
-    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm · ${cellText(c)}`;
+    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm` + (M.old ? ` · 옛 맵: ${cellText(c)}` : "");
 }
 function mapClick(p) {
   const c = M.c;
@@ -692,6 +700,10 @@ function mapClick(p) {
   const k = M.mode === "cube" ? ["cube_x", "cube_y"] : ["target_x", "target_y"];
   c.fields[k[0]].value = at.x.toFixed(3); c.fields[k[1]].value = at.y.toFixed(3);
   const cc = M.mode === "target" ? cubeCell() : null;
+  if (!M.old) {   // 어디든 고를 수 있음 — 판정은 실제 IK (결과 줄)
+    if (M.mode === "cube") mapMode("target");
+    mapUpdate(); return;
+  }
   if (M.mode === "cube" && (!cell || !cell.feasible)) {
     toast(`⚠ 그 칸은 ${cell ? "집을 수 없는 칸" : "지도 밖"} — 파란 칸을 누르세요 (그래도 계획 돌려 보기는 됨)`, "warn");
     mapUpdate(); return;   // 놓을 자리 고르기로 안 넘어감: 이 큐브로는 칠할 놓을 자리가 없다
@@ -758,6 +770,7 @@ function mapUpdate() {
 async function mapCheck() {
   const v = mapVals();
   if (!v.cube || !v.target) { M.res.textContent = "큐브와 놓을 자리를 지도에서 누르세요"; M.res.className = "result"; return; }
+  if (!M.old) return mapCheckIk(v);
   const my = ++M.chkSeq;
   let r;
   try {
@@ -768,6 +781,34 @@ async function mapCheck() {
   const [txt, cls] = checkText(r);
   M.res.textContent = txt; M.res.className = "result " + cls;
   M.res.title = r.ok ? `realcoords.plan: ${r.reason} · sim 큐브 (${r.cube.slice(0, 2).map((x) => x.toFixed(3)).join(", ")}) yaw ${degS(r.yaw)} → 놓을 자리 (${r.target.map((x) => x.toFixed(3)).join(", ")})` : "";
+}
+// 실제 IK 판정: /api/ik/pair. 손 위치 카드의 어깨 옆 고정·기울기 상한을 그대로 쓴다.
+async function mapCheckIk(v) {
+  const my = ++M.chkSeq;
+  M.res.textContent = "⏳ IK 로 판정 중…"; M.res.className = "result run";
+  const hv = typeof hkVals === "function" ? hkVals() : null;
+  const t0 = performance.now();
+  let r;
+  try {
+    r = await (await fetch("/api/ik/pair", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cube: [v.cube.x, v.cube.y, v.cube.yaw], target: [v.target.x, v.target.y],
+        fix_deg: hv ? hv.fix_deg : {}, tilt_max_deg: hv ? hv.tilt_max_deg : 60 }) })).json();
+  } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
+  if (my !== M.chkSeq) return;
+  const ms = Math.round(performance.now() - t0);
+  const fx = r.fixed && Object.keys(r.fixed).length ? ` · 어깨 옆 ${Object.values(r.fixed).map((x) => degS(x)).join(",")} 고정` : "";
+  if (!r.ok) { M.res.textContent = "⚠ IK 판정 못 함: " + (r.reason || "?"); M.res.className = "result warn"; return; }
+  if (r.both) {
+    const g = r.grasp;
+    M.res.textContent = `✅ IK: 집기·놓기 둘 다 됨 (${g.flip ? "손 반 바퀴" : "손 그대로"}, 손 돌림 ${degS(g.hand_turn)}, 기울기 ${degS(g.tilt_deg)})${fx} · ${ms} ms — 이제 ② 계획 돌려 보기`;
+    M.res.className = "result ok";
+  } else {
+    const why = !r.pick_any ? (r.place_alone ? "큐브를 집는 자세가 안 풀림 (놓을 자리는 됨)" : "큐브 집기·놓을 자리 둘 다 안 풀림")
+      : "집기는 되지만 같은 손 모양·기울기로 놓을 자리가 안 풀림";
+    M.res.textContent = `⛔ IK: ${why}${fx} · ${ms} ms — 그래도 계획 돌려 보기는 됨 (시뮬이 다시 확인)`;
+    M.res.className = "result bad";
+  }
+  M.res.title = "실제 IK (hand_ik.pair): 파지마다 집기 = 기울기 자유 풀이, 놓기 = 같은 기울기 6D. 큐브 중심 = 책상 위 2.5 cm";
 }
 function checkText(r) {
   if (!r.ok) return ["⚠ 판정 못 함: " + (r.error || "?"), "warn"];
