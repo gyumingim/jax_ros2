@@ -17,6 +17,58 @@ vision_node ─/object_pose─▶ arm_control ─┬─/ak45/command──▶ ak
 
 각 복사본 폴더의 `SOURCE.md`에 원본 URL과 커밋 SHA가 있다. 원본 레포(`SimToReal`, `ak45_ros2`, `ak45_can`)는 건드리지 않았다.
 
+## 우분투 노트북에서 실물 제어 — 빠른 시작 (포크 `gyumingim/jax_ros2`, 브랜치 `dashboard-homing`, 2026-11-20)
+
+이 브랜치에 더한 것: 웹 대시보드(`dashboard/`), 원점 guard(`arm_control/homing_guard.py`, `arm_homed.launch.py`), 가상 팔, 손목 서보 연결 수정, `fixed_pose`의 z. 자세한 대시보드 설명은 `dashboard/README.md`.
+
+### 1. 받기
+```bash
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+git clone -b dashboard-homing https://github.com/gyumingim/jax_ros2
+git clone -b handroll-limit  https://github.com/gyumingim/IK     # 역기구학: hand_roll 을 서보 범위 ±88° 로 묶은 판
+```
+대시보드는 IK 레포를 `../IK` 또는 `~/ros2_ws/src/IK` 에서 찾는다(다른 곳이면 `JAX_IK_DIR`).
+
+### 2. 설치·빌드 (Ubuntu 24.04 + Jazzy. 22.04 면 jazzy → humble)
+```bash
+sudo apt install -y can-utils python3-can python3-colcon-common-extensions \
+                    python3-fastapi python3-uvicorn python3-websockets
+pip install --user --break-system-packages mujoco gymnasium scipy   # pick_place 계획(시뮬)용
+source /opt/ros/jazzy/setup.bash
+cd ~/ros2_ws && colcon build --symlink-install
+```
+
+### 3. 켜기
+```bash
+cd ~/ros2_ws/src/jax_ros2 && python3 dashboard/server.py        # 실물 없이 시험: --virtual
+```
+브라우저 **http://localhost:8080** → 위쪽 스위치 **실물(ROS)** → **연결** 탭에서 순서대로:
+① CAN 켜기(CANable 은 꽂으면 `can0`, sudo 를 물을 수 있음) → ② ROS 연결 → ③ 팔 켜기(`arm_homed.launch.py` = ak45_node + stm_bridge + homing_guard + arm_control).
+
+| 탭 | 하는 일 |
+|---|---|
+| 연결 | 위 ①②③, AK45 4개 상태(위치·온도·홀드), 고급: 노드 따로 켜기·로그·보정 안내 |
+| 각도 제어 | ① 원점 잡기 ② 관절 슬라이더 → [보내기] (arm_control 의 30°/s 램프와 원점 guard 를 거침), 오른쪽 3D |
+| 역기구학 | 지도에서 큐브 → 놓을 자리 클릭, [계획 돌려 보기] = `pick_place --dry-run`(모터 안 움직임), 3D 궤적 재생 |
+
+실행 순서·파일 역할 그림: 대시보드가 켜져 있으면 http://localhost:8080/static/run_map.html
+
+### 4. 처음 움직이기 전에 (꼭)
+1. **팔을 받친다.** 노드를 끄거나 피드백이 끊기면 AK45 홀드가 풀려 팔이 떨어질 수 있다.
+2. **보정은 전부 가정이다**(`calibration.json` 의 `verified: false`). 관절마다 `ros2 run arm_control calibrate --ros` 로 +5° 만 보내 방향을 눈으로 확인하고, 처음 보내기는 2~5° 로 작게.
+3. **손목 서보 확인**: `calibrate` 에서 `j W_PITCH` → `m +5`. 손목이 **굽어야** 맞다(아래 "손목 이름"). 비틀리면 `calibration.json` 의 wrist_pitch / wrist_yaw 서보(`name`, `id`)를 되돌린다.
+4. **원점**: 각도 제어 탭에서 팔을 기준 자세(시뮬 0° = 팔을 수직으로 내린 자세, `arm_control/homing.json`)에 두고 [전부 원점 잡기]. 켤 때마다·전원 재투입마다·쉬게 한 뒤마다 다시 잡는다(원점은 한 번의 홀드 동안만 유효).
+5. **역기구학은 계획(dry-run)만.** 실물 재생은 보정을 다 확인한 뒤.
+
+### 알아 둘 것
+- **손목 이름**: CAD/URDF 의 손목 이름이 실제 움직임과 바뀌어 있다(시뮬 0° 에서 `wrist_pitch` 는 아래팔 축 비틀기, `wrist_yaw` 는 굽힘, `hand_roll` 도 아래팔 축 = yaw). 그래서 `calibration.json` 에서 wrist_pitch → W_YAW(8), wrist_yaw → W_PITCH(9) 로 바꿔 연결했다. 시뮬 관절 이름은 IK·궤적·토픽 호환 때문에 그대로 둔다. 대시보드 표시는 "손목 비틀기 / 손목 굽힘 / 손 yaw".
+- **hand_roll ±88°**: 손 yaw 서보(W_X, MG996R)가 0~180° 라 시뮬 ±90° 만 된다. IK `handroll-limit` 은 이 범위 안에서만 계획한다. 그 대가로 집을 수 있는 칸이 60 → 36 칸이고, 대부분 손을 반 바퀴 돌려 잡는다. 서보 혼을 30° 옮기면(−58°~118°) 100/100 이지만 혼은 안 옮기기로 했다.
+- **반 바퀴 잡기**: 집기와 놓기는 같은 손 모양이어야 한다(들고 가며 바꿔 잡을 수 없음). 지도에서 둘 다 파란 칸이어도 손 모양이 다르면 `pick_place` 가 "cannot serve this layout" 로 거절한다(지도가 이걸 반영하도록 고치는 중).
+- **원점 guard 를 쓸 때** `play_trajectory`·`pick_place` 를 따로 띄우면 `--ros-args -r /joint_states:=/ak45/joint_states_homed` 를 붙인다(안 붙이면 오프셋이 두 번 들어가 팔이 더 움직일 수 있음).
+- **손가락 회전 F_ROT(6번)**: 3번 손가락이 1·2번과 마주 보는 서보 각도(`zero_deg`)가 아직 정해지지 않았다.
+- **서보 펌웨어(team-jax/CAN_STM)**: 피드백 없음(`/servo/state` 는 보낸 값), 명령이 끊겨도 마지막 자세를 계속 잡음, 500~2500 µs 가 실제 0~180° 인지는 서보마다 다를 수 있음(비율 `scale` 1.0 은 가정).
+- **확인 범위**: 대시보드·guard·가상 팔은 Windows 가상 모드와 WSL Humble 에서만 시험했다. 실물 모터·Jazzy 에서는 아직 안 돌렸다.
+
 ## 토픽
 
 | 토픽 | 형식 | 방향 | 규칙 |
