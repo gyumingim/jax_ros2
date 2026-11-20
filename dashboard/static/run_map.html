@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JAX 팔 실행 지도</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* layout: 한 줄 기둥(본문 폭 920px) — 요약 → 순서 → 흐름 그림 → 파일표 → 상황별 */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --fg:#1b2230; --muted:#5d6779; --line:#dde2ea;
+  --accent:#2f6fdb; --accent-soft:#e6eefc; --ak:#c2570c; --ak-soft:#fdeee2;
+  --servo:#0f8a6a; --servo-soft:#e0f4ee; --virt:#7c3aed; --virt-soft:#f1eafe;
+  --sans:"IBM Plex Sans KR",system-ui,"Malgun Gothic",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#12161d; --panel:#1a2029; --fg:#e4e8ef; --muted:#9aa4b5; --line:#2c3441;
+  --accent:#6d9cf0; --accent-soft:#1d2a42; --ak:#f0955a; --ak-soft:#3a2416;
+  --servo:#4cc9a6; --servo-soft:#14302a; --virt:#b08cff; --virt-soft:#2a2040; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#12161d; --panel:#1a2029; --fg:#e4e8ef; --muted:#9aa4b5; --line:#2c3441;
+  --accent:#6d9cf0; --accent-soft:#1d2a42; --ak:#f0955a; --ak-soft:#3a2416;
+  --servo:#4cc9a6; --servo-soft:#14302a; --virt:#b08cff; --virt-soft:#2a2040; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.6}
+.wrap{max-width:920px;margin:0 auto;padding-block:28px 56px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:36px}
+h1{font-size:28px;margin:0;text-wrap:balance}
+h2{font-size:20px;margin:0 0 12px;text-wrap:balance}
+p{margin:0}
+.lead{color:var(--muted);max-width:65ch}
+code,.mono{font-family:var(--mono);font-size:.9em}
+code{background:var(--accent-soft);padding:1px 6px;border-radius:4px}
+.key{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:4px}
+.key b{font-size:16px}
+ol.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;counter-reset:s}
+ol.steps>li{counter-increment:s;display:grid;grid-template-columns:36px 1fr;gap:12px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+ol.steps>li::before{content:counter(s);width:30px;height:30px;border-radius:50%;background:var(--accent);color:var(--panel);display:grid;place-items:center;font-weight:700}
+.steps .t{font-weight:600}
+.steps .sub{color:var(--muted);font-size:14px}
+.steps ul{margin:6px 0 0;padding-left:18px;font-size:14px}
+.cmd{display:block;margin-top:6px;font-family:var(--mono);font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;overflow-x:auto;white-space:pre}
+.tag{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:999px;margin-left:4px;vertical-align:1px}
+.tag.ak{background:var(--ak-soft);color:var(--ak)} .tag.servo{background:var(--servo-soft);color:var(--servo)}
+.tag.virt{background:var(--virt-soft);color:var(--virt)} .tag.cpp{background:var(--accent-soft);color:var(--accent)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto}
+.diagram svg{display:block;min-width:640px;width:100%;height:auto}
+.diagram text{font-family:var(--sans);font-size:13px;fill:var(--fg)}
+.diagram .small{font-size:11px;fill:var(--muted)}
+.diagram .mono{font-family:var(--mono);font-size:11px;fill:var(--muted)}
+.box{fill:var(--panel);stroke:var(--line);stroke-width:1.5}
+.box.acc{fill:var(--accent-soft);stroke:var(--accent)}
+.box.ak{fill:var(--ak-soft);stroke:var(--ak)}
+.box.servo{fill:var(--servo-soft);stroke:var(--servo)}
+.box.hw{fill:var(--bg);stroke:var(--muted);stroke-dasharray:4 3}
+.arr{stroke:var(--muted);stroke-width:1.6;fill:none}
+.arr.fb{stroke:var(--ak);stroke-dasharray:5 4}
+.ah{fill:var(--muted)} .ah.fb{fill:var(--ak)}
+.tbl{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;min-width:620px;font-size:14px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.04em;color:var(--muted);font-weight:600}
+tr:last-child td{border-bottom:none}
+td.run{font-family:var(--mono);font-size:13px;white-space:nowrap}
+td .mono{color:var(--muted)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.card h3{margin:0;font-size:16px}
+.card p,.card li{font-size:14px;color:var(--muted)}
+.card ul{margin:0;padding-left:18px}
+.note{font-size:13px;color:var(--muted)}
+</style>
+
+<div class="wrap">
+<header style="display:flex;flex-direction:column;gap:8px">
+  <h1>JAX 팔 실행 지도</h1>
+  <p class="lead">jax_ros2 의 파이썬 파일이 많아 보이지만, 사람이 직접 실행하는 건 몇 개뿐이고 나머지는 그것들이 불러 쓰는 부품이다. 기준: 포크 <code>gyumingim/jax_ros2</code> 의 <code>dashboard-homing</code> 브랜치 (2026-11-20).</p>
+</header>
+
+<div class="key">
+  <b>평소엔 <code>python3 dashboard/server.py</code> 하나만 켠다.</b>
+  <span class="note">브라우저에서 http://localhost:8080 (이 PC는 8080 이 막혀 8096). 아래 1~4 단계를 전부 버튼으로 할 수 있다.</span>
+</div>
+
+<section>
+  <h2>실행 순서 (실물 팔)</h2>
+  <ol class="steps">
+    <li><div><div class="t">CAN 켜기 <span class="sub">— 재부팅마다 1번</span></div>
+      <span class="cmd">sudo ip link set can0 up type can bitrate 1000000</span>
+      <div class="sub">대시보드: 연결 탭 → can0 올리기</div></div></li>
+    <li><div><div class="t">노드 4개 한 번에 켜기</div>
+      <span class="cmd">ros2 launch arm_control arm_homed.launch.py</span>
+      <ul>
+        <li><b>ak45_node</b> <span class="tag cpp">C++</span> AK45 4개 ↔ CAN</li>
+        <li><b>stm_bridge_node.py</b> <span class="tag servo">서보</span> 서보 10개 → CAN → STM32</li>
+        <li><b>homing_guard.py</b> <span class="tag ak">AK</span> 원점 없으면 AK 명령을 막음</li>
+        <li><b>arm_control_node.py</b> 시뮬 관절각 → 모터각 변환 + 30°/s 램프</li>
+      </ul></div></li>
+    <li><div><div class="t">원점 잡기</div>
+      <div class="sub">관절을 기준 자세(시뮬 0°)에 두고 대시보드 각도 제어 탭 → 원점 잡기. 켤 때마다·전원 재투입마다·쉬게 한 뒤마다 다시.</div></div></li>
+    <li><div><div class="t">쓰기 — 필요한 것만</div>
+      <ul>
+        <li><b>각도 제어</b>: 슬라이더 → 보내기 (대시보드)</li>
+        <li><b>vision_node.py</b>: 큐브 위치 → <code>/object_pose</code></li>
+        <li><b>pick_place.py</b>: 큐브 집어 옮기기 (계획 → 검사 → 재생). 대시보드는 <code>--dry-run</code> 만</li>
+      </ul></div></li>
+  </ol>
+</section>
+
+<section>
+  <h2>명령이 흘러가는 길</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 760 430" role="img" aria-label="명령 흐름도">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+      <marker id="af" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah fb" d="M0,0 L10,5 L0,10 z"/></marker>
+    </defs>
+    <!-- sources -->
+    <rect class="box acc" x="40" y="14" width="200" height="48" rx="8"/><text x="140" y="36" text-anchor="middle">대시보드 각도 제어</text><text class="small" x="140" y="53" text-anchor="middle">슬라이더 → 보내기</text>
+    <rect class="box acc" x="280" y="14" width="200" height="48" rx="8"/><text x="380" y="36" text-anchor="middle">pick_place.py</text><text class="small" x="380" y="53" text-anchor="middle">planner(IK) → play</text>
+    <rect class="box" x="520" y="14" width="200" height="48" rx="8"/><text x="620" y="36" text-anchor="middle">vision_node.py</text><text class="small" x="620" y="53" text-anchor="middle">/object_pose → pick_place 입력</text>
+    <path class="arr" d="M520,38 L486,38" marker-end="url(#a)"/>
+    <path class="arr" d="M140,62 L140,90 L380,90 L380,112" marker-end="url(#a)"/>
+    <path class="arr" d="M380,62 L380,112"/>
+    <text class="mono" x="392" y="104">/arm_control/joint_command  (시뮬 각, rad)</text>
+    <!-- arm_control -->
+    <rect class="box acc" x="250" y="114" width="260" height="56" rx="8"/><text x="380" y="138" text-anchor="middle">arm_control_node.py</text><text class="small" x="380" y="156" text-anchor="middle">calibration.py 변환 · motion.py 램프</text>
+    <!-- split -->
+    <path class="arr" d="M300,170 L300,200 L170,200 L170,226" marker-end="url(#a)"/>
+    <path class="arr" d="M460,170 L460,200 L590,200 L590,226" marker-end="url(#a)"/>
+    <text class="mono" x="40" y="194">/ak45/command_unguarded</text>
+    <text class="mono" x="600" y="194">/servo/command</text>
+    <!-- AK side -->
+    <rect class="box ak" x="60" y="228" width="220" height="50" rx="8"/><text x="170" y="250" text-anchor="middle">homing_guard.py</text><text class="small" x="170" y="267" text-anchor="middle">원점 없으면 막음 · 오프셋 더함</text>
+    <path class="arr" d="M170,278 L170,306" marker-end="url(#a)"/><text class="mono" x="180" y="297">/ak45/command</text>
+    <rect class="box ak" x="60" y="308" width="220" height="44" rx="8"/><text x="170" y="335" text-anchor="middle">ak45_node (C++)</text>
+    <path class="arr" d="M170,352 L170,380" marker-end="url(#a)"/>
+    <rect class="box hw" x="60" y="382" width="220" height="36" rx="8"/><text x="170" y="405" text-anchor="middle">CAN → AK45 ×4 (어깨·팔꿈치)</text>
+    <!-- feedback -->
+    <path class="arr fb" d="M60,330 L28,330 L28,250 L56,250" marker-end="url(#af)"/>
+    <text class="mono" x="4" y="318" style="fill:var(--ak)">/joint_states</text>
+    <path class="arr fb" d="M280,250 L330,250 L330,174" marker-end="url(#af)"/>
+    <text class="mono" x="338" y="232" style="fill:var(--ak)">/ak45/joint_states_homed</text>
+    <!-- servo side -->
+    <rect class="box servo" x="480" y="228" width="220" height="50" rx="8"/><text x="590" y="250" text-anchor="middle">stm_bridge_node.py</text><text class="small" x="590" y="267" text-anchor="middle">표준 CAN id 5 · [번호][각도×10]</text>
+    <path class="arr" d="M590,278 L590,380" marker-end="url(#a)"/>
+    <rect class="box hw" x="480" y="382" width="220" height="36" rx="8"/><text x="590" y="405" text-anchor="middle">CAN → STM32 → 서보 ×10</text>
+    <text class="small" x="600" y="330">피드백 없음 (/servo/state =</text>
+    <text class="small" x="600" y="345">마지막으로 보낸 값)</text>
+  </svg>
+  </div>
+  <p class="note" style="margin-top:8px">주황 점선 = AK45 위치 피드백. 원점 guard 가 오프셋을 빼서 arm_control 에 넘긴다. arm.launch.py(guard 없는 옛 방식)는 guard 칸이 빠지고 arm_control 이 ak45_node 와 바로 붙는다.</p>
+</section>
+
+<section>
+  <h2>파일 역할</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>폴더</th><th>직접 실행</th><th>불러 쓰는 부품</th></tr></thead>
+    <tbody>
+      <tr><td><b>arm_control/</b></td>
+        <td class="run">arm_control_node<br>homing_guard<br>calibrate<br>pick_place<br>play_trajectory</td>
+        <td><b>calibration</b> 시뮬각↔모터각 (calibration.json)<br><b>motion</b> 램프<br><b>homing</b> 원점 로직 (homing.json)<br><b>ros_io</b> 토픽 주고받기<br><b>protocol</b> AK45 CAN 프레임<br><b>planner</b> IK 계획 (team-jax/IK 레포 필요)<br><b>watch</b> 재생 중 AK 따라오는지 감시</td></tr>
+      <tr><td><b>ak45_ros2/</b> <span class="tag cpp">C++</span></td>
+        <td class="run">ak45_node</td>
+        <td><b>ak45_can</b> 라이브러리 (SocketCAN)<br><span class="mono">config/ak45_node.yaml</span></td></tr>
+      <tr><td><b>stm_bridge/</b></td>
+        <td class="run">stm_bridge_node</td>
+        <td><b>protocol</b> 서보 프레임 · <b>can_io</b> CAN 쓰기 · <b>servo_names</b> 이름↔번호</td></tr>
+      <tr><td><b>vision_node/</b></td>
+        <td class="run">vision_node</td>
+        <td><b>camera_result</b> 카메라 inference.json 읽기·좌표 변환</td></tr>
+      <tr><td><b>dashboard/</b></td>
+        <td class="run">server.py</td>
+        <td><b>services</b> 버튼 목록 · <b>procman</b> 노드 켜기/끄기<br><b>ros_bridge</b> → <b>ros_monitor_proc</b> → <b>ros_monitor</b> (ROS source 한 자식 프로세스)<br><b>virtual_arm</b> 가상 팔 · <span class="mono">static/viewer.js</span> 3D</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>상황별로 켜는 것</h2>
+  <div class="grid2">
+    <div class="card"><h3>평소 사용</h3>
+      <ul><li>can0 → <code>arm_homed.launch.py</code></li><li>원점 잡기</li><li>각도 제어 또는 pick_place</li></ul></div>
+    <div class="card"><h3>보정 (방향·영점 재기)</h3>
+      <ul><li><code>ak45_node</code> + <code>stm_bridge_node</code> 만</li><li>터미널: <code>ros2 run arm_control calibrate --ros</code></li><li>arm_control·launch 는 꺼 둔다 (같은 모터를 둘이 명령)</li></ul></div>
+    <div class="card"><h3>실물 없이 <span class="tag virt">가상</span></h3>
+      <ul><li><code>python dashboard/server.py --virtual</code></li><li>virtual_arm 이 calibration·motion·homing 을 그대로 써서 흉내</li><li>Windows 에서도 동작</li></ul></div>
+    <div class="card"><h3>CAN 시험 (Linux)</h3>
+      <ul><li><code>arm_control/tests/launch_vcan.sh</code></li><li>가짜 can0 + fake_ak45 로 launch 전체</li></ul></div>
+  </div>
+</section>
+</div>
+
+</html>

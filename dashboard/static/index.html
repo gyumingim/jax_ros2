@@ -35,14 +35,18 @@
 <main class="main">
   <!-- 1. 연결 -->
   <section class="page" id="page-conn" data-tab="conn">
-    <h2 class="sec">연결 <small id="conn-note"></small></h2>
-    <div class="grid" id="conn-ros"></div>
-    <h2 class="sec">노드 켜기 / 끄기</h2>
-    <div class="grid" id="svc-conn"></div>
-    <h2 class="sec">AK45 진단 <small id="ros-note"></small></h2>
-    <div class="grid" id="motors"></div>
-    <h2 class="sec">보정 (calibrate)</h2>
-    <div class="grid" id="calib"></div>
+    <h2 class="sec">순서대로 켜기 <small id="conn-note"></small></h2>
+    <div class="steps3" id="conn-steps"></div>
+    <h2 class="sec">AK45 <small id="ros-note"></small></h2>
+    <div id="motors"></div>
+    <details class="adv" id="conn-adv">
+      <summary>고급 — 노드 따로 켜기 · 로그 · 보정 · 시험</summary>
+      <div class="grid" id="conn-ros"></div>
+      <h2 class="sec">노드 따로 켜기 / 끄기</h2>
+      <div class="grid" id="svc-conn"></div>
+      <h2 class="sec">보정 (calibrate)</h2>
+      <div class="grid" id="calib"></div>
+    </details>
   </section>
   <!-- 2. 각도 제어 -->
   <section class="page" id="page-angle" data-tab="angle">

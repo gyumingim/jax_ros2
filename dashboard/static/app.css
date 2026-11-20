@@ -150,3 +150,15 @@ body.virtual .card { border-left: 4px solid #a78bfa; }
 .split-l .hrow .note { margin-top: 2px; font-size: 12px; }
 [hidden] { display: none !important; }
 .split > * { min-width: 0; }
+
+/* 연결 탭 단순화 */
+.steps3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.card.step h3 .num { width: 24px; height: 24px; border-radius: 50%; background: var(--blue); color: #fff; display: inline-grid; place-items: center; font-size: 13px; }
+.card.mtable { overflow-x: auto; }
+.mtable table { border-collapse: collapse; width: 100%; min-width: 460px; font-size: 14px; }
+.mtable th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 4px 8px; }
+.mtable td { padding: 6px 8px; border-top: 1px solid #eef1f6; }
+.mtable td.num { font-variant-numeric: tabular-nums; }
+.mtable td.note { margin: 0; }
+details.adv { margin-top: 22px; }
+details.adv > summary { cursor: pointer; color: var(--muted); font-weight: 700; padding: 8px 0; }

@@ -158,6 +158,7 @@ function render() {
   renderTabDots();
   renderConn();
   renderServices();
+  renderSteps();
   renderMotors();
   renderCalib();
   renderHoming();
@@ -222,8 +223,96 @@ function rosMissing(box) {
     el("div", { class: "help" }, "위 'ROS 연결' 카드 또는 화면 위 '가상' 스위치.")));
 }
 
-// ---------- AK45 진단 ----------
+// ---------- 연결 탭: 순서대로 켜기 (① can0 ② ROS ③ 팔) ----------
+const ST = {};
+function svcState(s) {
+  if (!s) return ["없음", ""];
+  if (!s.available) return ["못 씀", ""];
+  if (s.stopping) return ["끄는 중", "warn"];
+  if (s.alive) return [s.kind === "once" ? "실행 중" : "켜짐", "on"];
+  if (s.exit_code != null && s.exit_code !== 0) return [`죽음 (코드 ${s.exit_code})`, "bad"];
+  return ["꺼짐", ""];
+}
+function svcParams(id) {
+  const c = cards[id];
+  return c ? Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.value])) : {};
+}
+function renderSteps() {
+  const box = $("#conn-steps"), v = VIRT();
+  if (!ST.built) {
+    ST.built = true;
+    const step = (n, title) => {
+      const o = { chip: el("span", { class: "chip" }), note: el("div", { class: "note" }), row: el("div", { class: "row" }) };
+      o.root = el("div", { class: "card step" }, el("h3", {}, el("span", { class: "num" }, n), title, o.chip), o.note, o.row);
+      return o;
+    };
+    ST.can = step("1", "CAN 켜기");
+    ST.can.b = el("button", { class: "btn", onclick: () => post("/api/svc/can_up/start", { params: {} }) }, "can0 올리기");
+    ST.can.row.append(ST.can.b);
+    ST.ros = step("2", "ROS 연결");
+    ST.ros.b = el("button", { class: "btn", onclick: rosConnect }, "연결");
+    ST.ros.row.append(ST.ros.b);
+    ST.arm = step("3", "팔 켜기");
+    ST.arm.on = el("button", { class: "btn", onclick: () => post("/api/svc/arm_homed/start", { params: svcParams("arm_homed") }) }, "▶ 켜기");
+    ST.arm.off = el("button", { class: "btn red", onclick: () => {
+      const s = S.services.find((x) => x.id === "arm_homed");
+      if (s && s.stop_warn && !VIRT() && !confirm(s.stop_warn)) return;
+      post("/api/svc/arm_homed/stop");
+    } }, "■ 끄기");
+    ST.arm.row.append(ST.arm.on, ST.arm.off);
+    box.append(ST.can.root, ST.ros.root, ST.arm.root);
+  }
+  const can = S.can, canSvc = S.services.find((x) => x.id === "can_up");
+  if (v) { setChip(ST.can.chip, "가상", "on"); ST.can.note.textContent = "가상 모드에선 필요 없음"; ST.can.b.disabled = true; }
+  else {
+    setChip(ST.can.chip, !can.available ? "못 봄" : can.up ? "UP" : "꺼짐", !can.available ? "" : can.up ? "on" : "bad");
+    ST.can.note.textContent = !can.available ? (canSvc && !canSvc.available ? canSvc.why : "can0 상태를 못 읽음") : can.up ? (can.state || "") : "재부팅마다 1번";
+    ST.can.b.disabled = !canSvc || !canSvc.available || canSvc.alive || can.up;
+  }
+  const r = S.ros, cs = (r.conn || {}).state;
+  if (v) { setChip(ST.ros.chip, "가상 팔", "on"); ST.ros.note.textContent = "가상 모드에선 필요 없음"; ST.ros.b.disabled = true; }
+  else {
+    setChip(ST.ros.chip, r.available ? "연결됨" : cs === "starting" ? "연결 중" : "안 됨", r.available ? "on" : cs === "starting" ? "warn" : "bad");
+    ST.ros.note.textContent = r.available ? `ROS ${(r.conn || {}).distro || ""}` : (r.reason || "ROS 없음");
+    ST.ros.b.textContent = rosBusy ? "연결 중…" : r.available ? "다시 연결" : "연결"; ST.ros.b.disabled = rosBusy;
+  }
+  const arm = S.services.find((x) => x.id === "arm_homed"), [t, cls] = svcState(arm);
+  setChip(ST.arm.chip, (arm && arm.virtual ? "가상 · " : "") + t, cls);
+  ST.arm.note.textContent = !arm ? "" : !arm.available ? arm.why : arm.error || "ak45 · 서보 · 원점 guard · arm_control 한 번에 (arm_homed.launch.py)";
+  ST.arm.on.disabled = !arm || !arm.available || arm.alive || arm.stopping;
+  ST.arm.off.disabled = !arm || !arm.alive || arm.stopping;
+}
+
+// ---------- AK45 (한 줄씩) ----------
 function renderMotors() {
+  const r = S.ros, box = $("#motors");
+  if (!r.available) { $("#ros-note").textContent = ""; rosMissing(box); return; }
+  delete box.dataset.rosKey;
+  box.replaceChildren();
+  $("#ros-note").textContent = (VIRT() ? "(가상) " : "") + (r.diag_age == null ? "ak45_node 응답 없음 (팔 꺼짐?)" : `${r.diag_age.toFixed(1)}초 전`);
+  if (!r.motors.length) { box.append(el("div", { class: "card muted" }, "팔을 켜면 AK45 4개가 여기 나온다")); return; }
+  const rows = r.motors.map((m) => {
+    const v = m.values || {}, stale = m.age > 3, lv = stale ? 3 : m.level;
+    return el("tr", {},
+      el("td", {}, el("b", {}, m.name.replace("ak45/", ""))),
+      el("td", {}, el("span", { class: "chip " + LV[lv] }, el("span", { class: "dot" }), LVT[lv])),
+      el("td", { class: "num" }, v.position_deg != null ? `${v.position_deg}°` : "—"),
+      el("td", { class: "num" }, `${v.temperature_c ?? "—"} °C`),
+      el("td", {}, v.command_active === "1" ? "홀드 중" : "힘 없음"),
+      el("td", { class: "note " + (lv === 2 ? "bad" : lv ? "warn" : "") }, stale ? "응답 끊김" : lv ? m.message : ""));
+  });
+  let bus = null;
+  if (r.bus) {
+    const lv = r.bus.age > 3 ? 3 : r.bus.level;
+    bus = el("div", { class: "note" }, "CAN 버스 ", el("span", { class: "chip " + LV[lv] }, el("span", { class: "dot" }), LVT[lv]), " ", lv ? r.bus.message : "");
+  }
+  box.append(el("div", { class: "card mtable" }, el("table", {},
+    el("thead", {}, el("tr", {}, ...["모터", "상태", "위치", "온도", "힘", ""].map((h) => el("th", {}, h)))),
+    el("tbody", {}, ...rows)), bus || ""));
+}
+
+// ---------- AK45 진단 (예전 카드, 안 씀) ----------
+function renderMotorsFull() {
   const r = S.ros, box = $("#motors");
   if (!r.available) { $("#ros-note").textContent = ""; rosMissing(box); return; }
   delete box.dataset.rosKey;
