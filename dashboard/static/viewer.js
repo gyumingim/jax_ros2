@@ -236,6 +236,13 @@ export class Viewer {
     if (t) this.target.position.set(t.x, t.y, -this.d + CUBE / 2);
     this.dirty();
   }
+  setGhostTint(bad) {   // 유령 색: 파랑 = 지금 입력의 해, 빨강 = 못 풀어서 마지막 좋은 해를 보이는 중
+    if (!this.ghost || this._tint === !!bad) return;
+    this._tint = !!bad;
+    const c = bad ? 0xef4444 : 0x3b7bf0;
+    for (const m of [this.ghost.ghostMat, this.ghost.matStick, this.ghost.matJoint]) if (m) m.color.setHex(c);
+    this.dirty();
+  }
   setHandMark(p) {   // 손 위치로 보내기의 목표점(손이 쥐는 점): 분홍 구 + 책상까지 세로선
     if (!this.handMark) {
       const g = new THREE.Group();
