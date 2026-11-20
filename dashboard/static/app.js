@@ -984,7 +984,7 @@ function buildHandIk() {
     el("option", { value: "grasp" }, "−40° 고정 (팀 IK 원래 값)"));
   f.tmax = el("input", { type: "number", min: 0, max: 90, step: 5, value: 60, style: "width:64px", title: "기울기 자동일 때 손가락 사이 축 둘레 기울기 상한 (양쪽)" });
   f.tmax.addEventListener("input", () => hkEdit(false));
-  f.fix = el("input", { type: "checkbox" });   // 기본 끔 (사용자 2026-11-20)
+  f.fix = el("input", { type: "checkbox", checked: "" });   // 기본 켬, 0° (사용자 2026-11-20 저녁: 위치만 모드에서 답을 몇 개로)
   f.fixv = el("input", { type: "number", min: 0, max: 45, step: 1, value: 0, style: "width:70px" });
   f.open = el("input", { type: "checkbox" });
   f.followBox = el("input", { type: "checkbox" });
