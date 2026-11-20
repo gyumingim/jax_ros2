@@ -870,7 +870,7 @@ function hkVals() {
   const n = (e) => { const v = parseFloat(e.value); return Number.isFinite(v) ? v : null; };
   const x = n(HK.f.x.num), y = n(HK.f.y.num), zc = n(HK.f.z.num), yaw = n(HK.f.yaw.num), fv = n(HK.f.fixv), tm = n(HK.f.tmax);
   if (x == null || y == null || zc == null) return null;
-  return { x, y, z_table_cm: zc, z: zc / 100 - HK.mapD, yaw_deg: yaw ?? 0, mode: HK.f.mode.value, tilt_max_deg: tm ?? 60,
+  return { x, y, z_table_cm: zc, z: zc / 100 - HK.mapD, yaw_deg: yaw ?? 0, mode: HK.f.mode.value, tilt_max_deg: tm ?? 60, ref: HK.f.ref.value,
     fix_deg: HK.f.fix.checked ? { shoulder_yaw: fv ?? 0 } : {} };
 }
 function hkSetXY(x, y, live) {
@@ -953,14 +953,33 @@ function hkSlider(lab, unit, min, max, step, val, digits) {
   const set = (v) => { num.value = (+v).toFixed(digits); range.value = v; rangeFill(range); };
   return { range, num, set, row: el("div", { class: "mctl" }, el("span", { class: "mlabel" }, lab), range, num, el("span", {}, unit)) };
 }
+const HK_ABOVE = 0.2435;   // 손이 수직일 때 손목 중앙이 집는 점보다 위 (m) — 서버 ref_info 가 오면 그 값
+const HK_WRIST_Z0 = Math.round(2.5 + HK_ABOVE * 100);   // 손목 기준 기본 높이 = 집는 점 2.5 cm 에 해당 (27 cm)
+const hkAbove = () => (HK.good && HK.good.ref_info && HK.good.ref_info.wrist_above_grip_vertical_m) || HK_ABOVE;
+const hkCubeZ = () => HK.f.ref.value === "wrist" ? Math.round((2.5 + hkAbove() * 100) * 2) / 2 : 2.5;
+function hkRefUi() {   // 큐브 잡는 높이 버튼: 손목 기준은 수직 손에서만 계산이 맞음
+  HK.preset.hidden = HK.f.ref.value === "wrist" && HK.f.mode.value !== "vertical";
+  HK.preset.textContent = `큐브 잡는 높이 (${hkCubeZ()} cm)`;
+}
+function hkRefChanged() {   // 기준점 바꾸면 높이도 그 기준에 맞게 (수직 손 기준 거리만큼) + 슬라이더 범위
+  const f = HK.f, w = f.ref.value === "wrist", z = parseFloat(f.z.num.value) || 0, d = hkAbove() * 100;
+  f.z.range.min = w ? 25 : 0; f.z.range.max = w ? 65 : 40;
+  f.z.row.querySelector(".mlabel").textContent = w ? "높이 (손목 중앙, 책상 위)" : "높이 (집는 점, 책상 위)";
+  f.z.set(Math.round((w ? z + d : Math.max(0, z - d)) * 2) / 2);
+  HK.good = null; HK.followSent = null; HK.followSol = null;   // 다른 기준의 해는 이어 쓰지 않음
+  hkRefUi(); hkEdit(false);
+}
 function buildHandIk() {
   const f = HK.f = {};
   f.x = hkSlider("x (왼쪽 +)", "m", -0.25, 0.35, 0.005, 0.1, 3);
   f.y = hkSlider("y (앞 −)", "m", -0.45, 0.05, 0.005, -0.3, 3);
-  f.z = hkSlider("높이 (책상 위)", "cm", 0, 40, 0.5, 2.5, 1);
+  // 기준점: 손목 중앙(기본, 손목 굽힘·비틀기 축의 교점) / 손가락 사이(집는 점). 높이 = 그 기준점의 책상 위 높이
+  f.z = hkSlider("높이 (손목 중앙, 책상 위)", "cm", 25, 65, 0.5, HK_WRIST_Z0, 1);
+  f.ref = el("select", {}, el("option", { value: "wrist" }, "손목 중앙 (기본)"), el("option", { value: "grip" }, "손가락 사이 (집는 점)"));
+  f.ref.addEventListener("change", () => hkRefChanged());
   f.yaw = hkSlider("손 방향 (잡을 큐브 yaw)", "°", -45, 45, 1, 0, 0);
-  f.mode = el("select", {}, el("option", { value: "auto" }, "손가락 아래 (기울기 자동, 0~상한)"),
-    el("option", { value: "vertical" }, "수직만 (기울기 0°)"),
+  f.mode = el("select", {}, el("option", { value: "vertical" }, "수직 (기울기 0°, 기본)"),
+    el("option", { value: "auto" }, "손가락 아래 (기울기 자동, 0~상한)"),
     el("option", { value: "grasp" }, "−40° 고정 (팀 IK 원래 값)"));
   f.tmax = el("input", { type: "number", min: 0, max: 90, step: 5, value: 60, style: "width:64px", title: "기울기 자동일 때 손가락 사이 축 둘레 기울기 상한 (양쪽)" });
   f.tmax.addEventListener("input", () => hkEdit(false));
@@ -968,7 +987,7 @@ function buildHandIk() {
   f.fixv = el("input", { type: "number", min: 0, max: 45, step: 1, value: 0, style: "width:70px" });
   f.open = el("input", { type: "checkbox" });
   f.followBox = el("input", { type: "checkbox" });
-  f.mode.addEventListener("change", () => hkEdit(false));
+  f.mode.addEventListener("change", () => { hkRefUi(); hkEdit(false); });
   f.fix.addEventListener("change", () => hkEdit(false));
   f.fixv.addEventListener("input", () => hkEdit(false));
   f.followBox.addEventListener("change", () => {
@@ -988,8 +1007,9 @@ function buildHandIk() {
       }
     }
   });
-  const preset = el("button", { class: "btn line small", onclick: () => { f.z.set(2.5); hkEdit(false); }, title: "큐브(5 cm) 중심 높이 = 책상 위 2.5 cm" }, "큐브 잡는 높이 (2.5 cm)");
-  f.z.row.append(preset);
+  // 큐브 잡는 높이: 집는 점이 큐브 중심(책상 위 2.5 cm)에 오는 높이 — 손목 기준이면 수직 손에서 + 손목↔집는 점 거리(24.35 cm)
+  HK.preset = el("button", { class: "btn line small", onclick: () => { f.z.set(hkCubeZ()); hkEdit(false); }, title: "집는 점 = 큐브(5 cm) 중심 = 책상 위 2.5 cm" }, "큐브 잡는 높이");
+  f.z.row.append(HK.preset);
   const fromCube = el("button", { class: "btn line small", title: "위 지도의 큐브 x, y, yaw 를 가져오기", onclick: () => {
     const v = mapVals(); if (!v.cube) { toast("지도에 큐브가 없음", "error"); return; }
     f.yaw.set(Math.round(foldYaw(v.cube.yaw))); hkSetXY(v.cube.x, v.cube.y, false);
@@ -1012,7 +1032,9 @@ function buildHandIk() {
         el("b", { style: "color:#2f66d0" }, "파란 유령"), "으로 보인다 (못 풀면 ", el("b", { style: "color:#dc2626" }, "빨강"), " + 마지막 좋은 해). [보내기] 로 팔을 그 자세로. 손가락은 그대로."),
       el("div", { class: "row", style: "margin-top:0" }, pickMap, fromCube),
       f.x.row, f.y.row, f.z.row, f.yaw.row,
-      el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 자세"), f.mode, el("span", {}, " 기울기 상한 ±"), f.tmax, el("span", {}, "°")),
+      el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "기준점"), f.ref),
+      el("details", { class: "log" }, el("summary", {}, "고급: 손 자세 (기본 수직)"),
+        el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "손 자세"), f.mode, el("span", {}, " 기울기 상한 ±"), f.tmax, el("span", {}, "°"))),
       el("label", { class: "chk", style: "display:flex;gap:6px;align-items:center;margin:4px 0 0" }, f.fix, "어깨 옆으로 벌리기 고정 (shoulder_yaw)", f.fixv, "°"),
       el("p", { class: "help", style: "margin:4px 0 0" }, "손이 바닥을 봐도 답이 하나가 아니다: 손 위치·방향은 6개 값인데 관절이 7개라 같은 손 자세를 만드는 팔 모양이 여러 개(팔꿈치 위치가 남음)이고, 손도 반 바퀴 돌린 두 가지가 있어 계산이 하나를 고른다. " +
         "고정을 켜면 관절이 6개가 되어 거의 하나로 정해진다 (대신 닿는 곳이 줄어든다 — 안 풀리면 이유에 '고정 때문' 이 뜬다)."),
@@ -1028,6 +1050,7 @@ function buildHandIk() {
           "위치 5 mm · 방향 1.5° 안이면 풀림, 그중 지금 자세에서 가장 가까운 해. 끄는 중엔 빠른 풀이(직전 해에서 한 번, 같은 손 모양). team-jax/IK env.py·ik.py 를 그대로 쓴다. " +
           "[보내기] = 각도 제어 탭과 같은 /api/joint/send (같은 막힘 규칙·확인창). 지금 자세 → 목표까지 관절마다 직선으로 가며, 중간 경로의 충돌은 검사하지 않는다."))));
   $("#handik").append(root);
+  hkRefUi();
   setInterval(hkFollowTick, 200);
   setInterval(hkFlogFlush, 1000);
   hkEdit(false);
@@ -1074,7 +1097,8 @@ function hkRender() {
   }
   if (HK.check) {
     const c = HK.check;
-    HK.chk.textContent = c.ok ? `지금 손이 쥐는 점 (FK): x ${cm(c.grip_real[0])} · y ${cm(c.grip_real[1])} cm · 책상 위 ${((c.grip_real[2] + HK.mapD) * 100).toFixed(1)} cm` +
+    const w = c.wref && c.wrist_real, pt = w ? c.wrist_real : c.grip_real;
+    HK.chk.textContent = c.ok ? `지금 ${w ? "손목 중앙" : "손이 쥐는 점"} (FK): x ${cm(pt[0])} · y ${cm(pt[1])} cm · 책상 위 ${((pt[2] + HK.mapD) * 100).toFixed(1)} cm` +
       (c.diff_mm != null ? ` → 목표와 ${c.diff_mm.toFixed(1)} mm 차이` : "") + ` · 손 축 기울기 ${c.axis_tilt_deg}°` : "FK 못 함: " + (c.reason || "?");
   } else HK.chk.textContent = "";
 }
@@ -1084,7 +1108,11 @@ async function hkFk(manual) {
   let r;
   try { r = await (await fetch("/api/ik/fk", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode }) })).json(); }
   catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
-  if (r.ok && t) r.diff_mm = Math.hypot(r.grip_real[0] - t.x, r.grip_real[1] - t.y, r.grip_real[2] - t.z) * 1000;
+  if (r.ok && t) {
+    r.wref = (t.ref || "grip") === "wrist" && !!r.wrist_real;
+    const pt = r.wref ? r.wrist_real : r.grip_real;
+    r.diff_mm = Math.hypot(pt[0] - t.x, pt[1] - t.y, pt[2] - t.z) * 1000;
+  }
   HK.check = r; hkRender();
   if (manual && !r.ok) toast("FK 못 함: " + (r.reason || "?"), "error");
 }

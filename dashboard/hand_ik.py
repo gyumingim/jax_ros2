@@ -68,6 +68,47 @@ class _Solver:
         self.table_z = float(E.TABLE_SURFACE_Z)
         self.open_fingers = env.finger_targets(0.0)
         self.d.qpos[self.fadr] = self.open_fingers
+        self._init_wrist()
+
+    def _init_wrist(self):
+        """손목 중앙 = 손목 굽힘(wrist_yaw) 축과 손목 비틀기(wrist_pitch) 축의 교점. arm.xml 에서 두 축은 직교하고 만난다
+        (wrist_yaw 관절 기준점에서 그 축 따라 20 mm). 그 점은 Wrist_yaw 몸통에 고정 → 몸통 좌표 오프셋으로 둔다
+        (앞 4 관절만으로 정해지고 wrist_pitch·wrist_yaw·hand_roll 에는 안 움직인다)."""
+        np, mj, m, d = self.np, self.mj, self.m, self.d
+        wp, wy = m.joint("wrist_pitch").id, m.joint("wrist_yaw").id
+        self.wbody = int(m.jnt_bodyid[wy])
+        d.qpos[self.qadr] = np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
+        mj.mj_kinematics(m, d)
+        p1, a1, p2, a2 = d.xanchor[wp], d.xaxis[wp], d.xanchor[wy], d.xaxis[wy]
+        w, bb = p2 - p1, float(a1 @ a2)
+        t2 = (float(a1 @ a1) * float(a2 @ w) - bb * float(a1 @ w)) / (float(a1 @ a1) * float(a2 @ a2) - bb * bb)
+        x = p2 + t2 * a2
+        self.wrist_off = d.xmat[self.wbody].reshape(3, 3).T @ (x - d.xpos[self.wbody])
+        n = np.cross(a1, a2)
+        self.wrist_axes_gap_mm = float(abs(w @ n) / np.linalg.norm(n) * 1000)
+        # 손 좌표(site)에서 손목 중앙·벌린 손가락 가장 낮은 점의 손 축(site z) 성분 — 손이 수직이면 높이 차가 이것
+        rs = d.site_xmat[self.site].reshape(3, 3)
+        self.wrist_above_site = float((rs.T @ (x - d.site_xpos[self.site]))[2])
+        d.qpos[self.fadr] = self.open_fingers
+        mj.mj_kinematics(m, d)
+        low = 9.0
+        for g in self.finger_geoms:
+            c, R, h = d.geom_xpos[g], d.geom_xmat[g].reshape(3, 3), m.geom_size[g]
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    for sz in (-1, 1):
+                        low = min(low, float((rs.T @ (c + R @ (h * np.array([sx, sy, sz])) - d.site_xpos[self.site]))[2]))
+        self.finger_below_site = low   # 음수 (손 축 따라 site 아래)
+
+    def wrist_pos(self):
+        """지금 self.d 의 손목 중앙(세계, sim)."""
+        return self.d.xpos[self.wbody] + self.d.xmat[self.wbody].reshape(3, 3) @ self.wrist_off
+
+    def ref_info(self):
+        """화면용: 손이 수직일 때 손목 중앙이 집는 점(site)보다 몇 m 위, 벌린 손가락 끝이 책상에 닿는 손목 높이."""
+        return {"wrist_above_grip_vertical_m": round(self.wrist_above_site, 4),
+                "wrist_min_vertical_m": round(self.wrist_above_site - self.finger_below_site, 4),
+                "wrist_axes_gap_mm": round(self.wrist_axes_gap_mm, 2)}
 
     # ---- 좌표
     def to_sim(self, p):
@@ -105,12 +146,17 @@ class _Solver:
         M = rz.T @ rot @ (self.E.HALF_TURN if flip else np.eye(3))
         return math.atan2(M[2, 1] - M[1, 2], M[1, 1] + M[2, 2])
 
-    def solve_free_tilt(self, seed, point, turn_deg, flip, tilt_max_deg, its=400, tilt_init_deg=None, warm=120, pull=TILT_PULL, home_pull=0.02, polish=40):
+    def solve_free_tilt(self, seed, point, turn_deg, flip, tilt_max_deg, its=400, tilt_init_deg=None, warm=120, pull=TILT_PULL, home_pull=0.02, polish=40,
+                        ref="grip", tilt_fix_deg=None):
         """auto: 손이 쥐는 점(point, sim) + 손 x 축(손가락이 닫히는 방향) = rz(turn)·(±x) 만 맞추고, x 축 둘레 기울기 t 는
         |t| <= tilt_max 안에서 자유(넘으면 그 한계에 묶음). 남는 자유도로 t -> 0, 관절 -> HOME.
-        돌려줌 (q, 쥐는 점 오차 m, 손 방향 오차 rad(x 축 + 한계 넘은 만큼), t rad)."""
+        ref = "wrist" 면 위치 과제가 쥐는 점 대신 손목 중앙(point = 손목 중앙 목표). tilt_fix_deg 가 있으면 기울기를 그 값에 묶은
+        6D 풀이(수직 = 0, grasp = HAND_TILT).
+        돌려줌 (q, 기준점 오차 m, 손 방향 오차 rad(x 축 + 한계 넘은 만큼), t rad)."""
         np, mj, m, d = self.np, self.mj, self.m, self.d
-        dz = float(self.E.GRASP_DZ)
+        dz = float(self.E.GRASP_DZ) if tilt_fix_deg is None else 0.0
+        wrist = ref == "wrist"
+        fixed_t = tilt_fix_deg is not None
         tmax = math.radians(tilt_max_deg)
         a = math.radians(turn_deg)
         axis = np.array([math.cos(a), math.sin(a), 0.0])      # 기울기 축(세계) = rz·e_x
@@ -118,6 +164,7 @@ class _Solver:
         lim = m.jnt_range[self.jid]
         home = np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
         jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
+        jpw, jrw = np.zeros((3, m.nv)), np.zeros((3, m.nv))
         damp = 1e-3 * np.eye(6)
         d.qpos[self.qadr] = seed
         d.qvel[:] = 0
@@ -126,17 +173,18 @@ class _Solver:
             mj.mj_kinematics(m, d); mj.mj_comPos(m, d)
             R = d.site_xmat[self.site].reshape(3, 3).copy()
             t = self.tilt_of(R, turn_deg, flip)
-            tc = max(-tmax, min(tmax, t)) if tilt_init_deg is None or k >= warm else math.radians(tilt_init_deg)
-            ep = point - (d.site_xpos[self.site] - dz * R[:, 2])
+            tc = (math.radians(tilt_fix_deg) if fixed_t else max(-tmax, min(tmax, t)) if tilt_init_deg is None or k >= warm
+                  else math.radians(tilt_init_deg))
+            ep = point - (self.wrist_pos() if wrist else d.site_xpos[self.site] - dz * R[:, 2])
             er = self.rotation_error(R, self.hand_rot("auto", turn_deg, flip, math.degrees(tc)))
             return R, t, ep, er
 
         t_prev, settle = None, 0
         for k in range(its):
             R, t, ep, er = state(k)
-            held = tilt_init_deg is not None and k < warm          # 처음 warm 번은 기울기를 tilt_init 에 묶고 시작(가지 고르기)
+            held = fixed_t or (tilt_init_deg is not None and k < warm)   # 처음 warm 번은 기울기를 tilt_init 에 묶고 시작(가지 고르기)
             pe, re_ = np.linalg.norm(ep), np.linalg.norm(er)
-            settle = settle + 1 if (not held and pe <= 0.0005 and re_ <= 0.004 and t_prev is not None
+            settle = settle + 1 if ((not held or fixed_t) and pe <= 0.0005 and re_ <= 0.004 and t_prev is not None
                                     and abs(t - t_prev) < 2e-4) else 0
             if settle >= 15:                                   # 맞았고 기울기도 더 안 움직임
                 break
@@ -146,15 +194,18 @@ class _Solver:
             z = R[:, 2]
             sk = np.array([[0.0, -z[2], z[1]], [z[2], 0.0, -z[0]], [-z[1], z[0], 0.0]])
             Jg = Jp + dz * sk @ Jr                             # 쥐는 점(site - dz·z)의 자코비안
+            if wrist:
+                mj.mj_jac(m, d, jpw, jrw, self.wrist_pos(), self.wbody)
+                Jg = jpw[:, dof]
             P = np.eye(3) if held or abs(t) > tmax else np.eye(3) - np.outer(axis, axis)   # 한계 안이면 축 둘레 회전은 자유
             J0 = np.vstack((Jg, 0.25 * P @ Jr))
             e = np.concatenate((ep, 0.25 * P @ er))
             q = d.qpos[self.qadr].copy()
             # 남는 자유도 당기기(기울기 -> 0, HOME 쪽)는 주 과제가 거의 맞았을 때만, 마지막 polish 번은 안 함
             sec = np.zeros(len(q))
-            if not held and k < its - polish and pe < 0.002 and re_ < 0.02:
+            if k < its - polish and pe < 0.002 and re_ < 0.02 and (not held or (fixed_t and home_pull > 0)):
                 jt = axis @ Jr                                 # dt/dq
-                sec = home_pull * (home - q) + jt * (-pull * t) / (jt @ jt + 1e-6)
+                sec = home_pull * (home - q) + (0.0 if held else 1.0) * jt * (-pull * t) / (jt @ jt + 1e-6)
             free = np.ones(len(q), dtype=bool)
             for _ in range(2):                                 # 한계에 붙은 관절이 밖으로 밀리면 그 관절을 빼고 다시(clip 이 위치를 깨지 않게)
                 J = J0 * free
@@ -204,7 +255,7 @@ class _Solver:
                                           position_tolerance=0.0005, rotation_tolerance=0.004, max_iterations=its)
         return self.d.qpos[self.qadr].copy(), pe, re_
 
-    def position_only(self, seeds, target, its=300):
+    def position_only(self, seeds, target, its=300, ref="grip"):
         """손 방향을 빼고 위치만: 팔이 그 점에 닿기는 하나 (진단). 가장 가까운 거리(m)."""
         np, mj = self.np, self.mj
         lim = self.m.jnt_range[self.jid]
@@ -215,15 +266,18 @@ class _Solver:
             self.d.qpos[self.qadr] = s
             for _ in range(its):
                 mj.mj_kinematics(self.m, self.d); mj.mj_comPos(self.m, self.d)
-                e = target - self.d.site_xpos[self.site]
+                e = target - (self.wrist_pos() if ref == "wrist" else self.d.site_xpos[self.site])
                 if np.linalg.norm(e) < 5e-4:
                     break
-                mj.mj_jacSite(self.m, self.d, jp, jr, self.site)
+                if ref == "wrist":
+                    mj.mj_jac(self.m, self.d, jp, jr, self.wrist_pos(), self.wbody)
+                else:
+                    mj.mj_jacSite(self.m, self.d, jp, jr, self.site)
                 J = jp[:, dof]
                 dq = J.T @ np.linalg.solve(J @ J.T + 1e-3 * np.eye(3), e)
                 self.d.qpos[self.qadr] = np.clip(self.d.qpos[self.qadr] + 0.5 * dq, lim[:, 0], lim[:, 1])
             mj.mj_kinematics(self.m, self.d)
-            best = min(best, float(np.linalg.norm(target - self.d.site_xpos[self.site])))
+            best = min(best, float(np.linalg.norm(target - (self.wrist_pos() if ref == "wrist" else self.d.site_xpos[self.site]))))
         return best
 
     def seeds(self, current, few=False):
@@ -237,7 +291,11 @@ class _Solver:
         out.append(np.zeros(len(self.arm)))
         return out
 
-    def candidates(self, mode, yaw_real, point_sim, current, ranges_deg, servo_unlimited=False, tilt_max=TILT_MAX_DEFAULT, near=None):
+    def tilt_fix(self, mode):
+        """손목 기준 풀이에서 묶을 기울기(°): vertical 0, grasp HAND_TILT, auto 는 None(자유)."""
+        return None if mode == "auto" else 0.0 if mode == "vertical" else float(self.E.HAND_TILT)
+
+    def candidates(self, mode, yaw_real, point_sim, current, ranges_deg, servo_unlimited=False, tilt_max=TILT_MAX_DEFAULT, near=None, ref="grip"):
         np, R = self.np, self.R
         lim = self.set_ranges(ranges_deg, servo_unlimited)
         y = R.fold_yaw(yaw_real + R.SIM_FROM_REAL_YAW)
@@ -245,12 +303,22 @@ class _Solver:
         out = []
         for turn in turns:
             for flip in (False, True):
+                if ref == "wrist" and mode != "auto":
+                    # 손목 중앙 기준 + 기울기 고정(수직·−40): 6D 풀이를 직전 보낸 해·지금·HOME 등에서 (이어 풀기는 당김 없이)
+                    tf = self.tilt_fix(mode)
+                    rot = self.hand_rot(mode, turn, flip, tf)
+                    starts = ([(near, 0.0)] if near is not None else []) + [(x, 0.02) for x in self.seeds(current)]
+                    for s0, hp in starts:
+                        s0 = np.clip(s0, lim[:, 0], lim[:, 1])
+                        q, pe, re_, t = self.solve_free_tilt(s0, point_sim, turn, flip, tilt_max, ref="wrist", tilt_fix_deg=tf, home_pull=hp)
+                        out.append({"q": q, "pe": pe, "re": re_, "turn": turn, "flip": flip, "rot": rot, "tilt": tf})
+                    continue
                 if mode == "auto":
                     if near is not None:
                         # 이어 풀기: 직전 보낸 해(없으면 지금 자세)에서 기울기를 묶지 않고·당기지 않고 그대로 이어 푼 후보(같은 가지).
                         # 아래 0/±40 묶음 시작은 처음 120 번 기울기를 억지로 바꿔 직전 가지에서 떨어뜨린다.
                         s = np.clip(near, lim[:, 0], lim[:, 1])
-                        q, pe, re_, t = self.solve_free_tilt(s, point_sim, turn, flip, tilt_max, pull=0.0, home_pull=0.0)
+                        q, pe, re_, t = self.solve_free_tilt(s, point_sim, turn, flip, tilt_max, pull=0.0, home_pull=0.0, ref=ref)
                         tilt = math.degrees(t)
                         rot = self.hand_rot(mode, turn, flip, max(-tilt_max, min(tilt_max, tilt)))
                         out.append({"q": q, "pe": pe, "re": re_, "turn": turn, "flip": flip, "rot": rot, "tilt": tilt})
@@ -260,7 +328,7 @@ class _Solver:
                         s = np.clip(s, lim[:, 0], lim[:, 1])
                         for t0 in AUTO_TILT_INITS:
                             q, pe, re_, t = self.solve_free_tilt(s, point_sim, turn, flip, tilt_max,
-                                                                 tilt_init_deg=max(-tilt_max, min(tilt_max, t0)))
+                                                                 tilt_init_deg=max(-tilt_max, min(tilt_max, t0)), ref=ref)
                             tilt = math.degrees(t)
                             rot = self.hand_rot(mode, turn, flip, max(-tilt_max, min(tilt_max, tilt)))
                             out.append({"q": q, "pe": pe, "re": re_, "turn": turn, "flip": flip, "rot": rot, "tilt": tilt})
@@ -330,7 +398,8 @@ class _Solver:
                     "reason": f"책상 아래 — 점이 책상 면보다 {-z_table * 100:.1f} cm 아래 (책상 = 어깨 아래 {R.MAP_D * 100:.2f} cm)"}
         point = np.asarray(self.to_sim(p))
         t0 = time.time()
-        cands, lim = self.candidates(mode, yaw, point, current, ranges, tilt_max=tilt_max, near=near)
+        pref = "wrist" if b.get("ref") == "wrist" else "grip"   # 기준점: 손목 중앙 / 손가락 사이(집는 점)
+        cands, lim = self.candidates(mode, yaw, point, current, ranges, tilt_max=tilt_max, near=near, ref=pref)
         ref = current if current is not None else np.asarray(E.HOME_ARM_QPOS)
         tol_p, tol_r = TOL_POS, TOL_ROT   # env.reachable 과 같은 5 mm, 손 방향 1.5°
         good = [c for c in cands if c["pe"] <= tol_p and c["re"] <= tol_r]
@@ -365,10 +434,12 @@ class _Solver:
         q = best["q"]
         site, rot = self.fk(q)
         grip = site - self.dz(mode) * rot[:, 2]
+        wpos = self.wrist_pos().copy()
         at_lim = [self.arm[i] for i in range(len(self.arm)) if self.arm[i] not in fixed and (q[i] <= lim[i][0] + 1e-3 or q[i] >= lim[i][1] - 1e-3)]
         out.update(joints={n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, q)},
-                   pos_err_mm=round(float(np.linalg.norm(grip - point)) * 1000, 1),
-                   ang_err_deg=round(math.degrees(best["re"]), 2),
+                   pos_err_mm=round(float(np.linalg.norm((wpos if pref == "wrist" else grip) - point)) * 1000, 1),
+                   ang_err_deg=round(math.degrees(best["re"]), 2), ref=pref, wrist_real=[round(float(v), 4) for v in self.to_real(wpos)],
+                   ref_info=self.ref_info(),
                    flip=bool(best["flip"]), hand_turn=round(float(best["turn"]), 2), tilt_deg=round(float(best["tilt"]), 1),
                    finger_low_mm=round(best["low"] * 1000, 1), at_limit=at_lim,
                    max_move_deg=round(math.degrees(best["dist"]), 1) if current is not None else None,
@@ -383,7 +454,7 @@ class _Solver:
             out["reason"] = "풀림" + (" · " + " · ".join(warn) if warn else "")
             out["warn"] = warn
         elif not good:
-            out["kind"], out["reason"] = self.why(mode, yaw, point, current, ranges, best, tilt_max)
+            out["kind"], out["reason"] = self.why(mode, yaw, point, current, ranges, best, tilt_max, ref=pref)
         out["ms"] = round((time.time() - t0) * 1000)
         return out
 
@@ -409,16 +480,21 @@ class _Solver:
         turn = min((y, y + 90.0, y - 90.0), key=lambda t: abs(t - prev))
         point = np.asarray(self.to_sim(p))
         seed = np.clip(np.radians([float(seed_d[n]) for n in self.arm]), lim[:, 0], lim[:, 1])
-        if mode == "auto":
+        ref = "wrist" if b.get("ref") == "wrist" else "grip"
+        if ref == "wrist" and mode != "auto":
+            tilt = self.tilt_fix(mode)
+            q, pe, re_, _ = self.solve_free_tilt(seed, point, turn, flip, TILT_MAX_DEFAULT, its=FAST_ITERS, home_pull=0.0, ref="wrist", tilt_fix_deg=tilt)
+        elif mode == "auto":
             tilt_max = min(90.0, max(0.0, float(TILT_MAX_DEFAULT if b.get("tilt_max_deg") is None else b["tilt_max_deg"])))
             # 당김 없음(기울기 0·HOME 쪽으로 안 밈): 남는 자유도는 직전 해에 머물러 가지가 안 바뀐다
-            q, pe, re_, t = self.solve_free_tilt(seed, point, turn, flip, tilt_max, its=FAST_ITERS, pull=0.0, home_pull=0.0)
+            q, pe, re_, t = self.solve_free_tilt(seed, point, turn, flip, tilt_max, its=FAST_ITERS, pull=0.0, home_pull=0.0, ref=ref)
             tilt = math.degrees(t)
         else:
             rot = self.hand_rot(mode, turn, flip)
             q, pe, re_ = self.solve_from(seed, point + self.dz(mode) * rot[:, 2], rot, its=FAST_ITERS)
             tilt = float(E.HAND_TILT if mode == "grasp" else 0.0)
         site, srot = self.fk(q)
+        wpos = self.wrist_pos().copy()
         self.d.qpos[self.fadr] = self.open_fingers
         self.mj.mj_kinematics(self.m, self.d)
         low = self.lowest_finger_z() - self.table_z
@@ -426,20 +502,22 @@ class _Solver:
         ok = pe <= TOL_POS and re_ <= TOL_ROT and low >= -0.001   # 손가락이 책상에 닿으면 탈락 (전체 풀이와 같음)
         return {"ok": bool(ok), "fast": True, "mode": mode, "flip": flip, "hand_turn": round(float(turn), 2), "tilt_deg": round(tilt, 1), "fixed": fix,
                 "joints": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, q)},
-                "pos_err_mm": round(float(np.linalg.norm(grip - point)) * 1000, 1), "ang_err_deg": round(math.degrees(re_), 2),
+                "pos_err_mm": round(float(np.linalg.norm((wpos if ref == "wrist" else grip) - point)) * 1000, 1), "ang_err_deg": round(math.degrees(re_), 2),
+                "ref": ref, "wrist_real": [round(float(v), 4) for v in self.to_real(wpos)], "grip_real": [round(float(v), 4) for v in self.to_real(grip)],
                 "finger_low_mm": round(low * 1000, 1), "warn": [] if low >= -0.001 else [f"손가락이 책상에 {-low * 1000:.0f} mm 파묻힘"],
                 "open_fingers_deg": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.fingers, self.open_fingers)},
                 "reason": "풀림 (빠른 풀이)" if ok else ("빠른 풀이: 손가락이 책상에 닿음" if pe <= TOL_POS and re_ <= TOL_ROT else "빠른 풀이가 못 따라감 — 손을 떼면 전체 풀이"), "ms": round((time.time() - t0) * 1000, 1)}
 
-    def why(self, mode, yaw, point, current, ranges, best, tilt_max=TILT_MAX_DEFAULT):
+    def why(self, mode, yaw, point, current, ranges, best, tilt_max=TILT_MAX_DEFAULT, ref="grip"):
         """실패 이유를 사람 말로: 위치부터 안 닿나 → 손 비틀기 서보(±88)만 풀면 되나 → 그 손 방향이 안 되나."""
         np = self.np
         self.set_ranges(ranges)
-        reach = self.position_only(self.seeds(current), point + self.dz(mode) * best["rot"][:, 2])
+        reach = (self.position_only(self.seeds(current), point, ref="wrist") if ref == "wrist"
+                 else self.position_only(self.seeds(current), point + self.dz(mode) * best["rot"][:, 2]))
         miss = best["pe"] * 1000
         if reach > TOL_POS:
             return "no_reach", f"팔이 안 닿음 (손 방향을 빼도 {reach * 1000:.0f} mm 모자람, 가장 가까운 해 {miss:.0f} mm 차이)"
-        wide, _ = self.candidates(mode, yaw, point, current, ranges, servo_unlimited=True, tilt_max=tilt_max)
+        wide, _ = self.candidates(mode, yaw, point, current, ranges, servo_unlimited=True, tilt_max=tilt_max, ref=ref)
         ok = [c for c in wide if c["pe"] <= TOL_POS and c["re"] <= TOL_ROT]
         self.set_ranges(ranges)
         if ok:
@@ -509,7 +587,8 @@ class _Solver:
         grip = site - self.dz(mode) * rot[:, 2]
         # 손 축(site z) 이 수직에서 얼마나 기울었나: PALM_DOWN(기울기 0) 이면 site z = 세계 +z
         tilt = math.degrees(math.acos(max(-1.0, min(1.0, float(rot[2, 2])))))
-        return {"ok": True, "grip_real": [round(float(v), 4) for v in self.to_real(grip)],
+        return {"ok": True, "grip_real": [round(float(v), 4) for v in self.to_real(grip)], "ref_info": self.ref_info(),
+                "wrist_real": [round(float(v), 4) for v in self.to_real(self.wrist_pos())],
                 "site_real": [round(float(v), 4) for v in self.to_real(site)], "axis_tilt_deg": round(tilt, 1)}
 
 
@@ -628,7 +707,7 @@ def solve(ik_dir, body, ranges_deg, current_deg):
             return SOLVER.call(ik_dir, {"op": "fast", "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "fix_deg": fix,
                                         "ranges_deg": ranges_deg, "seed_deg": {str(k): float(v) for k, v in seed.items()},
                                         "flip": bool(b.get("flip")), "hand_turn": float(b.get("hand_turn") or 0.0),
-                                        "tilt_max_deg": tilt_max}, timeout=10.0)
+                                        "tilt_max_deg": tilt_max, "ref": b.get("ref")}, timeout=10.0)
         except Exception as e:
             return {"ok": False, "fast": True, "reason": str(e), "kind": "error"}
     near = b.get("near_deg")   # 직전 보낸 해: 지금 팔에서 빠진 관절(서보 안 보냄)을 채우고, 이어 풀기 시작점
@@ -638,7 +717,8 @@ def solve(ik_dir, body, ranges_deg, current_deg):
         near = {}
     try:
         return SOLVER.call(ik_dir, {"op": "solve", "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "tilt_max_deg": tilt_max,
-                                    "ranges_deg": ranges_deg, "current_deg": current_deg, "fix_deg": fix, "near_deg": near})
+                                    "ranges_deg": ranges_deg, "current_deg": current_deg, "fix_deg": fix, "near_deg": near,
+                                    "ref": b.get("ref")})
     except Exception as e:
         return {"ok": False, "reason": str(e), "kind": "error"}
 
