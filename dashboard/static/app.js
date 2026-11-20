@@ -241,7 +241,7 @@ function svcState(s) {
 }
 function svcParams(id) {
   const c = cards[id];
-  return c ? Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.value])) : {};
+  return c ? Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.type === "checkbox" ? (i.checked ? "1" : "") : i.value])) : {};
 }
 function renderSteps() {
   const box = $("#conn-steps"), v = VIRT();
@@ -445,7 +445,14 @@ function buildPick(s) {
   c.log = el("pre", { class: "logbox tall" });
   c.logbox = el("details", { class: "log" }, el("summary", {}, "출력 보기"), c.log,
     el("div", { class: "row" }, el("a", { href: `/api/log/${s.id}?n=1000`, target: "_blank", class: "help" }, "로그 1000줄 보기")));
-  const params = () => Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.value]));
+  const params = () => Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.type === "checkbox" ? (i.checked ? "1" : "") : i.value]));
+  // 계획 방식: 기본 = 대시보드 해석 IK (지도와 같은 IK, 물리 없음). 체크 = 팀 계획 (pick_place, MuJoCo 물리 시뮬)
+  const pTeam = P0.team_sim || { value: "" };
+  c.fields.team_sim = el("input", { type: "checkbox" });
+  c.fields.team_sim.checked = /^(1|true|on|yes)$/i.test(String(pTeam.value || ""));
+  const teamBox = el("label", { class: "help", style: "display:inline-flex;gap:6px;align-items:center;margin:8px 0 0",
+    title: "끄면(기본) 지도와 같은 해석 IK 로 경유점을 풀어 계획 — 물리·쥐기 시뮬 없음. 켜면 팀 계획(team-jax/IK motion1 MuJoCo 물리 시뮬, 자기 IK)" },
+    c.fields.team_sim, "팀 시뮬 계획 (물리)");
   c.bStart = el("button", { class: "btn", onclick: () => post(`/api/svc/${s.id}/start`, { params: params() }) }, "▶ 계획 돌려 보기");
   c.bStop = el("button", { class: "btn red", onclick: () => post(`/api/svc/${s.id}/stop`) }, "■ 중단");
   c.result = el("div", { class: "result" });
@@ -465,7 +472,8 @@ function buildPick(s) {
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "계획 돌려 보기"),
     el("div", { class: "card" },
       el("div", { class: "row", style: "align-items:center;margin-top:0" }, c.bStart, c.bStop, c.vb, c.chip),
-      el("div", { class: "help", style: "margin:8px 0 0" }, "시뮬에서만 계획·검사한다 — 모터는 안 움직인다."),
+      teamBox,
+      el("div", { class: "help", style: "margin:8px 0 0" }, "계획·검사만 한다 — 모터는 안 움직인다. 기본 계획은 지도와 같은 IK (물리·쥐기 시뮬 없음)."),
       c.result, c.status, c.note, c.logbox));
   for (const k of ["cube_x", "cube_y", "cube_yaw", "target_x", "target_y", "d"]) c.fields[k].addEventListener("input", () => mapUpdate());
   setTimeout(() => mapUpdate(), 0);
@@ -490,7 +498,9 @@ function pickSummary(s) {
   if (s.alive) return ["⏳ 계획 중… (보통 10~30초)", "run"];
   const lines = lastRun(s);
   if (!lines.length || s.exit_code == null) return [s.available ? "아직 안 돌림 — 위 칸을 확인하고 '계획 돌려 보기'" : (s.why || ""), ""];
-  const t = T.traj, extra = t ? ` (시뮬 ${(t.positions.length * t.dt).toFixed(1)}초${t.final_error_m != null ? ` · 놓은 오차 ${(t.final_error_m * 1000).toFixed(1)} mm` : ""})` : "";
+  const t = T.traj, an = t && t.planner === "analytic";
+  const extra = t ? ` (${an ? "IK 계획" : "시뮬"} ${(t.positions.length * t.dt).toFixed(1)}초${t.final_error_m != null ? ` · 놓은 오차 ${(t.final_error_m * 1000).toFixed(1)} mm` : ""}` +
+    `${an && t.checks ? ` · 잡을 때 집는 점 오차 ${t.checks.grasp_grip_error_mm} mm · 물리 시뮬 없음` : ""})` : "";
   const fmt = (x) => `${Math.round(x)}°`.replace("-", "−");
   if (s.exit_code === 0) return ["✅ 통과: 계획·검사 모두 OK" + extra, "ok"];
   if (s.exit_code === 3) {
@@ -508,7 +518,7 @@ function pickSummary(s) {
         continue;
       }
       m = /^refused: (?!fix the above)(.*)/.exec(l);
-      if (m) { reasons.push("시뮬 실패: " + m[1]); continue; }
+      if (m) { reasons.push((t && t.planner === "analytic" ? "계획 검사 실패: " : "시뮬 실패: ") + m[1]); continue; }
       m = /^check: (?!calibration not verified)(.*)/.exec(l);
       if (m) reasons.push(m[1]);
     }
@@ -1655,7 +1665,7 @@ function renderTraj() {
   if (t) {
     const n = t.positions.length;
     T.status.textContent = `${i.mtime ? new Date(i.mtime * 1000).toLocaleTimeString() + " 계획" : "궤적"}${t.status === "playable" ? "" : " · " + t.status}`;
-    T.status.title = `궤적: ${t.status} (${t.reason || ""}) · ${n} 프레임 · sim ${(n * t.dt).toFixed(1)}초` +
+    T.status.title = `궤적${t.planner === "analytic" ? "(해석 IK 계획, 물리 없음)" : ""}: ${t.status} (${t.reason || ""}) · ${n} 프레임 · ${t.planner === "analytic" ? "" : "sim "}${(n * t.dt).toFixed(1)}초` +
       (t.final_error_m != null ? ` · 놓은 오차 ${(t.final_error_m * 1000).toFixed(1)} mm` : "");
     T.status.className = "note " + (t.status === "playable" ? "" : "warn");
     T.num.textContent = `${(T.frame * t.dt).toFixed(1)} / ${((n - 1) * t.dt).toFixed(1)}초`;

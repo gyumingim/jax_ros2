@@ -297,7 +297,8 @@ def _trajectory():
         out["error"] = f"궤적 파일을 못 읽음: {e}"
         return out
     keep = ("real", "sim", "status", "reason", "playable", "delivered_in_sim", "retries", "final_error_m",
-            "joint_names", "dt", "positions", "unit", "peak_speed_deg_s", "reach_map")
+            "joint_names", "dt", "positions", "unit", "peak_speed_deg_s", "reach_map",
+            "planner", "waypoints", "checks", "problems")   # planner = "analytic" 이면 대시보드 계획 (pick_plan.py, 물리 없음)
     out.update(ok=True, traj={k: d.get(k) for k in keep if k in d}, mtime=PICK_TRAJ.stat().st_mtime)
     if not d.get("positions"):
         out.update(ok=False, error=f"궤적 없음: {d.get('status')} ({d.get('reason')})")

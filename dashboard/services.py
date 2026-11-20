@@ -197,11 +197,15 @@ _LOCAL_PICK = "\n".join([
 
 def _pick_dry(p):
     # 계획 + 검사만(--dry-run 고정). 모터를 움직이는 실행(--dry-run 없이, --force)은 대시보드에 없다.
+    # 기본 = 대시보드 계획(dashboard/pick_plan.py: '집을 수 있는 곳' 지도와 같은 해석 IK, 물리 없음, 2026-11-20).
+    # team_sim 이 켜지면 팀 계획(pick_place: team-jax/IK motion1 MuJoCo 물리 시뮬).
     a = _pick_args(p)
     try:
         PICK_TRAJ.unlink()   # 이번 실행이 못 쓰면(팔이 못 닿음 등) 옛 궤적이 남아 보이지 않게
     except OSError:
         pass
+    if str(p.get("team_sim") or "").strip().lower() not in ("1", "true", "on", "yes"):
+        return [sys.executable, "-u", str(REPO / "dashboard" / "pick_plan.py")] + a
     if p.get("_local"):
         code = _LOCAL_PICK.format(arm=str(REPO / "arm_control"), stm=str(REPO / "stm_bridge"))
         return [sys.executable, "-u", "-c", code] + a
@@ -253,7 +257,9 @@ SERVICES = [
                     Param("result_json", "result_json", "", "…/inference.json")],
             procs=("vision_node",)),
     Service("pick_dry", "pick_place --dry-run (계획·검사만)", _pick_dry, kind="once", group="역기구학", tab="ik", tail=200, linux=False,
-            help="sim 에서 배달을 계획(planner.py, team-jax/IK motion1)하고 검사(play.check_trajectory)만 한다. "
+            help="기본: 대시보드 계획(pick_plan.py) — '집을 수 있는 곳' 지도와 같은 해석 IK 로 경유점(큐브 위 → 잡기 → 들기 → "
+                 "놓을 자리 위 → 놓기 → HOME)을 풀고 관절 보간 (물리·쥐기 시뮬 없음). '팀 시뮬 계획 (물리)' 를 켜면 "
+                 "sim 에서 배달을 계획(planner.py, team-jax/IK motion1). 둘 다 검사(play.check_trajectory)만 한다. "
                  "--dry-run 고정: 모터에 아무것도 안 보낸다. 종료코드 0 통과, 1 거절, 3 팔이 못 닿음. "
                  "계획한 궤적은 --save 로 logs/pick_dry_traj.json 에 써서 오른쪽 3D 뷰에서 재생한다.",
             params=[Param("cube_x", "cube x", "0.10", "m, +x = 로봇 왼쪽"),
@@ -263,7 +269,8 @@ SERVICES = [
                     Param("target_y", "target y", "-0.27", "m"),
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
                     Param("d", "d (선택)", "", "어깨 축~책상 m, 비우면 IK 기본"),
-                    Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK")]),
+                    Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),
+                    Param("team_sim", "팀 시뮬 계획 (물리)", "", "1 이면 팀 계획 (pick_place, MuJoCo 물리), 비우면 대시보드 해석 IK 계획")]),
     Service("vcan_test", "vcan 시험 (launch_vcan.sh)", _vcan, kind="once", group="시험",
             help="실물 없이 arm.launch.py 전체 시험. 별도 네트워크 공간의 가짜 can0 라 실제 버스·모터와 상관없다. 약 30초.",
             ),
