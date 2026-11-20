@@ -487,6 +487,29 @@ async def api_reachmap_check(req: Request):
     return JSONResponse(r, status_code=200 if r["ok"] else (404 if "없음" in r["error"] else 400))
 
 
+def _hand_ik(b, op):
+    """손 위치로 보내기: 관절 한계 = calibration 의 보낼 수 있는 범위, 시작점 = 지금 자세(가까운 해 우선)."""
+    import hand_ik
+    cal = _calibration()
+    ranges = {j["joint"]: j["cmd_range_deg"] for j in cal.get("joints") or [] if j.get("cmd_range_deg")}
+    b = b if isinstance(b, dict) else {}
+    cur = {k: v["deg"] for k, v in actual_pose(backend().snapshot(), cal).items()}
+    if op == "fk":
+        js = b.get("joints") if isinstance(b.get("joints"), dict) else cur
+        return hand_ik.fk(_ik_dir(), js, b.get("mode") or "grasp") | {"joints_used": js}
+    return hand_ik.solve(_ik_dir(), b, ranges, cur)
+
+
+@app.post("/api/ik/hand")
+async def api_ik_hand(req: Request):
+    return JSONResponse(await asyncio.to_thread(_hand_ik, await _body(req), "solve"))
+
+
+@app.post("/api/ik/fk")
+async def api_ik_fk(req: Request):
+    return JSONResponse(await asyncio.to_thread(_hand_ik, await _body(req), "fk"))
+
+
 @app.post("/api/ik/play_virtual")
 def api_ik_play():
     return JSONResponse(_play_virtual())
