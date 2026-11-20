@@ -69,11 +69,23 @@ DEFAULTS = {
     "fresh_s": 0.25,          # s    피드백이 이보다 오래되면 '끊김' (50 Hz 업로드 기준 12 개)
     "gap_keep_s": 5.0,        # s    이 안의 끊김은 홀드 유지, 넘으면 멈춤 + 원점 지움 (robot_arm AK_GAP_KEEP_S)
     "resume_ramp_deg": 2.0,   # °    끊겼다 돌아올 때 이보다 벌어졌으면 지금 자리에서 다시 램프
+    # °  짧은 끊김(≤ gap_keep_s)에서 돌아온 위치가 끊기기 전 마지막 위치와도, 홀드하던 명령과도 이보다 다르면
+    #    = 그동안 모터가 홀드를 못 했다(전원 재투입·케이블) → 엔코더 영점이 바뀌었을 수 있어 원점 지우고 지금 자리 홀드.
+    #    근거: 홀드가 살아 있으면 위치는 명령 근처(가짜 모터 < 0.5°, 움직이던 중 끊겨도 램프 지연 ~1° = 30 °/s × 0.03 s),
+    #    jump_deg 60° 보다 작은 영점 변화(예 30°)를 잡으려면 그보다 훨씬 작아야 함. 실물 홀드 오차는 미측정(가정).
+    "resume_rehome_deg": 3.0,
     "jump_deg": 60.0,         # °    피드백 튐 = 원점 의심
     "stall_deg": 12.0,        # °    막힘: 명령 − 실제
     "stall_s": 2.0,           # s    막힘이 이만큼 이어지면 힘 뺌
+    # 누르기 멈춤(바닥·물체를 작은 오차로 계속 누름 = 막힘 12° 에 안 걸리는데 전류·열만 오름, robot_arm 10-21 113 ℃):
+    # |전류| ≥ press_amps 이고 |명령 − 실제| ≥ press_deg 가 press_s 이어지면 목표를 지금 자리로 풀어 준다(힘은 유지, 안 떨어짐).
+    # 명령 하나에 한 번만(중력 처짐을 따라 계속 내려가지 않게). press_amps 0 = 끔. 3 A 는 실물 전류 미측정 상태의 가정.
+    "press_amps": 3.0,        # A
+    "press_deg": 2.0,         # °
+    "press_s": 1.0,           # s
     "temp_warn": 60.0,        # ℃
     "temp_stop": 75.0,        # ℃    그 관절 힘 뺌
+    "temp_hyst": 5.0,         # ℃    경고는 temp_warn − 이 값 아래로 식어야 풀림. 온도로 힘 뺀 관절은 temp_warn 아래에서만 원점 다시
     "max_command_deg": 360.0,  # °   ak45_node.yaml 과 같음
     "servo_resend_hz": 1.0,   # Hz   서보 마지막 값 재전송 (0 = 안 함). 펌웨어는 마지막 펄스를 유지한다
     "calib_step_max": 10.0,   # °    보정에서 한 번에 움직일 수 있는 양
@@ -131,6 +143,10 @@ class AkMotor:
         self.fault = None           # 힘 뺀 이유 (막힘·온도·에러). 원점을 다시 잡을 때 지운다
         self.note = None            # 원점 의심 등 알림
         self.temp_warn_t = 0.0
+        self.hot = False            # 온도 경고 중 (히스테리시스)
+        self.temp_fault = False     # 온도로 힘 뺌 → temp_warn 아래로 식어야 원점 다시
+        self.press_t = None         # 누르기 시작 시각
+        self.pressed = False        # 이 명령에서 이미 한 번 풀어 줌
         self.stale_logged = False
 
     def fresh(self, now, fresh_s):
@@ -171,7 +187,9 @@ class RealArm:
         self.threads = []
         self.busst = {"state": "ERROR-ACTIVE", "err_frames": 0, "bit_stuff_errors": 0, "form_errors": 0,
                       "ack_errors": 0, "busoff_count": 0, "restart_count": 0, "send_errors": 0,
-                      "last_send_error": "", "send_error_t": None, "rx_frames": 0}
+                      "last_send_error": "", "send_error_t": None, "send_fail_streak": 0, "rx_frames": 0,
+                      "rx_errors": 0, "last_rx_error": "", "rx_error_t": None, "rx_restarts": 0, "ctrl_restarts": 0, "bus_reopens": 0}
+        self._closing = False
         self.foreign = {}           # "AK45 id 2 모드 4" -> (count, monotonic)
         self.calib_dirty = False
         self.play = {"running": False}
@@ -192,6 +210,7 @@ class RealArm:
             self._unlock()
             raise
         self.running = True
+        self._closing = False
         self.started = time.time()
         self.threads = [threading.Thread(target=self._rx_loop, daemon=True, name="ak45-rx"),
                         threading.Thread(target=self._ctrl_loop, daemon=True, name="ak45-ctrl")]
@@ -210,14 +229,15 @@ class RealArm:
         if not self.running:
             return
         with self.lock:
+            # _closing: 이 뒤로 제어 루프는 위치 프레임을 안 보내고 joint_command 는 거절 → 재생 스레드가
+            # 브레이크 뒤에 위치 프레임을 다시 내보내는 레이스를 막는다
+            self._closing = True
             had = [m.name for m in self.ak.values() if m.target is not None]
             for m in self.ak.values():
                 m.target = m.cmd = None
         if brake and self.bus is not None:
-            for _ in range(3):
-                for m in self.ak.values():
-                    self._send(ak45_brake_frame(m.id))
-                time.sleep(0.01)
+            for m in self.ak.values():
+                self._brake(m)
         self.running = False
         for t in self.threads:
             t.join(timeout=1.0)
@@ -255,44 +275,119 @@ class RealArm:
             pass
 
     # ------------------------------------------------------------------ 송신
-    def _send(self, fr):
-        bus = self.bus
-        if bus is None:
-            return False
-        try:
-            bus.send(self._can.Message(arbitration_id=fr.arb_id, is_extended_id=fr.extended, data=fr.data), timeout=0.01)
-            return True
-        except Exception as e:
-            b = self.busst
-            b["send_errors"] += 1
-            b["last_send_error"] = f"{type(e).__name__}: {e}"[:160]
-            if b["send_error_t"] is None or time.monotonic() - b["send_error_t"] > 5.0:
-                self._log(f"CAN 송신 실패: {b['last_send_error']} (can0 DOWN·bus-off·버퍼 가득?)")
-            b["send_error_t"] = time.monotonic()
-            return False
+    def _send(self, fr, retries=0):
+        """한 프레임. retries: 실패(ENOBUFS = can0 송신 큐 가득, txqueuelen 기본 10 등)면 2 ms 쉬고 다시."""
+        for k in range(retries + 1):
+            bus = self.bus
+            if bus is None:
+                return False
+            try:
+                bus.send(self._can.Message(arbitration_id=fr.arb_id, is_extended_id=fr.extended, data=fr.data), timeout=0.01)
+                self.busst["send_fail_streak"] = 0
+                return True
+            except Exception as e:
+                b = self.busst
+                b["send_errors"] += 1
+                b["send_fail_streak"] += 1
+                b["last_send_error"] = f"{type(e).__name__}: {e}"[:160]
+                if b["send_error_t"] is None or time.monotonic() - b["send_error_t"] > 5.0:
+                    self._log(f"CAN 송신 실패: {b['last_send_error']} (can0 DOWN·bus-off·버퍼 가득?)")
+                b["send_error_t"] = time.monotonic()
+                if k < retries:
+                    time.sleep(0.002)
+        return False
+
+    def _brake(self, m, n=3):
+        """브레이크 0 A 를 n 번, 2 ms 간격 + 프레임마다 재시도(한꺼번에 쏟아 송신 큐를 넘치지 않게). 반환: 나간 개수."""
+        ok = 0
+        for k in range(n):
+            if self._send(ak45_brake_frame(m.id), retries=3):
+                ok += 1
+            if k < n - 1:
+                time.sleep(0.002)
+        if ok == 0:
+            m.note = "브레이크 프레임 못 보냄(CAN 송신 실패) — 위치 프레임은 멈췄음, 팔 받치고 버스 확인"
+            self._log(f"{m.name} ⚠ {m.note}")
+        return ok
 
     # ------------------------------------------------------------------ rx
+    def _rx_problem(self, where, e):
+        b = self.busst
+        now = time.monotonic()
+        b["rx_errors"] += 1
+        b["last_rx_error"] = f"{where}: {type(e).__name__}: {e}"[:160]
+        if b["rx_error_t"] is None or now - b["rx_error_t"] > 5.0:     # 로그는 5 s 에 한 줄 (can0 DOWN 때 폭주 막기)
+            self._log(f"CAN {b['last_rx_error']} (누적 {b['rx_errors']}개, 5 s 마다 한 줄만 기록)")
+        b["rx_error_t"] = now
+
     def _rx_loop(self):
+        """몸통 전체를 보호: 프레임 하나 처리 중 예외가 나도 스레드는 산다(죽으면 피드백이 끊겨 5 s 뒤 팔이 떨어진다).
+        recv 가 1 s 넘게 계속 실패하면(USB-CAN 이 빠졌다 다시 꽂힘 등) 버스를 다시 연다(2 s 마다 시도)."""
+        fail_since, reopen_t = None, 0.0
         while self.running:
             try:
                 msg = self.bus.recv(0.02)
             except Exception as e:
-                if self.running:
-                    self._log(f"CAN 수신 오류: {type(e).__name__}: {e}")
-                    time.sleep(0.2)
+                if not self.running:
+                    break
+                self._rx_problem("수신 오류", e)
+                now = time.monotonic()
+                fail_since = fail_since or now
+                if now - fail_since > 1.0 and now - reopen_t > 2.0:
+                    reopen_t = now
+                    self._reopen_bus()
+                time.sleep(0.1)
                 continue
+            fail_since = None
             if msg is None:
                 continue
-            now = time.monotonic()
-            self.busst["rx_frames"] += 1
-            if msg.is_error_frame:
-                self._on_error_frame(msg)
+            try:
+                now = time.monotonic()
+                self.busst["rx_frames"] += 1
+                if msg.is_error_frame:
+                    self._on_error_frame(msg)
+                    continue
+                st = parse_ak45_feedback(msg.arbitration_id, msg.is_extended_id, bytes(msg.data))
+                if st is not None:
+                    self._on_feedback(st, now)
+                    continue
+                self._on_foreign(msg, now)
+            except Exception as e:
+                self._rx_problem("수신 처리 오류", e)
+
+    def _reopen_bus(self):
+        try:
+            new = self._can.Bus(interface=self.interface, channel=self.channel)
+        except Exception as e:
+            self._rx_problem("버스 다시 열기 실패", e)
+            return False
+        if not self.running:
+            new.shutdown()
+            return False
+        old, self.bus = self.bus, new
+        self.busst["bus_reopens"] += 1
+        try:
+            old.shutdown()
+        except Exception:
+            pass
+        self._log(f"CAN 버스 다시 엶 ({self.interface} {self.channel}, {self.busst['bus_reopens']}번째) — 짧은 끊김은 홀드 유지")
+        return True
+
+    def _check_threads(self):
+        """죽은 rx / control 스레드를 다시 띄운다(제어 루프와 snapshot 이 부름)."""
+        if not self.running or self._closing:
+            return
+        for i, (target, name) in enumerate(((self._rx_loop, "ak45-rx"), (self._ctrl_loop, "ak45-ctrl"))):
+            t = self.threads[i] if i < len(self.threads) else None
+            if t is not None and t.is_alive():
                 continue
-            st = parse_ak45_feedback(msg.arbitration_id, msg.is_extended_id, bytes(msg.data))
-            if st is not None:
-                self._on_feedback(st, now)
+            if t is not None and t is threading.current_thread():
                 continue
-            self._on_foreign(msg, now)
+            nt = threading.Thread(target=target, daemon=True, name=name)
+            self.threads[i] = nt
+            self.busst["rx_restarts" if i == 0 else "ctrl_restarts"] += 1
+            self._log(f"⚠ {name} 스레드가 죽어 있어 다시 띄움 (예외로 끝남?)")
+            nt.start()
 
     def _on_error_frame(self, msg):
         cid, d = msg.arbitration_id, bytes(msg.data) + bytes(8)
@@ -353,6 +448,17 @@ class RealArm:
             if text:
                 self._log(text)
             jump = old is not None and abs(m.pos - old) > P["jump_deg"]
+            back = not was_fresh and gap is not None          # 끊겼다(fresh_s 넘게) 돌아온 첫 피드백
+            # 짧은 끊김인데 위치가 끊기기 전 자리·홀드 명령 어느 쪽과도 resume_rehome_deg 넘게 다름 = 그동안 홀드 못 함
+            # (전원 재투입이면 엔코더 영점이 60° 미만으로 바뀌어도 homing.feedback 은 못 알아챈다)
+            moved = None
+            if back and not jump and old is not None and gap <= P["gap_keep_s"]:
+                moved = abs(m.pos - old) if m.cmd is None else min(abs(m.pos - old), abs(m.pos - m.cmd))
+                if moved <= P["resume_rehome_deg"]:
+                    moved = None
+            if moved is not None and self._unhome(m.name, f"피드백 {gap:.1f}s 끊김 뒤 {moved:.1f}° 다른 자리(전원 재투입?) — 원점 다시 잡기"):
+                self._log(f"{m.name} ⚠ 피드백 {gap:.2f}s 끊김 뒤 위치 {old:+.1f}° → {m.pos:+.1f}° ({moved:.1f}° > "
+                          f"{P['resume_rehome_deg']:g}°): 원점 지움")
             if m.target is not None:
                 if jump:
                     # robot_arm: 응답은 이어지는데 위치만 튐 = 밀려 넘어감 또는 전원 재투입 → 지금 자리 다시 홀드, 원점 의심
@@ -360,27 +466,38 @@ class RealArm:
                     m.vel = 0.0
                     m.note = f"위치 튐 {old:+.1f}° → {m.pos:+.1f}°: 지금 자리 홀드, 원점 다시 잡기"
                     self._log(f"{m.name} ⚠ {m.note}")
-                elif not was_fresh and gap is not None:
-                    if m.cmd is not None and gap <= P["gap_keep_s"]:
+                    self._play_abort(m, m.note)
+                elif back:
+                    if m.cmd is not None and gap <= P["gap_keep_s"] and moved is None:
                         off = m.pos - m.cmd
                         if abs(off) > P["resume_ramp_deg"]:
                             m.cmd, m.vel = m.pos, 0.0
                         self._log(f"{m.name} 피드백 {gap:.2f}s 끊겼다 돌아옴 — 그동안 홀드 계속 보냄, 지금 {m.pos:+.1f}°"
                                   + (f" (명령과 {off:+.1f}° → 지금 자리에서 다시 램프)" if abs(off) > P["resume_ramp_deg"] else ""))
-                    elif m.cmd is None:
-                        # 긴 끊김(> gap_keep_s) 뒤: 옛 목표로 가지 않고 지금 자리 홀드. 원점은 지워져 있음
+                    else:
+                        # 긴 끊김(> gap_keep_s — 제어 루프가 아직 cmd 를 안 지운 경계 순간 포함), 또는 짧은 끊김인데 자리가 바뀜:
+                        # 옛 목표로 가지 않고 지금 자리 홀드. 원점은 지워져 있음(homing.feedback 또는 위)
                         m.target = m.cmd = m.pos
                         m.vel = 0.0
-                        m.note = f"피드백 {gap:.1f}s 끊김 뒤 돌아옴(전원 재투입?): 지금 자리 홀드, 원점 다시 잡기"
+                        m.note = (f"피드백 {gap:.1f}s 끊김 뒤 돌아옴(전원 재투입?)"
+                                  + (f", {moved:.1f}° 다른 자리" if moved is not None else "") + ": 지금 자리 홀드, 원점 다시 잡기")
                         self._log(f"{m.name} ⚠ {m.note}")
+                        self._play_abort(m, m.note)
                     m.stale_logged = False
             # 온도 / 에러 코드
+            if m.temp is not None:
+                if m.temp >= P["temp_warn"]:
+                    if not m.hot or now - m.temp_warn_t > 30.0:
+                        self._log(f"{m.name} ⚠ 온도 {m.temp} ℃ ≥ {P['temp_warn']:g} ℃ — 오래 홀드·막힘 확인")
+                        m.temp_warn_t = now
+                    m.hot = True
+                elif m.hot and m.temp <= P["temp_warn"] - P["temp_hyst"]:
+                    m.hot = False
+                    self._log(f"{m.name} 온도 {m.temp} ℃ — 경고 풀림")
             if m.temp is not None and m.temp >= P["temp_stop"]:
                 if m.target is not None or m.fault is None:
                     self._fault(m, f"온도 {m.temp} ℃ ≥ {P['temp_stop']:g} ℃")
-            elif m.temp is not None and m.temp >= P["temp_warn"] and now - m.temp_warn_t > 30.0:
-                m.temp_warn_t = now
-                self._log(f"{m.name} ⚠ 온도 {m.temp} ℃ ≥ {P['temp_warn']:g} ℃ — 오래 홀드·막힘 확인")
+                    m.temp_fault = True
             if m.err and (m.target is not None or m.fault is None):
                 self._fault(m, f"에러 코드 {m.err} ({AK45_ERRORS.get(m.err, '?')})")
 
@@ -394,19 +511,21 @@ class RealArm:
     def _limp_motor(self, m, reason, brake=True):
         had = m.target is not None
         m.target = m.cmd = None
-        m.vel, m.stall_t = 0.0, None
+        m.vel, m.stall_t, m.press_t = 0.0, None, None
         if brake and had:
-            for _ in range(3):
-                self._send(ak45_brake_frame(m.id))
+            self._brake(m)
         self._unhome(m.name, reason + " — 원점 다시 잡기")
         return had
+
+    def _play_abort(self, m, reason):
+        if self.play.get("running"):
+            self._play_bad = self._play_bad or f"{m.name}: {reason}"
 
     def _fault(self, m, reason):
         m.fault = reason
         had = self._limp_motor(m, f"힘 뺌: {reason}")
         self._log(f"{m.name} ✖ {reason} — {'힘 뺌(브레이크 0 A, 팔이 내려갈 수 있음)' if had else '명령 금지'}")
-        if self.play.get("running"):
-            self._play_bad = f"{m.name}: {reason}"
+        self._play_abort(m, reason)
 
     # ------------------------------------------------------------------ control 50 Hz
     def _ctrl_loop(self):
@@ -422,13 +541,21 @@ class RealArm:
                 with self.lock:
                     self._tick(now, dt)
             except Exception as e:
-                self._log(f"제어 루프 오류: {type(e).__name__}: {e}")
+                if now - getattr(self, "_tick_err_t", 0.0) > 5.0:
+                    self._tick_err_t = now
+                    self._log(f"제어 루프 오류: {type(e).__name__}: {e}")
+            try:
+                self._check_threads()
+            except Exception:
+                pass
             time.sleep(max(0.0, nxt - time.monotonic()))
             if time.monotonic() - nxt > 0.5:
                 nxt = time.monotonic()
 
     def _tick(self, now, dt):
         P = self.p
+        if self._closing:          # close() 중: 브레이크 뒤에 위치 프레임이 나가지 않게
+            return
         for text in self.homing.check_lost(now):
             self._log(text)
         hold_dt = 1.0 / P["hold_hz"]
@@ -456,6 +583,19 @@ class RealArm:
                     m.cmd += step
                 # carrot: 명령은 측정 ± carrot 안. 평소엔 안 걸리는 최후 방어선(런어웨이 차단)
                 m.cmd = max(m.pos - P["carrot"], min(m.pos + P["carrot"], m.cmd))
+                # 누르기 멈춤: 큰 전류 + 작은(막힘 기준 아래) 오차가 이어짐 → 목표를 지금 자리로(힘 유지). 명령 하나에 한 번
+                if (P["press_amps"] > 0 and not m.pressed and m.cur is not None and abs(m.cur) >= P["press_amps"]
+                        and abs(m.cmd - m.pos) >= P["press_deg"]):
+                    m.press_t = m.press_t or now
+                    if now - m.press_t > P["press_s"]:
+                        m.note = (f"누르기 멈춤: 전류 {m.cur:+.2f} A · 명령−실제 {m.cmd - m.pos:+.1f}° 가 {P['press_s']:g}s — "
+                                  f"목표를 지금 자리 {m.pos:+.1f}° 로 풀어 줌(힘 유지). 바닥·물체 확인")
+                        self._log(f"{m.name} ⚠ {m.note}")
+                        m.target = m.cmd = m.pos
+                        m.vel, m.press_t, m.stall_t, m.pressed = 0.0, None, None, True
+                        self._play_abort(m, m.note)
+                else:
+                    m.press_t = None
                 if abs(m.cmd - m.pos) > P["stall_deg"]:
                     m.stall_t = m.stall_t or now
                     if now - m.stall_t > P["stall_s"]:
@@ -509,6 +649,8 @@ class RealArm:
 
     # ------------------------------------------------------------------ 명령 (대시보드가 부름)
     def _ready(self):
+        if self._closing:
+            return "연결 닫는 중"
         return None if self.running else "팔 연결 안 됨 (직접 CAN) — 연결 탭 ② 팔 연결"
 
     def send_joint_command(self, names, positions):
@@ -529,6 +671,8 @@ class RealArm:
         now = time.monotonic()
         refused, done, clipped = [], [], []
         with self.lock:
+            if self._closing:
+                return {"ok": False, "error": "연결 닫는 중"}
             for n, p in zip(names, positions):
                 j = self.joints[n]
                 mdeg, cl = j.to_motor(math.degrees(p))
@@ -551,6 +695,8 @@ class RealArm:
                 else:
                     if m.target is None:
                         self._log(f"{m.name} 첫 명령({_source}): {raw:.2f}° (지금 {m.pos:+.2f}°에서 램프)")
+                    if m.target is None or abs(raw - m.target) > 0.05:
+                        m.pressed = False      # 새 목표: 누르기 멈춤 다시 허용
                     m.target = raw
                     m.note = None
                     done.append(n)
@@ -596,11 +742,10 @@ class RealArm:
         self._play_stop.set()
         with self.lock:
             ms = [self.ak[n] for n in (names or list(self.ak))]
-            had = [m.name for m in ms if self._limp_motor(m, "힘 뺌(사용자)")]
+            had = [m.name for m in ms if self._limp_motor(m, "힘 뺌(사용자)", brake=False)]
             for m in ms:
-                for _ in range(3):
-                    self._send(ak45_brake_frame(m.id))
                 m.note = None
+                self._brake(m)          # 홀드 안 하던 모터에도 (3번, 2 ms 간격, 재시도). 실패면 m.note 에 남음
         text = f"힘 뺌: {', '.join(had) or '홀드 중인 AK45 없었음'} — 브레이크 0 A, 원점 지움. 서보는 마지막 각 유지(펌웨어에 끄기 없음)"
         self._log(text)
         return {"ok": True, "msg": text}
@@ -637,8 +782,8 @@ class RealArm:
         with self.lock:
             for n in names:
                 m = self.ak[n]
-                if m.temp is not None and m.temp >= self.p["temp_stop"]:
-                    texts.append(f"{m.joint.joint}: 거절, 온도 {m.temp} ℃ (식힌 뒤)")
+                if m.temp is not None and (m.temp >= self.p["temp_stop"] or (m.temp_fault and m.temp >= self.p["temp_warn"])):
+                    texts.append(f"{m.joint.joint}: 거절, 온도 {m.temp} ℃ (온도로 힘 뺀 관절은 {self.p['temp_warn']:g} ℃ 아래로 식힌 뒤)")
                     ok = False
                     continue
                 if m.err:
@@ -650,6 +795,7 @@ class RealArm:
                 ok = ok and good
                 if good:
                     m.fault = m.note = None
+                    m.temp_fault = m.pressed = False
                     m.target = m.cmd = m.pos     # 원점 잡는 순간 지금 자리에서 홀드 시작(guard 와 같음)
                     m.vel = 0.0
         msg = "; ".join(texts) or "원점 없는 관절 없음 (전부 잡힘)"
@@ -701,11 +847,14 @@ class RealArm:
                         return {"ok": False, "error": f"{m.name}: {m.fault} — 원점을 다시 잡아 풀기"}
                     if not m.fresh(now, self.p["fresh_s"]):
                         return {"ok": False, "error": f"{m.name}: 피드백 없음/끊김 — 안 움직임"}
-                    base = m.target if m.target is not None else m.pos
+                    # 기준 = 측정 위치(목표가 아님): 막혀서 안 따라오는 관절에 클릭이 쌓여 목표가 ±10° 를 넘어가지 않게.
+                    # 결과적으로 |목표 − 측정| ≤ calib_step_max
+                    base = m.pos
                     new = base + dv
                     if abs(new) > self.p["max_command_deg"]:
                         return {"ok": False, "error": f"모터 {new:.1f}° 가 ±{self.p['max_command_deg']:g}° 밖"}
                     m.target = new
+                    m.pressed = False
                     text = f"보정 {j.joint}({m.name}): 모터 {base:+.2f}° → {new:+.2f}° (지금 {m.pos:+.2f}°)"
                 else:
                     cur = self.servo_mover.current.get(j.joint)
@@ -768,7 +917,7 @@ class RealArm:
         if not_homed:
             return {"ok": False, "error": "원점 없는 AK45: " + ", ".join(not_homed) + " — 각도 제어 탭에서 원점 먼저"}
         speed = min(float(max_speed), self.p["max_speed"])
-        period, slow, peak = P.schedule(traj, speed)
+        period, slow, peak = P.schedule(traj, speed)     # play.play 는 안 쓴다(아래 play_loop)
         n = len(traj["positions"])
         motors = [(k, self.joints[nm]) for k, nm in enumerate(names) if self.joints[nm].motor == "ak45"]
         tracker = TrackingWatch(max_error)
@@ -798,12 +947,46 @@ class RealArm:
                     fb[nm] = self.homing.from_raw(nm, m.pos) if m.fresh(now, self.p["fresh_s"]) and m.pos is not None else None
             return tracker.check(exp, fb, now)
 
+        def step(frame):
+            """멈춤 확인과 보내기를 한 잠금 안에서: hold_all(STOP)은 이벤트를 먼저 켜고 잠금을 잡으므로, STOP 뒤에
+            프레임 하나가 목표를 덮어쓰는 레이스가 없다."""
+            with self.lock:
+                if self._play_stop.is_set():
+                    return "stopped"
+                if self._play_bad:
+                    return self._play_bad
+                publish(names, frame)
+            return None
+
+        def play_loop():
+            # arm_control.play.play 와 같은 순서(첫 프레임 hold 초 동안 0.1 s 마다, 그 뒤 period 마다 + watch)인데,
+            # 첫 프레임 홀드 동안에도 멈춤·고장을 본다(play.play 의 홀드 루프는 stop 을 안 봐서 STOP 뒤에도 첫 프레임으로 다시 감).
+            # 홀드 동안 TrackingWatch 는 안 본다(첫 프레임으로 가는 중이라 오차가 큼 — play.play 와 같음).
+            frames = traj["positions"]
+            for _ in range(max(1, int(hold * 10))):
+                r = step(frames[0])
+                if r:
+                    return r
+                if self._play_stop.wait(0.1):
+                    return "stopped"
+            for frame in frames[1:]:
+                r = step(frame)
+                if r:
+                    return r
+                if self._play_stop.wait(period):
+                    return "stopped"
+                r = watch(frame)
+                if r:
+                    return r
+            return None
+
         def run():
             try:
-                reason = P.play(publish, traj, speed, hold, stop=self._play_stop, watch=watch)
+                reason = play_loop()
             except Exception as e:
                 reason = f"{type(e).__name__}: {e}"
-            if reason and reason != "stopped":
+            if reason:
+                # "stopped"(STOP·재생 멈춤 버튼) 포함: 마지막으로 보낸 프레임 쪽으로 계속 가지 않게 지금 자리 홀드
                 self.hold_all(f"재생 멈춤({reason})")
             self.play.update(running=False, reason=reason or "끝까지 재생", ended=time.time())
             self._log(f"실물 궤적 재생 끝: {reason or '끝까지 (마지막 프레임 홀드)'}")
@@ -818,6 +1001,10 @@ class RealArm:
 
     # ------------------------------------------------------------------ 상태 (RosMonitor.snapshot 과 같은 모양)
     def snapshot(self):
+        try:
+            self._check_threads()      # 죽은 스레드 다시 띄우기(제어 스레드가 죽은 경우는 여기서만 잡힘)
+        except Exception:
+            pass
         now_m, now = time.monotonic(), time.time()
         P = self.p
         with self.lock:
@@ -835,8 +1022,8 @@ class RealArm:
                     lv, msg = 2, f"에러 코드 {m.err} ({AK45_ERRORS.get(m.err, '?')})"
                 elif m.note:
                     lv, msg = 1, m.note
-                elif m.temp is not None and m.temp >= P["temp_warn"]:
-                    lv, msg = 1, f"온도 높음 {m.temp} ℃"
+                elif m.hot:
+                    lv, msg = 1, f"온도 높음 {m.temp} ℃ (경고는 {P['temp_warn'] - P['temp_hyst']:g} ℃ 아래로 식으면 풀림)"
                 else:
                     lv, msg = 0, "정상"
                 vals = {"position_deg": "—" if m.pos is None else f"{m.pos:.2f}",
@@ -860,12 +1047,26 @@ class RealArm:
             b = dict(self.busst)
             blv = 0 if b["state"] == "ERROR-ACTIVE" else (2 if b["state"] == "BUS-OFF" else 1)
             recent_send_err = b["send_error_t"] is not None and now_m - b["send_error_t"] < 3.0
-            if recent_send_err:
+            recent_rx_err = b["rx_error_t"] is not None and now_m - b["rx_error_t"] < 5.0
+            alive = {name: (i < len(self.threads) and self.threads[i].is_alive())
+                     for i, name in enumerate(("rx", "ctrl"))}
+            dead = [n for n, a in alive.items() if not a] if self.running else []
+            problems = []
+            if dead:
+                problems.append("스레드 죽음: " + ", ".join({"rx": "수신(rx)", "ctrl": "제어"}[n] for n in dead)
+                                + " — 피드백·홀드가 멈춤, 팔 받치기")
+            if b["send_fail_streak"] >= 10:
+                problems.append(f"송신 연속 실패 {b['send_fail_streak']}개: {b['last_send_error']}")
+            elif recent_send_err:
+                problems.append(f"송신 실패: {b['last_send_error']} (누적 {b['send_errors']})")
+            if recent_rx_err:
+                problems.append(f"수신 오류: {b['last_rx_error']} (누적 {b['rx_errors']})")
+            if problems:
                 blv = 2
             bus = {"name": "ak45/can_bus", "level": blv, "hardware_id": f"{self.channel} ({self.interface})",
-                   "message": (f"송신 실패: {b['last_send_error']}" if recent_send_err else
-                               "정상" if blv == 0 else f"{b['state']}"),
-                   "values": {k: str(v) for k, v in b.items() if k not in ("send_error_t",)}, "t": now, "age": 0.0}
+                   "message": (" · ".join(problems) if problems else "정상" if blv == 0 else f"{b['state']}"),
+                   "values": {k: str(v) for k, v in b.items() if k not in ("send_error_t", "rx_error_t")},
+                   "threads": alive, "t": now, "age": 0.0}
             hs = self.homing.status(now_m)
             hj = [dict(j, joint=jn) for jn, j in hs["joints"].items()]
             for row in hj:
