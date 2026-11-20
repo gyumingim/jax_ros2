@@ -34,6 +34,8 @@ TILT_MAX_DEFAULT = 60.0       # auto 의 기울기 상한 (°)
 AUTO_TILT_INITS = (0.0, -40.0, 40.0)   # auto: 시작 기울기(처음 120 번 묶음) — 가지 고르기
 TIE_DEG = 2.0                 # 해 고르기: 최소 회전에서 이 각 안이면 동률 → 손 기울기 수직에 가까운 것
 TILT_PULL = 0.05              # auto: 남는 자유도로 기울기를 0 쪽으로 당기는 세기 (한 반복에 t 의 몇 배)
+TOL_ANALYTIC = 0.0005         # 해석 IK 해의 MuJoCo FK 검증 (손목 중앙 0.5 mm)
+A3 = ("shoulder_roll", "upper_arm_roll", "elbow")   # 해석 IK 가 푸는 관절 (shoulder_yaw 고정, 손목 3 관절 지금 값)
 
 
 # ============================================================ worker (자식 프로세스)
@@ -69,6 +71,7 @@ class _Solver:
         self.open_fingers = env.finger_targets(0.0)
         self.d.qpos[self.fadr] = self.open_fingers
         self._init_wrist()
+        self.analytic = None
 
     def _init_wrist(self):
         """손목 중앙 = 손목 굽힘(wrist_yaw) 축과 손목 비틀기(wrist_pitch) 축의 교점. arm.xml 에서 두 축은 직교하고 만난다
@@ -80,7 +83,9 @@ class _Solver:
         d.qpos[self.qadr] = np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
         mj.mj_kinematics(m, d)
         p1, a1, p2, a2 = d.xanchor[wp], d.xaxis[wp], d.xanchor[wy], d.xaxis[wy]
-        w, bb = p2 - p1, float(a1 @ a2)
+        # 두 직선의 가장 가까운 점(wrist_yaw 축 위): w = p1 - p2 (2026-11-20 고침: 예전엔 p2 - p1 이라 부호가 뒤집혀
+        # 교점의 반대쪽 40 mm — wrist_pitch 축에서 40 mm 떨어진 점 — 을 썼다. 높이(손 축 방향)는 같고 옆으로만 달랐다)
+        w, bb = p1 - p2, float(a1 @ a2)
         t2 = (float(a1 @ a1) * float(a2 @ w) - bb * float(a1 @ w)) / (float(a1 @ a1) * float(a2 @ a2) - bb * bb)
         x = p2 + t2 * a2
         self.wrist_off = d.xmat[self.wbody].reshape(3, 3).T @ (x - d.xpos[self.wbody])
@@ -293,6 +298,47 @@ class _Solver:
 
     WRIST3 = ("wrist_pitch", "wrist_yaw", "hand_roll")
 
+    def use_analytic(self, mode, ref, lim):
+        """손 각도 무시 + 손목 중앙 기준 + shoulder_yaw 고정(범위 [v, v]) + 나머지 3 관절은 움직임 → 해석 IK.
+        JAX_IK_NUMERIC=1 이면 예전 수치 방식(비교용)."""
+        if mode != "position" or ref != "wrist" or os.environ.get("JAX_IK_NUMERIC") == "1":
+            return False
+        w = lim[:, 1] - lim[:, 0]
+        return w[self.arm.index("shoulder_yaw")] < 1e-9 and all(w[self.arm.index(n)] > 1e-9 for n in A3)
+
+    def analytic_position(self, point, hold, lim):
+        """analytic_ik.solve3 로 손목 중앙 = point 인 (shoulder_roll, upper_arm_roll, elbow) 해를 모두. 기하는 지금 모델에서
+        (shoulder_yaw = 고정값, 손목 3 관절 = hold). 관절 범위 안(±360° 도 범위 안이면 별개 해) + MuJoCo FK 오차 < 0.5 mm 만.
+        돌려줌 (q 목록, 범위 거르기 전 해 수)."""
+        import itertools
+        from analytic_ik import solve3
+        np, mj, m, d = self.np, self.mj, self.m, self.d
+        idx = [self.arm.index(n) for n in A3]
+        q0 = np.array(hold, dtype=float)
+        q0[idx] = 0.0
+        q0[self.arm.index("shoulder_yaw")] = lim[self.arm.index("shoulder_yaw"), 0]
+        d.qpos[self.qadr] = q0
+        mj.mj_kinematics(m, d)
+        g = []
+        for n in A3:
+            j = m.joint(n).id
+            g += [d.xanchor[j].copy(), d.xaxis[j].copy() / np.linalg.norm(d.xaxis[j])]
+        g.append(self.wrist_pos().copy())
+        raw = solve3(tuple(g), np.asarray(point, dtype=float))
+        out = []
+        for q3, _ in raw:
+            opts = []
+            for k, i in enumerate(idx):
+                opts.append([v for v in (q3[k] - 2 * math.pi, q3[k], q3[k] + 2 * math.pi) if lim[i, 0] - 1e-9 <= v <= lim[i, 1] + 1e-9])
+            for combo in itertools.product(*opts):
+                q = q0.copy()
+                q[idx] = np.clip(combo, lim[idx, 0], lim[idx, 1])
+                d.qpos[self.qadr] = q
+                mj.mj_kinematics(m, d)
+                if float(np.linalg.norm(self.wrist_pos() - point)) < TOL_ANALYTIC:
+                    out.append(q)
+        return out, len(raw)
+
     def solve_position(self, seed, point, ref, its=300):
         """손 각도 무시: 기준점(손목 중앙 / site) 위치 3 만 맞춘다. 손목 3 관절은 seed 값 그대로(움직이지 않음),
         앞 4 관절(범위 [v, v] 로 묶인 고정 관절은 그대로)로만. 돌려줌 (q, 위치 오차 m)."""
@@ -336,6 +382,16 @@ class _Solver:
         if mode == "position":
             # 손목 3 관절 = 지금 값(current, 없으면 HOME) 그대로. 시작점: 직전 보낸 해·지금·HOME·0 의 앞 4 관절
             hold = current if current is not None else np.asarray(self.E.HOME_ARM_QPOS, dtype=float)
+            if self.use_analytic(mode, ref, lim):
+                qs, n_raw = self.analytic_position(point_sim, np.clip(hold, lim[:, 0], lim[:, 1]), lim)
+                self.analytic = {"n_raw": n_raw, "n": len(qs)}
+                for q in qs:
+                    _, rot = self.fk(q)
+                    out.append({"q": q, "pe": float(np.linalg.norm(self.wrist_pos() - point_sim)), "re": 0.0, "turn": 0.0, "flip": False,
+                                "rot": rot, "tilt": self.axis_tilt(rot), "analytic": True})
+                if qs:
+                    return out, lim
+                # 해가 없으면(안 닿음) 가장 가까운 자세·이유를 위해 예전 수치 풀이도 (수치가 풀면 analytic_miss = 해석 쪽 버그)
             wi = [self.arm.index(n) for n in self.WRIST3]
             for s0 in ([near] if near is not None else []) + self.seeds(current):
                 s0 = np.array(s0, dtype=float); s0[wi] = hold[wi]
@@ -441,7 +497,9 @@ class _Solver:
         point = np.asarray(self.to_sim(p))
         t0 = time.time()
         pref = "wrist" if b.get("ref") == "wrist" else "grip"   # 기준점: 손목 중앙 / 손가락 사이(집는 점)
+        self.analytic = None
         cands, lim = self.candidates(mode, yaw, point, current, ranges, tilt_max=tilt_max, near=near, ref=pref)
+        an = self.analytic
         ref = current if current is not None else np.asarray(E.HOME_ARM_QPOS)
         tol_p, tol_r = TOL_POS, TOL_ROT   # env.reachable 과 같은 5 mm, 손 방향 1.5°
         good = [c for c in cands if c["pe"] <= tol_p and c["re"] <= tol_r]
@@ -489,6 +547,8 @@ class _Solver:
                    site_real=[round(float(v), 4) for v in self.to_real(site)],
                    n_good=len(good), n_tried=len(cands), from_current=current is not None,
                    open_fingers_deg={n: round(math.degrees(float(v)), 2) for n, v in zip(self.fingers, self.open_fingers)})
+        if an is not None:
+            out.update(self.analytic_info(an, cands, ref, best))
         warn = []
         if out["ok"] and best["low"] < -0.001:
             warn.append(f"손가락이 책상에 {-best['low'] * 1000:.0f} mm 파묻힘 (벌린 손가락 기준) — 더 높게")
@@ -499,6 +559,25 @@ class _Solver:
             out["kind"], out["reason"] = self.why(mode, yaw, point, current, ranges, best, tilt_max, ref=pref)
         out["ms"] = round((time.time() - t0) * 1000)
         return out
+
+    def analytic_info(self, an, cands, ref, best):
+        """결과에 붙일 해석 IK 정보: method, n_solutions(범위 안 + FK 검증된 해), 해 목록(고른 순서: 손가락 OK → 최소 회전)."""
+        np = self.np
+        sol = [c for c in cands if c.get("analytic")]
+        for c in sol:
+            if "low" not in c:
+                self.fk(c["q"]); self.d.qpos[self.fadr] = self.open_fingers
+                self.mj.mj_kinematics(self.m, self.d)
+                c["low"] = self.lowest_finger_z() - self.table_z
+        sol.sort(key=lambda c: (not c is best, c["low"] < -0.001, float(np.abs(c["q"] - ref).max()), float(np.abs(c["q"] - ref).sum())))
+        # 해석 해가 없는데 수치가 0.5 mm 안으로 맞추면 해석 쪽 버그(놓친 해). 한계에 붙어 0.5~5 mm 로 '풀림' 인 수치 해는 정상
+        # (정확한 해는 범위 밖, 한계에서 가장 가까운 자세 — 그대로 수치 해를 쓴다)
+        miss = an["n"] == 0 and any(c["pe"] <= TOL_ANALYTIC for c in cands)
+        return {"method": "analytic", "n_solutions": an["n"], "n_raw": an["n_raw"], "analytic_miss": bool(miss),
+                "solutions": [{"joints": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, c["q"])},
+                               "max_move_deg": round(math.degrees(float(np.abs(c["q"] - ref).max())), 1),
+                               "finger_low_mm": round(c["low"] * 1000, 1), "finger_ok": bool(c["low"] >= -0.001),
+                               "pos_err_mm": round(c["pe"] * 1000, 3), "chosen": c is best} for c in sol]}
 
     def fast(self, b):
         """드래그 중 빠른 풀이: 직전 해(seed_deg)에서 한 번만, 같은 손 모양(flip)·가장 가까운 손 돌림으로. 반복 FAST_ITERS."""
@@ -523,7 +602,30 @@ class _Solver:
         point = np.asarray(self.to_sim(p))
         seed = np.clip(np.radians([float(seed_d[n]) for n in self.arm]), lim[:, 0], lim[:, 1])
         ref = "wrist" if b.get("ref") == "wrist" else "grip"
-        if mode == "position":   # 손목 3 관절은 seed(직전 해) 값 그대로
+        an = None
+        if self.use_analytic(mode, ref, lim):   # 전체 풀이와 같은 해석 IK, 기준 자세 = seed(직전 해)
+            qs, n_raw = self.analytic_position(point, seed, lim)
+            cands = []
+            for q in qs:
+                self.fk(q); self.d.qpos[self.fadr] = self.open_fingers
+                self.mj.mj_kinematics(self.m, self.d)
+                cands.append({"q": q, "pe": float(np.linalg.norm(self.wrist_pos() - point)), "low": self.lowest_finger_z() - self.table_z,
+                              "dist": float(np.abs(q - seed).max()), "sum": float(np.abs(q - seed).sum())})
+            clean = [c for c in cands if c["low"] >= -0.001]
+            bc = None
+            if clean:
+                d0 = min(c["dist"] for c in clean)
+                bc = min((c for c in clean if c["dist"] <= d0 + math.radians(TIE_DEG)), key=lambda c: c["sum"])
+            elif cands:
+                bc = min(cands, key=lambda c: (-c["low"], c["dist"]))
+            if bc is not None:
+                q, pe = bc["q"], bc["pe"]
+            else:   # 안 닿음: 가장 가까운 자세(수치)만 보여 줌
+                q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
+            re_ = 0.0
+            tilt = self.axis_tilt(self.fk(q)[1])
+            an = {"method": "analytic", "n_solutions": len(qs), "n_raw": n_raw}
+        elif mode == "position":   # 손목 3 관절은 seed(직전 해) 값 그대로
             q, pe = self.solve_position(seed, point, ref, its=FAST_ITERS)
             re_ = 0.0
             tilt = self.axis_tilt(self.fk(q)[1])
@@ -546,7 +648,7 @@ class _Solver:
         low = self.lowest_finger_z() - self.table_z
         grip = site - self.dz(mode) * srot[:, 2]
         ok = pe <= TOL_POS and re_ <= TOL_ROT and low >= -0.001   # 손가락이 책상에 닿으면 탈락 (전체 풀이와 같음)
-        return {"ok": bool(ok), "fast": True, "mode": mode, "flip": flip, "hand_turn": round(float(turn), 2), "tilt_deg": round(tilt, 1), "fixed": fix,
+        return {**(an or {}), "ok": bool(ok), "fast": True, "mode": mode, "flip": flip, "hand_turn": round(float(turn), 2), "tilt_deg": round(tilt, 1), "fixed": fix,
                 "joints": {n: round(math.degrees(float(v)), 2) for n, v in zip(self.arm, q)},
                 "pos_err_mm": round(float(np.linalg.norm((wpos if ref == "wrist" else grip) - point)) * 1000, 1), "ang_err_deg": round(math.degrees(re_), 2),
                 "ref": ref, "wrist_real": [round(float(v), 4) for v in self.to_real(wpos)], "grip_real": [round(float(v), 4) for v in self.to_real(grip)],
