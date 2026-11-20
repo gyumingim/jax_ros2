@@ -548,6 +548,36 @@ def robot_mesh(name: str):
     return FileResponse(str(p), media_type="text/plain", headers={"Cache-Control": "max-age=3600"})
 
 
+FOLLOW_LOG = HERE / "logs" / "follow.log"
+FOLLOW_LOG_MAX = 4 << 20   # 4 MB 넘으면 follow.log.1 로 돌리고 새로 (하나만 남김)
+_follow_lock = threading.Lock()
+
+
+@app.post("/api/log/follow")
+async def api_log_follow(req: Request):
+    """손 위치 카드 '팔도 바로 따라가기' 진단 로그: 브라우저가 틱·풀이 응답마다 JSON 한 줄씩 보낸다 -> logs/follow.log."""
+    b = await _body(req)
+    rows = b.get("rows") if isinstance(b, dict) and isinstance(b.get("rows"), list) else [b]
+    now = time.time()
+    lines = []
+    for r in rows[:200]:
+        if isinstance(r, dict):
+            r = {"ts": round(now, 3), "t_srv": time.strftime("%H:%M:%S", time.localtime(now)), **r}
+            lines.append(json.dumps(r, ensure_ascii=False, separators=(",", ":")))
+    if not lines:
+        return {"ok": False}
+    with _follow_lock:
+        FOLLOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if FOLLOW_LOG.exists() and FOLLOW_LOG.stat().st_size > FOLLOW_LOG_MAX:
+                os.replace(FOLLOW_LOG, FOLLOW_LOG.with_name("follow.log.1"))
+        except OSError:
+            pass
+        with open(FOLLOW_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    return {"ok": True, "n": len(lines)}
+
+
 @app.get("/api/log/{sid}")
 def api_log(sid: str, n: int = 300):
     it = pm.items.get(sid)
