@@ -1,14 +1,17 @@
-# dashboard — 노드 켜기/끄기 + 각도 제어 + 팔 3D (웹 화면)
+# dashboard — 실물 팔 제어(ROS 없이) + 각도 제어 + 팔 3D (웹 화면)
 
-터미널 여러 개 대신 브라우저 한 화면에서 `can0` 올리기, 노드(`ak45_node`·`stm_bridge_node`·`arm_control_node`, `arm.launch.py` / `arm_homed.launch.py`, `vision_node`) 켜기/끄기, 로그, AK45 진단, 원점(homing), **관절 각도 보내기(모터가 실제로 움직임)**, `pick_place --dry-run` 궤적 3D 재생을 한다.
-실물이 없어도 되는 **가상 팔 모드**가 있다(Windows 에서도 끝까지 돈다).
+브라우저 한 화면에서 `can0` 올리기, **팔 연결(이 서버가 can0 을 직접: `real_arm.py`)**, AK45 상태, 원점(homing), 보정,
+**관절 각도 보내기(모터가 실제로 움직임)**, `pick_place --dry-run` 궤적 3D 재생과 실물 재생을 한다. **ROS 설치가 필요 없다.**
+모드 2개: **실물(직접 CAN, 기본)** / **가상**(Windows 에서도 끝까지 돈다). `--ros` 를 주면 '실물'이 팀 ROS 노드 경로가 된다(아래 'ROS 모드').
 
 ## 실행
 
 ```bash
-sudo apt install -y python3-fastapi python3-uvicorn python3-websockets   # 또는 pip install fastapi uvicorn websockets
-python3 dashboard/server.py              # 실물(ROS) 모드. ROS 를 source 하지 않아도 된다(아래 'ROS 연결')
+sudo apt install -y can-utils python3-can python3-fastapi python3-uvicorn python3-websockets   # 또는 pip install python-can fastapi uvicorn websockets
+python3 dashboard/server.py              # 실물(직접 CAN) 모드: ① CAN 켜기 → ② 팔 연결
 python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS 없이, Windows 도)
+python3 dashboard/server.py --fake-hw    # 직접 CAN 을 가짜 AK45 4개 + 가짜 STM32 (python-can virtual) 에 — 화면 시험
+python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 필요)
 ```
 
 브라우저에서 **http://localhost:8080**. 기본은 **이 PC에서만**(127.0.0.1). 같은 네트워크에서 보려면 `--host 0.0.0.0`
@@ -20,6 +23,8 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 | `JAX_ROS_DISTRO` | `$ROS_DISTRO`, 없으면 `jazzy` | `/opt/ros/<distro>/setup.bash` |
 | `JAX_DASH_PORT` / `--port`, `JAX_DASH_HOST` / `--host` | 8080, 127.0.0.1 | |
 | `JAX_DASH_VIRTUAL=1` / `--virtual` | | 가상 모드로 시작 (화면 위 스위치로도 바꿈) |
+| `JAX_DASH_ROS=1` / `--ros` | | '실물' = ROS 노드 (없으면 직접 CAN) |
+| `JAX_CAN_INTERFACE` / `--can-interface`, `JAX_CAN_CHANNEL` / `--can-channel` | socketcan, can0 | 직접 CAN 의 python-can 버스 |
 | `JAX_IK_DIR` | 없으면 레포 옆 `../IK`, 그다음 `<ws>/src/IK` | team-jax/IK 체크아웃. 3D 메시(`motion2/arm/meshes`)와 pick_place 계획에 쓴다 |
 | `JAX_DASH_PYTHONPATH` | | 로컬 pick_place(가상 모드·Windows)에서 sys.path 뒤에 붙일 경로(mujoco·gymnasium·scipy 가 따로 있을 때) |
 | `JAX_DASH_SIGINT_WAIT`, `JAX_DASH_SIGTERM_WAIT` | 5, 3 초 | 끄기 단계 사이 대기 |
@@ -27,11 +32,11 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 
 ## 화면: 탭 3개
 
-위 띠(모든 탭 공통): 연결·ROS·can0·실행 수 칩, **모드 스위치 실물(ROS) / 가상**, 큰 **■ 전부 정지**(Esc), 경고 띠. 고른 탭은 주소 해시(`#conn` `#angle` `#ik`, 예전 `#ak` 등도 옮겨 감)와 localStorage 에 기억.
+위 띠(모든 탭 공통): 연결·팔 연결·can0·실행 수 칩, **모드 스위치 실물 / 가상**, 큰 **■ STOP**(Esc, 직접 CAN = 지금 자리 홀드; 가상·ROS = 전부 정지), 경고 띠. 고른 탭은 주소 해시(`#conn` `#angle` `#ik`, 예전 `#ak` 등도 옮겨 감)와 localStorage 에 기억.
 
 | 탭 | 내용 |
 |---|---|
-| **연결** | ROS 연결 카드(상태 + 'ROS 연결(source)') 또는 가상 팔 카드(가상 전원 끄기/켜기), 노드 켜기/끄기 전부(can0 올리기, arm.launch / arm_homed.launch / ak45 / stm_bridge / arm_control / vision, vcan 시험), AK45 진단 카드 4개 + CAN 버스, 로그, 보정 안내 |
+| **연결** | 직접 CAN: ① CAN 켜기 ② 팔 연결(속도 °/s, 힘 빼기, 연결 끊기), AK45 4개 표, 고급: 버스 상태(에러 프레임·송신 실패)·안전 기본값·로그·**관절 하나씩 보정**. ROS 모드면 아래 옛 화면: ROS 연결 카드(상태 + 'ROS 연결(source)') 또는 가상 팔 카드(가상 전원 끄기/켜기), 노드 켜기/끄기 전부(can0 올리기, arm.launch / arm_homed.launch / ak45 / stm_bridge / arm_control / vision, vcan 시험), AK45 진단 카드 4개 + CAN 버스, 로그, 보정 안내 |
 | **각도 제어** | 원점(homing) 패널, 관절 14개 슬라이더 + 숫자칸(**시뮬 관절각 °**) + 관절마다 '보내기' / '바뀐 것 전부 보내기' / '현재 자세로 슬라이더 맞추기' / '바꾼 것 되돌리기'. 손가락은 묶어서(손가락 1·2·3 같이 움직이기 체크). 오른쪽 3D: **불투명 = 실제 현재 자세**, **파란 반투명 = 슬라이더 목표** |
 | **역기구학** | **2D 지도**(위에서 본 책상, 로봇 위·앞 아래·로봇 왼쪽 = 화면 오른쪽): [큐브 놓기]·[놓을 자리 고르기] 로 눌러 고르고 yaw 슬라이더, 칸 색 = 그 yaw 의 도달 맵(team-jax/IK `reachmap_real_yaw.npz`), 고를 때마다 `realcoords.plan` 판정 한 줄(안 돼도 계획은 돌릴 수 있음). 숫자칸은 '숫자로 입력' 안(양방향). `pick_place --dry-run` 폼(+ `/object_pose` 값을 cube 칸에 넣기, vision_node 상태 작게, 가상 모드면 가상 큐브 칸). 오른쪽 3D: 계획한 궤적 재생(재생/일시정지/프레임 슬라이더/속도) + 큐브(주황)·놓을 자리(초록)·/object_pose(보라). 가상 모드면 **가상 팔로 재생** |
 
@@ -47,7 +52,8 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
   알림(막지는 않음): AK45 피드백 없음(arm_control_node 가 기다림), 서보 첫 명령(위치를 몰라 램프 없이 바로 감 — arm_control_node 규칙).
 - 첫 보내기 전에 확인창 1회(페이지마다): `verified=false` 관절 목록 — 방향·영점이 가정, 팔 주변 비우기, max_speed, 서보 첫 명령은 바로 감, 멈추는 법.
 - '현재 자세로 슬라이더 맞추기': AK45 = 피드백(arm_homed 면 guard 가 오프셋을 뺀 `/ak45/joint_states_homed`) → sim 환산, 서보 = `/servo/state`(마지막으로 보낸 값). 서보는 피드백이 없다.
-- 이 탭에는 '누르는 동안만 움직이기'·홀드 정지가 없다. 멈추는 것은 ■ 전부 정지(노드 종료 → AK45 브레이크 0A → **팔이 떨어질 수 있음**).
+- 직접 CAN 모드: 보내는 곳은 `real_arm.RealArm.joint_command`(같은 calibration 변환·클립 → 원점 오프셋 → 램프). 멈춤 = ■ STOP(지금 자리 홀드, 팔 안 떨어짐).
+- 가상·ROS 모드: 멈추는 것은 ■ 전부 정지(노드 종료 → AK45 브레이크 0A → **팔이 떨어질 수 있음**).
 
 ### 3D 뷰
 
@@ -58,6 +64,21 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 - 라이브러리: three.js r160 (`three.module.js`, `OrbitControls.js`, `OBJLoader.js`, LICENSE) 을 `static/vendor/three-0.160.0/` 에 저장(로봇 PC 가 오프라인이어도 됨, importmap). 마우스: 왼쪽 회전, 오른쪽 이동, 휠 확대.
 - 현재 자세 = `state.pose`(서버가 계산): AK45 = 피드백(guard 가 있으면 원점 보정 피드백), 서보 = 마지막으로 보낸 값. 값 없는 관절은 0°. finger_rotation 은 sim 에서 고정이라 안 움직인다.
 - 궤적: `pick_place` 의 기존 `--save` 옵션으로 `logs/pick_dry_traj.json`(joint_names, dt, positions rad, real/sim 좌표, status)을 쓰게 하고 `GET /api/ik/trajectory` 로 읽는다(arm_control 코드는 안 고침). 팔이 못 닿으면(종료코드 3) 계획이 없어 파일을 안 쓰므로 큐브·놓을 자리만 보인다(실행마다 옛 파일은 지움).
+
+## 실물(직접 CAN) 모드 (`real_arm.py`, `direct_api.py`) — 기본
+
+한 프로세스(대시보드 서버)가 can0 을 연다(python-can socketcan). ak45_node + stm_bridge_node + arm_control_node + homing_guard 가 하던 일을
+스레드 2개로 한다(robot_arm v2 `class AK` 의 구조를 CAN 프레임으로):
+
+- **rx**: `bus.recv` → AK45 피드백 0x29 파싱(`arm_control.protocol.parse_ak45_feedback`), CAN 에러 프레임(python-can socketcan 이 에러 프레임을 켠다) 집계 → bus-off·passive·warning, bit-stuff·no-ack 수. 우리가 안 보낸 AK45/서보 명령 프레임이 보이면 '다른 프로그램이 명령 중' 경고.
+- **control 50 Hz**: AK45 마다 목표 → 사다리꼴 램프(30 °/s, 90 °/s², 한 스텝 3°) → carrot(측정 ±30°) → 위치 프레임(`ak45_pos_frame`), 서 있으면 20 Hz 재송신. 끊김·튐·막힘·온도·에러코드 처리. 서보는 `arm_control.motion.Mover` 램프 → `servo_frame`, 1 Hz 재전송.
+- 원점: `arm_control.homing.Homing`(gap_s = 5 s). 원점을 잡는 순간 그 AK45 가 지금 자리에서 홀드를 시작한다(homing_guard 와 같음). '쉬게 하기' = 원점 지움 + 명령 막음, 홀드는 계속(힘을 빼려면 '힘 빼기').
+- 보정: 연결 탭 고급의 '관절 하나씩 보정' = `calibrate.py` 의 m ±N(한 번에 ±10° 까지, 원점 없이 상대 이동) / z(지금 = sim 0; AK45 는 세션 원점도 여기로) / f / k / v / w(calibration.json 저장).
+- 궤적 실물 재생: 역기구학 탭 '실물로 재생'(확인창 2번) → `play.check_trajectory`(치명 = 거절, 검사 문제 = 세 번째 확인창 = `--force`) → `play.play` + `watch.TrackingWatch`(15°, 0.5 s) → 벗어나면 멈춤·그 자리 홀드. 원점 없는 AK45 가 있으면 시작 안 함.
+- 연결 거부: `/tmp/ak45_ctrl.lock` 이 잠김(ak45_node 가 떠 있음), 대시보드 밖 ROS 노드(ak45_node·stm_bridge_node·arm_control_node·homing_guard·calibrate), 대시보드가 켠 ROS 항목, can0 DOWN/없음.
+- 실물 모드에서 가상으로 바꾸려면 팔 연결을 먼저 끊는다. 서버 종료(Ctrl+C) = 브레이크 0 A 후 닫음. 로그 `logs/direct.log`.
+- API: `POST /api/direct/connect {max_speed}`, `/api/direct/disconnect`, `/api/direct/hold`, `/api/direct/limp {joint|"all"}`, `/api/direct/calib {action: move|zero|flip|scale|verify|save, joint, value}`, `/api/ik/play_real {force}`, `/api/ik/stop_real`, `GET /api/direct/log`. `/api/stop` = STOP(홀드), 원점·보내기는 다른 모드와 같은 API.
+- 시험: `python dashboard/tools/try_direct_fake.py` (가짜 AK45 4개 + 가짜 STM32, `tools/fake_can_arm.py`). 아래 '확인한 것'.
 
 ## 가상 팔 모드 (`virtual_arm.py`)
 
@@ -76,7 +97,9 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 - 역기구학 탭 **가상 팔로 재생**: `arm_control/arm_control/play.py` 의 `schedule`·`play` 를 그대로 써서 궤적 프레임을 가상 arm_control_node 로 보낸다(실물 재생은 대시보드에 없음). `check_trajectory` 의 치명 거절(not delivered 등)은 막고, --force 가 필요한 검사는 알림만.
 - 가상 숫자(모터 속도·온도·떨어지는 속도·영점 틀어짐)는 가정이다. 실측 아님.
 
-## ROS 연결 (자식 프로세스, 실물 모드)
+## ROS 모드 (`--ros`, 팀 ROS 버전) — ROS 연결 (자식 프로세스)
+
+`--ros` 일 때만 쓰인다. 이때 연결 탭은 ① can0 ② ROS 연결 ③ 팔 켜기(arm_homed.launch.py), 고급에 노드 따로 켜기·보정 안내가 보인다.
 
 서버는 rclpy 를 import 하지 않는다. 구독·발행(`ros_monitor.RosMonitor`)은 `ros_bridge.py` 가 띄우는 자식에서 돈다:
 `bash -c "source /opt/ros/$JAX_ROS_DISTRO/setup.bash; source $JAX_WS/install/setup.bash(있으면); exec python3 -u dashboard/ros_monitor_proc.py"`.
@@ -100,6 +123,12 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 
 ## 확인한 것
 
+### 실물(직접 CAN) — 가짜 하드웨어 (2026-11-20)
+
+- Windows 11, Python 3.13, python-can 4.6.1 `virtual` 버스, `tools/try_direct_fake.py` 20/20 통과(약 30 초): 첫 명령 전 무송신(1 s 동안 AK45 프레임 0, 피드백 50개씩), 원점 없으면 거절, 원점 → elbow 0→20° 0.91 s(최대 ~30 °/s), 피드백 1.5 s 끊김 = 홀드 프레임 계속(1 s 에 17개)·팔 안 떨어짐·원점 유지, 7 s 끊김 = 5 s 에 송신 멈춤·원점 지움·돌아오면 지금 자리 홀드, 엔코더 +70° 튐 = 지금 자리 홀드·원점 지움(축 안 움직임), 붙잡기 = 2.5 s 뒤 힘 뺌(브레이크 3개), 62 ℃ 경고 / 76 ℃ 힘 뺌·원점 거절, 에러 코드 2 힘 뺌, STOP = 그 자리 홀드, 서보 첫 명령 바로·다음 램프, 궤적 재생 끝까지 / elbow 붙잡으면 TrackingWatch 로 멈춤, 보정 ±5°·영점·방향·확인·저장(임시 복사본), 힘 빼기 = 브레이크 24개 후 위치 프레임 0, 브레이크 프레임 `00000203#00000000`.
+- WSL Ubuntu 22.04: `/tmp/…lock` 을 `flock` 이 쥐고 있으면 `take_lock` 거절, 우리가 쥐면 `flock -n` 이 막힘(ak45_node 쪽 거부). **WSL 커널에 vcan 이 없어(CONFIG_CAN_VCAN 꺼짐) SocketCAN 경로(에러 프레임 포함)는 못 돌렸다.**
+- `server.py --port 8099 --fake-hw` + curl: 연결 전 보내기 거절 → 연결 → 원점 없음 거절 → 원점 → elbow 30·shoulder_yaw 20·wrist_pitch 15 → STOP → 현재 자세 표, 연결 중 가상 모드 거절, 보정 서보 이동, 관절 힘 빼기, 연결 끊기 → 가상 → 실물. headless Edge 스크린샷(연결 탭·각도 제어 탭).
+
 ### 탭 3개 + 3D + 각도 제어 + 가상 팔 (2026-11-20)
 
 - Windows 11, Python 3.13, `--port 8097 --virtual`, `JAX_IK_DIR` = team-jax/IK 클론(925e023): `/robot/meshes/Upper_Arm_1.obj` 200(933942 B), `..%2Fik.py` 404, vendor three 200. `node --check app.js`, viewer.js(모듈) 문법 통과.
@@ -116,7 +145,8 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 
 ## 확인 안 한 것
 
-- **실물 전부**: 로봇 PC(Jazzy)에서 실제 `ros2 launch/run`, 실제 모터로 '보내기'(방향·영점 미확인 상태), can0, 진단 카드, pids.json 다시 붙잡기.
+- **직접 CAN 실물 전부**: 실제 can0(SocketCAN)·CANable 에서 real_arm, 에러 프레임 해석, bus-off 때 송신 실패 처리, 실제 AK45 가 위치 프레임이 끊기면 힘을 놓는지(가정), 20 Hz 홀드로 충분한지, carrot·막힘 기준이 실물 무게에서 맞는지, 실제 STM32 가 1 Hz 재전송에 문제 없는지. Linux vcan 으로도 못 돌림(WSL 에 vcan 없음).
+- **ROS 모드 실물 전부**: 로봇 PC(Jazzy)에서 실제 `ros2 launch/run`, 실제 모터로 '보내기'(방향·영점 미확인 상태), can0, 진단 카드, pids.json 다시 붙잡기.
 - 실제(headless 아닌) 브라우저·폰에서 3D 조작감과 성능(메시 8.7 MB 를 한 번 읽음).
 - Ubuntu apt 의 fastapi 0.101 에서 도는지.
 - 가상 팔의 숫자(속도·온도·중력)는 실물과 대조 안 함.
@@ -125,4 +155,4 @@ python3 dashboard/server.py --virtual    # 가상 팔 모드 (실물·CAN·ROS �
 
 1. 로봇 PC 에서 가상 모드 → vcan 시험 → 실물 순서로 확인. 실물 첫 보내기는 작은 각(2~5°) 한 관절, 팔 받치고.
 2. calibration 확인(verified=true) 전에는 AK45 를 크게 움직이지 않는다. hand_roll 범위(서보 0~180 → sim ±90 vs 시뮬 ±120) 정리 필요 — pick_place 궤적이 −113° 를 쓴다.
-3. '정지'의 뜻: 지금은 노드 종료 = 브레이크 0A(팔 떨어짐). 홀드 유지 정지(현재 위치를 target 으로)가 필요한지.
+3. (직접 CAN 에서 됨) STOP = 지금 자리 홀드, 힘 빼기는 따로. ROS 모드의 정지는 여전히 노드 종료(팔 떨어짐).

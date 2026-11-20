@@ -25,6 +25,7 @@ try:
 except Exception:   # virtual_arm 을 못 읽어도(arm_control 없음) 실물 모드는 돈다
     VIRTUAL_NODES = {}
 MODE = {"virtual": False}
+FORCE_LOCAL = {"on": False}   # 직접 CAN 모드(ROS 없음): argv 로컬 실행을 쓰는 항목(pick_place --dry-run)을 이 PC 의 python 으로
 
 IS_LINUX = sys.platform.startswith("linux")
 LOG_DIR = Path(os.environ.get("JAX_DASH_LOGS") or Path(__file__).resolve().parent / "logs")
@@ -147,7 +148,7 @@ class ProcessManager:
             if self.virtual is not None and it.svc.id in VIRTUAL_NODES:
                 return self._start_virtual(it)
             try:
-                body = it.svc.build(dict(it.params, _local=self.virtual is not None or not IS_LINUX))
+                body = it.svc.build(dict(it.params, _local=self.virtual is not None or not IS_LINUX or FORCE_LOCAL["on"]))
             except ValueError as e:
                 it.error = str(e)
                 return {"ok": False, "error": str(e)}

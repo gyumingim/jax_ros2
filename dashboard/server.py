@@ -1,9 +1,13 @@
 """JAX 팔 대시보드: 탭 3개(연결 / 각도 제어 / 역기구학) + 팔 3D 뷰.
 
-    python3 dashboard/server.py                 # http://localhost:8080 (이 PC에서만)
+    python3 dashboard/server.py                 # http://localhost:8080 (이 PC에서만), 실물 = 직접 CAN (ROS 없음)
     python3 dashboard/server.py --virtual       # 가상 팔(실물·CAN·ROS 없이, Windows 에서도)
+    python3 dashboard/server.py --ros           # 실물을 ROS 노드로 (팀 ROS 버전: ak45_node 등)
+    python3 dashboard/server.py --fake-hw       # 직접 CAN 을 가짜 AK45·STM32 (python-can virtual) 에 — 화면 시험용
     python3 dashboard/server.py --host 0.0.0.0  # 같은 네트워크의 폰·노트북에서도 (보호 없음, 주의)
 
+모드 2개(+선택): 실물(직접 CAN, 기본) = direct_api.py / real_arm.py 가 이 프로세스에서 can0 을 직접 다룬다(ROS 없음).
+가상 = virtual_arm.py. --ros 를 주면 '실물'이 아래 ROS 경로가 된다(팀 ROS 버전).
 ROS 구독·발행은 서버 안이 아니라 자식 프로세스(ros_monitor_proc.py, /opt/ros/<distro> + <ws>/install 을 source)에서 돈다.
 가상 모드에서는 자식 대신 virtual_arm.VirtualArm 이 같은 모양의 상태를 채운다(화면 위 스위치로 바꿈).
 모터를 움직이는 길은 하나: 각도 제어 탭의 '보내기' -> POST /api/joint/send -> 여기서 관절명·범위·유한값·원점 검사
@@ -32,11 +36,13 @@ from procman import IS_LINUX, LOG_DIR, ProcessManager, tail_file   # noqa: E402
 from ros_bridge import RosBridge   # noqa: E402
 from ros_monitor import HOMING_SRV   # noqa: E402  (rclpy 는 import 하지 않음 — 구독은 자식 프로세스)
 from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, PICK_TRAJ, REPO, ROS_DISTRO, WS   # noqa: E402
+import direct_api   # noqa: E402  (실물 직접 CAN: real_arm.py)
+import procman   # noqa: E402
 
 pm = ProcessManager()
 ros = RosBridge()
 can_state = {"available": IS_LINUX, "text": "Linux 아님" if not IS_LINUX else "확인 중"}
-MODE = {"virtual": False, "error": ""}
+MODE = {"virtual": False, "error": "", "ros": False}   # ros: --ros 면 실물 = ROS, 아니면 실물 = 직접 CAN
 VM = {"arm": None}
 
 
@@ -74,6 +80,8 @@ def set_mode(virtual):
             except Exception as e:
                 MODE["error"] = f"가상 팔을 못 만듦: {type(e).__name__}: {e}"
                 return {"ok": False, "error": MODE["error"]}
+        if direct_api.DIRECT.connected():
+            return {"ok": False, "error": "실물 팔이 연결돼 있음 — 연결 탭 ② 에서 팔 연결을 먼저 끊기(브레이크 0 A)"}
         r = pm.set_virtual(VM["arm"])
         if not r["ok"]:
             return r
@@ -84,12 +92,19 @@ def set_mode(virtual):
     VM["arm"].stop_all()
     pm.set_virtual(None)
     MODE.update(virtual=False, error="")
+    if not MODE["ros"]:
+        return {"ok": True, "msg": "실물(직접 CAN) 모드: 연결 탭 ① CAN 켜기 → ② 팔 연결"}
     threading.Thread(target=ros.start, daemon=True).start()
     return {"ok": True, "msg": "실물(ROS) 모드: ROS 연결 시도 중"}
 
 
+def mode_kind():
+    return "virtual" if MODE["virtual"] else "ros" if MODE["ros"] else "direct"
+
+
 def backend():
-    return VM["arm"] if MODE["virtual"] else ros
+    k = mode_kind()
+    return VM["arm"] if k == "virtual" else ros if k == "ros" else direct_api.DIRECT.backend()
 
 
 def ros_possible():
@@ -189,7 +204,7 @@ def cmd_gate(snap, cal, services):
     alive = {s["id"] for s in services if s["alive"]}
     g = {"ok": False, "reason": "", "guard": False, "homed_mode": False, "joints": {}}
     if not snap.get("available"):
-        g["reason"] = f"{snap.get('reason') or 'ROS 없음'} — ROS 를 연결하거나 가상 모드로"
+        g["reason"] = snap.get("reason") if snap.get("direct") else f"{snap.get('reason') or 'ROS 없음'} — ROS 를 연결하거나 가상 모드로"
     elif (snap.get("cmd_subs") or 0) < 1:
         g["reason"] = ("arm_control_node 가 안 켜짐 (/arm_control/joint_command 구독자 없음) — 연결 탭에서 "
                        "arm_homed.launch.py / arm.launch.py / arm_control_node 켜기")
@@ -314,6 +329,12 @@ def _play_virtual():
     return r
 
 
+def _direct_can():
+    c = direct_api.DIRECT.cfg
+    return {"available": True, "up": True, "exists": True, "state": "ERROR-ACTIVE", "up_cmd": CAN_UP_CMD,
+            "text": f"{c['channel']} ({c['interface']}{' · 가짜 AK45·STM32' if c['fake'] else ''})"}
+
+
 def state():
     b = backend()
     snap = b.snapshot() if b is not None else ros.snapshot()
@@ -321,12 +342,14 @@ def state():
     services = pm.snapshot()
     return {
         "t": time.time(),
-        "mode": {"virtual": MODE["virtual"], "error": MODE["error"], "ros_possible": ros_possible(),
+        "mode": {"virtual": MODE["virtual"], "kind": mode_kind(), "ros_enabled": MODE["ros"],
+                 "error": MODE["error"], "ros_possible": ros_possible(),
                  "ros_setup": ros.setup_paths()[0]},
         "services": services,
         "strays": pm.strays,
         "ros": snap,
-        "can": dict(can_state, up_cmd=CAN_UP_CMD) if not MODE["virtual"] else
+        "can": _direct_can() if mode_kind() == "direct" and direct_api.DIRECT.cfg["interface"] != "socketcan" else
+               dict(can_state, up_cmd=CAN_UP_CMD) if not MODE["virtual"] else
                {"available": True, "up": True, "state": "ERROR-ACTIVE", "text": "can0 (가상) UP", "up_cmd": CAN_UP_CMD},
         "calibrate": CALIBRATE_GUIDE,
         "home_poses": _home_poses(),
@@ -387,6 +410,8 @@ async def api_svc(sid: str, action: str, req: Request):
 
 @app.post("/api/stop")
 def api_stop():
+    if mode_kind() == "direct":     # 직접 CAN: STOP = 지금 자리 홀드 (팔 안 떨어짐). 노드 종료가 아님
+        return direct_api.DIRECT.backend().hold_all("STOP")
     if MODE["virtual"] and VM["arm"] is not None:
         VM["arm"].stop_trajectory()
     return pm.stop_all()
@@ -474,6 +499,8 @@ def api_ik_stop():
     return JSONResponse(VM["arm"].stop_trajectory())
 
 
+direct_api.install(app, mode_kind, pm, can_state, _trajectory, str(LOG_DIR / "direct.log"))
+
 _MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")
 
 
@@ -517,25 +544,39 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("JAX_DASH_PORT", "8080")))
     ap.add_argument("--virtual", action="store_true", default=os.environ.get("JAX_DASH_VIRTUAL") == "1",
                     help="가상 팔로 시작 (실물·CAN·ROS 없이). 화면 위 스위치로 바꿀 수 있다")
+    ap.add_argument("--ros", action="store_true", default=os.environ.get("JAX_DASH_ROS") == "1",
+                    help="실물을 ROS 노드(ak45_node …)로 — 팀 ROS 버전. 없으면 실물 = 직접 CAN (ROS 설치 필요 없음)")
+    ap.add_argument("--can-interface", default=os.environ.get("JAX_CAN_INTERFACE", "socketcan"),
+                    help="직접 CAN 의 python-can interface (socketcan, 시험은 virtual)")
+    ap.add_argument("--can-channel", default=os.environ.get("JAX_CAN_CHANNEL", CAN_IFACE))
+    ap.add_argument("--fake-hw", action="store_true", help="직접 CAN 을 가짜 AK45 4개 + 가짜 STM32 에 (interface virtual)")
     a = ap.parse_args()
+    MODE["ros"] = a.ros
+    procman.FORCE_LOCAL["on"] = not a.ros      # pick_place --dry-run 을 ros2 run 대신 이 PC 의 python 으로
+    direct_api.DIRECT.cfg.update(interface="virtual" if a.fake_hw else a.can_interface,
+                                 channel="fake_can0" if a.fake_hw else a.can_channel, fake=a.fake_hw)
     import uvicorn
     if a.virtual:
         r = set_mode(True)
         print("가상 모드로 시작" if r["ok"] else f"가상 모드 실패: {r['error']}", flush=True)
-    if not MODE["virtual"]:
+    if not MODE["virtual"] and MODE["ros"]:
         threading.Thread(target=ros.start, daemon=True).start()   # 시작할 때 한 번 자동 시도(실패하면 화면 버튼)
     if IS_LINUX:
         threading.Thread(target=_can_watch, daemon=True).start()
     shown = "localhost" if a.host in ("127.0.0.1", "localhost") else a.host
     print(f"대시보드: http://{shown}:{a.port}/   ws={WS} distro={ROS_DISTRO} "
-          f"모드={'가상' if MODE['virtual'] else '실물(ROS 자식 프로세스로 연결 시도 중)'}", flush=True)
-    if not MODE["virtual"] and not ros_possible():
+          f"모드={ {'virtual': '가상', 'ros': '실물(ROS 자식 프로세스로 연결 시도 중)', 'direct': '실물(직접 CAN, ROS 없음)'}[mode_kind()] }"
+          + (f" · CAN {direct_api.DIRECT.cfg['interface']} {direct_api.DIRECT.cfg['channel']}" if not MODE["ros"] else ""), flush=True)
+    if not MODE["virtual"] and MODE["ros"] and not ros_possible():
         print(f"참고: {ros.setup_paths()[0]} 없음 — 실물 모드는 못 씀. --virtual 또는 화면의 '가상' 스위치", flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         print("주의: 외부 접속 열림 — 같은 네트워크 누구나 노드를 켜고 끄고 모터 명령을 보낼 수 있다.", flush=True)
     try:
         uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
     finally:
+        if direct_api.DIRECT.connected():
+            print("대시보드 종료: 직접 CAN 팔 연결을 닫는다 — 브레이크 0 A, AK45 힘이 빠진다(팔이 떨어질 수 있음).", flush=True)
+            direct_api.DIRECT.disconnect(brake=True)
         # 서버가 꺼져도 노드는 그대로 둔다(끄면 팔이 떨어질 수 있음). 다시 켜면 pids.json 으로 다시 붙잡는다(Linux).
         ros.stop()
         alive = [it.svc.label for it in pm.items.values() if it.alive() and it.vm is None]
