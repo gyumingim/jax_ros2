@@ -810,7 +810,8 @@ class _Solver:
         if not qs:
             return 0, None, 0
         tilt = min(self.hand_down_tilt(q, lim) for q in qs)
-        return (2 if tilt <= GRASP_TILT_TOL else 1), tilt, len(qs)
+        # 사용자 2026-11-20: 손목 중앙이 그 위치로 갈 수 있으면 집을 수 있다고 판정 (손 수직 검사는 판정에 안 씀, 기울기는 정보로만)
+        return 2, tilt, len(qs)
 
     def graspmap(self, b):
         """op graspmap: 책상 위 격자 (x0..x1, y0..y1, step) 마다 grasp_eval. rows[j] = y 한 줄의 코드 문자열 ('2'/'1'/'0')."""
