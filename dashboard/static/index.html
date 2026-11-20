@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JAX 팔 대시보드</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">JAX <b>팔</b></div>
+  <div class="chips">
+    <span class="chip" id="chip-ws"><span class="dot"></span>연결 중</span>
+    <span class="chip" id="chip-ros"><span class="dot"></span>ROS</span>
+    <span class="chip" id="chip-can"><span class="dot"></span>can0</span>
+    <span class="chip" id="chip-run"><span class="dot"></span>실행 0</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn-stop" id="btn-stop" title="켜진 항목 전부 끄기 (Esc)">■ 전부 정지<small>모든 노드 끄기 · Esc</small></button>
+</header>
+<div class="warnbar">⚠ 전부 정지 = 노드 종료. ak45_node 가 끝나면 AK45 에 브레이크 0A → <b>홀드가 풀려 팔이 떨어질 수 있다.</b> 먼저 팔을 받친다.</div>
+<div class="warnbar bad" id="straybar" hidden></div>
+<main class="main">
+  <h2 class="sec">AK45 상태 <small id="ros-note"></small></h2>
+  <section class="grid" id="motors"></section>
+  <h2 class="sec">켜기 / 끄기</h2>
+  <section class="grid" id="services"></section>
+  <h2 class="sec">보정 (calibrate)</h2>
+  <section class="grid" id="calib"></section>
+  <h2 class="sec">원점 (homing)</h2>
+  <section class="grid"><div class="card muted">다음 단계: homing 브랜치의 원점 guard 노드(원점 상태 토픽·원점 서비스)가 들어오면 여기에 붙인다.</div></section>
+  <footer class="foot" id="foot"></footer>
+</main>
+<div class="toasts" id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
