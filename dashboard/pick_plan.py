@@ -52,6 +52,9 @@ GRIP_HOLD_S = 0.2            # 닫은/연 뒤 기다림
 YAW_TOL = 2.0                # 손 yaw 가 큐브 면에서 이 각(°) 안
 TIP_TOL = 0.005              # 집는 점 오차 5 mm (지도와 같은 TOL_POS)
 SMOOTH_PEAK = 1.5            # 3차 smoothstep 의 최대 속도 / 평균 속도
+TABLE_MARGIN = 0.008         # 손가락 충돌 상자·들고 가는 큐브 바닥이 책상 면보다 이만큼(m) 위여야 (실물 책상 높이 MAP_D 0.4775 는 가정 —
+                             # 실측 전엔 오차가 이 여유를 먹는다. README). 손이 수직이면 벌린 손가락 9.7 mm·쥔 손가락 8.5 mm 위라 통과,
+                             # 12° 기울면 4 mm 아래쪽 → 그런 곳은 '집을 수 없음' (지도도 같은 판정: grasp_clear)
 REASON = {1: "손목은 닿지만 손끝(집는 점)을 큐브에 못 맞춤", 0: "팔이 안 닿음"}   # hand_ik.graspcheck 와 같은 말
 
 
@@ -332,11 +335,30 @@ class Planner:
     def table_penalty(self, q):
         """잡는·놓는 자세에서 손가락(벌림·쥠)이 책상 아래면 벌점. 손이 기울면 아래쪽 손가락 끝이 내려간다 —
         hand_roll 90° 다른 해(큐브는 90° 마다 같음)는 기울기 축이 달라 손가락 높이가 다르다: 닿지 않는 쪽을 고르게."""
-        low = min(self.finger_low(q, self.open), self.finger_low(q, self.closed))
-        return FALLBACK_COST if low < self.s.table_z - 1e-4 else 0.0
+        return 0.0 if self.grasp_clearance(q) >= TABLE_MARGIN else FALLBACK_COST
+
+    def grasp_clearance(self, q):
+        """잡는·놓는 자세 q 에서 손가락(벌림·쥠 중 낮은 쪽) 가장 낮은 점의 책상 위 높이 (m)."""
+        return min(self.finger_low(q, self.open), self.finger_low(q, self.closed)) - self.s.table_z
 
     def below_table(self, fr):
-        return any(self.finger_low(q, f) < self.s.table_z - 1e-4 for q, f in fr)
+        return any(self.finger_low(q, f) < self.s.table_z + TABLE_MARGIN for q, f in fr)
+
+    def carried_cube_low(self, qg, pc, yaw_deg, qs):
+        """잡는 자세 qg 에서 큐브(중심 pc, yaw, 수평)를 손에 붙여 qs 자세들로 옮길 때 큐브 8 꼭짓점 중 가장 낮은 z (sim).
+        손이 기울면 큐브도 같이 기운다 (바닥 중심이 아니라 가장 낮은 모서리)."""
+        np = self.np
+        ps, rs = self.s.fk(qg)
+        h = math.radians(yaw_deg)
+        rc = np.array([[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]])
+        rel_r, rel_p = rs.T @ rc, rs.T @ (np.asarray(pc) - ps)
+        half = float(self.s.E.OBJECT_HALF_SIZE)
+        low = 9.0
+        for q in qs:
+            p, r = self.s.fk(q)
+            c, rr = p + r @ rel_p, r @ rel_r
+            low = min(low, float(c[2] - half * np.abs(rr[2]).sum()))
+        return low
 
     def finger_low(self, q, f):
         """손가락 충돌 상자 가장 낮은 z. 닫는 값이 CUBE_GRIP(패드 사이 = 큐브 50 mm, env) 을 넘는 프레임은 큐브가 손가락을
@@ -379,6 +401,15 @@ def plan(a):
     for name, c in (("큐브를 잡는 자세", G), ("놓는 자세", Pl)):
         if not c:
             return {**out, "status": "unreachable", "reason": f"{name}: 손 방향(yaw)까지 맞는 해 없음"}
+    # 집는 점은 그대로(큐브 중심), 손가락이 책상 위 TABLE_MARGIN 을 지키는 해만. 없으면 그 자리는 집을 수 없음
+    for name, c in (("큐브를 잡는 자세", G), ("놓는 자세", Pl)):
+        if not any(P.grasp_clearance(q) >= TABLE_MARGIN for q in c):
+            best = max(c, key=P.grasp_clearance)
+            return {**out, "status": "unreachable",
+                    "reason": f"{name}: 손가락이 책상 위 {TABLE_MARGIN * 1000:.0f} mm 를 못 지킴 (가장 좋은 해 {P.grasp_clearance(best) * 1000:+.1f} mm, "
+                              f"손 기울기 {s.axis_tilt(s.fk(best)[1]):.0f}°)"}
+    G = [q for q in G if P.grasp_clearance(q) >= TABLE_MARGIN]
+    Pl = [q for q in Pl if P.grasp_clearance(q) >= TABLE_MARGIN]
     home = P.home    # 팀 계획과 같은 시작·끝 (env HOME_ARM_QPOS, shoulder_yaw 6.3°)
     home0 = home.copy()
     home0[s.arm.index("shoulder_yaw")] = 0.0   # 해석 IK 는 shoulder_yaw 0 고정 → HOME 에서 먼저 그것만 0 으로
@@ -515,7 +546,7 @@ def plan(a):
     hit_place = P.cube_hits(frames, range(mk["opened"], len(frames)), target_pos, yplace)
     lim = P.lim
     low = [P.finger_low(q, f) for q, f in frames]
-    below = [i for i, z in enumerate(low) if z < s.table_z - 1e-4]
+    below = [i for i, z in enumerate(low) if z < s.table_z + TABLE_MARGIN]
     names = list(s.arm) + list(s.fingers)
     traj_q = [list(map(float, q)) + list(map(float, f)) for q, f in frames]
     sy = s.arm.index("shoulder_yaw")   # 0 고정 (HOME 만 6.3°: 그 사이 보간은 범위 안)
@@ -531,7 +562,7 @@ def plan(a):
 
     def side(i0, i1, p):
         return max(float(np.linalg.norm((P.grip(frames[i][0]) - p)[:2])) for i in range(i0, i1 + 1))
-    carry_low = min(float(P.grip(frames[i][0])[2]) - 0.025 - s.table_z for i in range(mk["lift"], mk["above_place"] + 1))
+    carry_low = P.carried_cube_low(qg, pc, ycube, [frames[i][0] for i in range(mk["lift"], mk["above_place"] + 1)]) - s.table_z
     spd = np.degrees(np.abs(np.diff(np.array(traj_q), axis=0)).max(axis=0)) / DT
     problems = []
     if hit_pick:
@@ -539,9 +570,12 @@ def plan(a):
     if hit_place:
         problems.append(f"손가락이 놓은 큐브에 닿음 (빠질 때): 프레임 {hit_place[0]}~{hit_place[-1]} ({len(hit_place)}개)")
     if below:
-        problems.append(f"손가락이 책상 아래로 감: 프레임 {below[0]}~{below[-1]} ({len(below)}개), 가장 낮게 {(min(low) - s.table_z) * 1000:+.1f} mm")
+        problems.append(f"손가락이 책상 위 여유 {TABLE_MARGIN * 1000:.0f} mm 보다 낮게 감: 프레임 {below[0]}~{below[-1]} ({len(below)}개), "
+                        f"가장 낮게 책상 위 {(min(low) - s.table_z) * 1000:+.1f} mm")
     if over:
         problems.append("관절 한계 밖: " + ", ".join(over))
+    if carry_low < TABLE_MARGIN:
+        problems.append(f"들고 가는 큐브의 가장 낮은 모서리가 책상 위 {carry_low * 1000:+.1f} mm (여유 {TABLE_MARGIN * 1000:.0f} mm 아래)")
     if fallback:
         problems.append("손목 높이 유지 길을 못 찾아 관절 공간 직선으로 감: " + ", ".join(fallback))
     if grip_err > TIP_TOL or place_err > TIP_TOL:
