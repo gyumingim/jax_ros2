@@ -59,7 +59,7 @@
               <inertial pos="0.008735 0.000211 0.090878" mass="0.410582" fullinertia="0.001212777 0.001199811 0.0003464644 -1.795709e-06 -2.958031e-05 -3.36359e-06"/>
               <geom type="mesh" mesh="Upper_Arm_visual" pos="0 0 0" quat="-1.73205103e-07 1 0 0" rgba="0.098 0.098 0.098 1"/>
               <body name="Under_Arm" pos="-0.0245 -0.000208 0.129792" quat="0.500000163 0.5 -0.499999837 -0.5">
-                <joint name="elbow" type="hinge" axis="0 0 1" range="-1.745329 1.745329"/>
+                <joint name="elbow" type="hinge" axis="0 0 1" range="-2.356194 2.356194"/>
                 <inertial pos="0.004802 0.05874 -0.011447" mass="0.346145" fullinertia="0.0005266168 0.000288288 0.0005469735 -3.744171e-05 9.809798e-06 9.341698e-05"/>
                 <geom type="mesh" mesh="Under_Arm_visual" pos="0 -3e-06 0" quat="0.500000163 0.5 0.5 -0.499999837" rgba="0.098 0.098 0.098 1"/>
                 <body name="Wrist_Pitch" pos="0 0.121797 -0.0245" quat="0.500000001 0.500000162 0.499999838 -0.499999999">

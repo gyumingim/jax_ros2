@@ -514,7 +514,16 @@ async def api_ik_pair(req: Request):
     return JSONResponse(await asyncio.to_thread(hand_ik.pair, _ik_dir(), await _body(req), ranges))
 
 
+_GRASP_LOCK = threading.Lock()
 _GRASP_CACHE = {}   # (관절 범위, shoulder_yaw) -> 집을 수 있는 곳 지도 (메모리만, 저장 안 함)
+
+
+def _grasp_warm():
+    """서버 켤 때 기본(어깨 옆 0°) 지도를 미리 계산 — 처음 열 때 기다리지 않게 (2026-11-20, 팔꿈치 ±135 로 오래 걸림)."""
+    try:
+        api_ik_graspmap(0.0)
+    except Exception as e:
+        print("graspmap 미리 계산 실패:", e, flush=True)
 
 
 def _cal_ranges():
@@ -536,12 +545,13 @@ def api_ik_graspmap(shoulder_yaw: float = 0.0):
     import hand_ik
     ranges, sy = _cal_ranges(), _sy(shoulder_yaw)
     key = (json.dumps(ranges, sort_keys=True), round(sy, 3))
-    r = _GRASP_CACHE.get(key)
-    cached = r is not None
-    if not cached:
-        r = hand_ik.graspmap(_ik_dir(), ranges, sy)
-        if r.get("ok"):
-            _GRASP_CACHE.clear(); _GRASP_CACHE[key] = r
+    with _GRASP_LOCK:   # 미리 계산 중이면 기다렸다가 그 결과를 쓴다 (두 번 계산 안 함)
+        r = _GRASP_CACHE.get(key)
+        cached = r is not None
+        if not cached:
+            r = hand_ik.graspmap(_ik_dir(), ranges, sy)
+            if r.get("ok"):
+                _GRASP_CACHE.clear(); _GRASP_CACHE[key] = r
     return JSONResponse({**r, "cached": cached})
 
 
@@ -670,6 +680,7 @@ def main():
         threading.Thread(target=ros.start, daemon=True).start()   # 시작할 때 한 번 자동 시도(실패하면 화면 버튼)
     if IS_LINUX:
         threading.Thread(target=_can_watch, daemon=True).start()
+    threading.Thread(target=_grasp_warm, daemon=True).start()   # 지도 전용 IK 프로세스라 손 IK 를 안 막는다
     shown = "localhost" if a.host in ("127.0.0.1", "localhost") else a.host
     print(f"대시보드: http://{shown}:{a.port}/   ws={WS} distro={ROS_DISTRO} "
           f"모드={ {'virtual': '가상', 'ros': '실물(ROS 자식 프로세스로 연결 시도 중)', 'direct': '실물(직접 CAN, ROS 없음)'}[mode_kind()] }"

@@ -38,7 +38,7 @@
     <child link="elbow_link"/>
     <origin xyz="-0.0245 -0.000208 0.129792" rpy="1.570796 0 -1.570796"/>
     <axis xyz="0 0 1"/>
-    <limit lower="-1.745329" upper="1.745329" effort="10" velocity="3"/>
+    <limit lower="-2.356194" upper="2.356194" effort="10" velocity="3"/>
   </joint>
   <link name="wrist_pitch_link"><inertial><origin xyz="0.009082 0.002213 -0.043135"/><mass value="0.189235"/><inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0005"/></inertial></link>
   <joint name="wrist_pitch" type="revolute">

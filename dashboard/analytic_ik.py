@@ -22,6 +22,11 @@ import math
 import numpy as np
 
 
+def _crossn(a, v):
+    """a (3,) x v (n, 3) — np.cross 는 작은 배열에서 느리다."""
+    return np.stack([a[1] * v[:, 2] - a[2] * v[:, 1], a[2] * v[:, 0] - a[0] * v[:, 2], a[0] * v[:, 1] - a[1] * v[:, 0]], axis=1)
+
+
 def rot(a, t, v):
     """축 a(단위) 둘레 t 만큼 v 회전 (v 는 (3,))."""
     c, s = math.cos(t), math.sin(t)
@@ -43,11 +48,11 @@ def _coef(g, q4s):
     v = w0 - o4
     c, s = np.cos(q4s)[:, None], np.sin(q4s)[:, None]
     av = v @ a4
-    h = o4 + av * a4 * (1 - c) + c * v + s * np.cross(a4, v)        # (n, 3)
+    h = o4 + av * a4 * (1 - c) + c * v + s * _crossn(a4, v[None, :])   # (n, 3)
     u = h - o3
     r = o3 - o1
     au = u @ a3
-    x = np.cross(a3, u)
+    x = _crossn(a3, u)
     out = []
     for k in (a1, r):
         k0 = au * (k @ a3)
@@ -103,7 +108,8 @@ def solve3(g, p, tol_unit=2e-3, newton=8, tol_pos=1e-5):
             f = fk3(g, 0.0, q3, q4)
             v, t = f - o1, pr
             vp, tp = v - (v @ a1) * a1, t - (t @ a1) * a1
-            q1 = math.atan2(float(a1 @ np.cross(vp, tp)), float(vp @ tp))
+            cx = np.array([vp[1] * tp[2] - vp[2] * tp[1], vp[2] * tp[0] - vp[0] * tp[2], vp[0] * tp[1] - vp[1] * tp[0]])
+            q1 = math.atan2(float(a1 @ cx), float(vp @ tp))
             q = np.array([q1, q3, q4])
             x0 = fk3(g, *q)
             if np.linalg.norm(p - x0) > 0.005:   # 근이 아님(단위원 근처 복소근) — 다듬지 않고 버림

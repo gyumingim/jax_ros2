@@ -340,7 +340,7 @@ class _Solver:
                     out.append(self.point_down(q, lim))
         return out, len(raw)
 
-    def analytic_tip(self, point, hold, lim, mode, iters=10):
+    def analytic_tip(self, point, hold, lim, mode, iters=10, tol=2e-4, first=False):
         """기준점 = 집는 점(손끝 사이)인데 역기구학은 손목 중앙으로 (사용자 2026-11-20): 손목 목표 w 를 집는 점 + 수직 위
         (손목↔집는 점 거리) 에서 시작 → 해석 IK(앞 4 관절) + 손목 2 관절로 손 최대한 아래 → 실제 집는 점 오차만큼 w 를 옮겨
         다시 (손이 살짝 기울어도 집는 점이 목표에 오게). 가지마다 따로, 매번 직전 해에 가장 가까운 해를 잇는다.
@@ -358,7 +358,7 @@ class _Solver:
             w = w0.copy()
             for _ in range(iters):
                 e = point - tip(q)
-                if float(np.linalg.norm(e)) < 2e-4:
+                if float(np.linalg.norm(e)) < tol:
                     break
                 nxt = []
                 for k in (1.0, 0.5, 0.25):   # 그 손목 자리가 안 닿으면 반만 옮겨 다시
@@ -371,6 +371,8 @@ class _Solver:
                 q = min(nxt, key=lambda c: float(np.abs(c - q).max()))
             if not any(float(np.abs(q - o).max()) < 1e-4 for o in out):
                 out.append(q)
+            if first and float(np.linalg.norm(point - tip(q))) < tol:   # 지도: 하나만 맞으면 됨
+                return [q], n_raw
         return out, n_raw
 
     def solve_position(self, seed, point, ref, its=300):
@@ -831,10 +833,11 @@ class _Solver:
         z = np.array([0.0, 0.0, 1.0])
 
         def best_of(t6):
-            v = a6 * (h @ a6) * (1 - np.cos(t6)) + np.cos(t6) * h + np.sin(t6) * np.cross(a6, h)   # (n, 3)
+            ah = np.array([a6[1] * h[2] - a6[2] * h[1], a6[2] * h[0] - a6[0] * h[2], a6[0] * h[1] - a6[1] * h[0]])
+            v = a6 * (h @ a6) * (1 - np.cos(t6)) + np.cos(t6) * h + np.sin(t6) * ah   # (n, 3)
             A = (v @ a5) * a5[2]
             B = v[:, 2] - A
-            C = np.cross(a5, v)[:, 2]
+            C = a5[0] * v[:, 1] - a5[1] * v[:, 0]
             cands = [np.full(len(v), lo5), np.full(len(v), hi5)]
             ph = np.arctan2(C, B)
             for k in (-2, 0, 2):
@@ -890,7 +893,7 @@ class _Solver:
         # analytic_tip(손 최대한 아래 + 기울어진 만큼 손목을 옮겨 다시)으로 5 mm 안에 맞으면 집을 수 있음.
         tipp = np.asarray(self.to_sim([x, y, 0.025 - self.R.MAP_D]))
         best = None
-        for q in self.analytic_tip(tipp, q0, lim, "position")[0]:
+        for q in self.analytic_tip(tipp, q0, lim, "position", tol=0.002, first=True)[0]:
             site, rot = self.fk(q)
             pe = float(np.linalg.norm(site - tipp))
             if best is None or pe < best[0]:
@@ -1021,6 +1024,7 @@ class HandIK:
 
 
 SOLVER = HandIK()
+MAP_SOLVER = HandIK()   # 집을 수 있는 곳 지도 전용 (수십 초 걸려도 손 IK·따라가기를 막지 않게, 2026-11-20)
 
 
 def solve(ik_dir, body, ranges_deg, current_deg):
@@ -1100,7 +1104,7 @@ def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=(-0.28, 0.38, -0.45, 0.07
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
     try:
-        return SOLVER.call(ik_dir, {"op": "graspmap", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
+        return MAP_SOLVER.call(ik_dir, {"op": "graspmap", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
                                     "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=120.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
