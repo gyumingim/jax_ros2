@@ -1027,6 +1027,19 @@ SOLVER = HandIK()
 MAP_SOLVER = HandIK()   # 집을 수 있는 곳 지도 전용 (수십 초 걸려도 손 IK·따라가기를 막지 않게, 2026-11-20)
 
 
+def _map_d(ik_dir):
+    """책상 높이(어깨 축 아래 m) = realcoords.MAP_D (worker 와 같은 값). realcoords 는 numpy 만 쓰므로 파일을 직접 읽는다."""
+    import importlib.util
+    f = Path(ik_dir) / SUB / "humanoid_grasp_rl" / "realcoords.py"
+    m = sys.modules.get("_jax_realcoords_mapd")
+    if m is None or getattr(m, "__file__", None) != str(f):
+        spec = importlib.util.spec_from_file_location("_jax_realcoords_mapd", f)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        sys.modules["_jax_realcoords_mapd"] = m
+    return float(m.MAP_D)
+
+
 def solve(ik_dir, body, ranges_deg, current_deg):
     """POST /api/ik/hand. body: {x, y, z 실좌표 m | z_table_cm, yaw_deg, mode, fix_deg?: {관절: 각}}."""
     if ik_dir is None:
@@ -1037,7 +1050,7 @@ def solve(ik_dir, body, ranges_deg, current_deg):
         if b.get("z") not in (None, ""):
             z = float(b["z"])
         else:
-            z = float(b["z_table_cm"]) / 100.0 - 0.4775
+            z = float(b["z_table_cm"]) / 100.0 - _map_d(ik_dir)
         yaw = float(b.get("yaw_deg") or 0.0)
         fix = b.get("fix_deg") or {}
         if not isinstance(fix, dict) or len(fix) > 7:
