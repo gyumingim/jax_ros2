@@ -12,6 +12,7 @@
   <div class="chips">
     <span class="chip" id="chip-ws"><span class="dot"></span>연결 중</span>
     <span class="chip" id="chip-ros"><span class="dot"></span>ROS</span>
+    <button class="btn line small" id="btn-ros" title="ROS 를 source 한 자식 프로세스로 구독 (다시) 시작">ROS 연결(source)</button>
     <span class="chip" id="chip-can"><span class="dot"></span>can0</span>
     <span class="chip" id="chip-run"><span class="dot"></span>실행 0</span>
   </div>
@@ -20,15 +21,46 @@
 </header>
 <div class="warnbar">⚠ 전부 정지 = 노드 종료. ak45_node 가 끝나면 AK45 에 브레이크 0A → <b>홀드가 풀려 팔이 떨어질 수 있다.</b> 먼저 팔을 받친다.</div>
 <div class="warnbar bad" id="straybar" hidden></div>
+<nav class="tabs" id="tabs" role="tablist"></nav>
 <main class="main">
-  <h2 class="sec">AK45 상태 <small id="ros-note"></small></h2>
-  <section class="grid" id="motors"></section>
-  <h2 class="sec">켜기 / 끄기</h2>
-  <section class="grid" id="services"></section>
-  <h2 class="sec">보정 (calibrate)</h2>
-  <section class="grid" id="calib"></section>
-  <h2 class="sec">원점 (homing) <small id="homing-note"></small></h2>
-  <section class="grid" id="homing"></section>
+  <section class="page" id="page-ak" data-tab="ak">
+    <h2 class="sec">AK45 상태 <small id="ros-note"></small></h2>
+    <div class="grid" id="motors"></div>
+    <h2 class="sec">켜기 / 끄기</h2>
+    <div class="grid" id="svc-ak"></div>
+    <h2 class="sec">원점 (homing) <small id="homing-note"></small></h2>
+    <div class="grid" id="homing"></div>
+  </section>
+  <section class="page" id="page-servo" data-tab="servo">
+    <h2 class="sec">켜기 / 끄기</h2>
+    <div class="grid" id="svc-servo"></div>
+    <h2 class="sec">손목 서보 <small>마지막으로 보낸 각도 (측정값 아님)</small> <small id="servo-note"></small></h2>
+    <div class="grid" id="servo-wrist"></div>
+  </section>
+  <section class="page" id="page-finger" data-tab="finger">
+    <h2 class="sec">stm_bridge_node</h2>
+    <div class="grid" id="finger-stm"></div>
+    <h2 class="sec">손가락 서보 <small>마지막으로 보낸 각도 (측정값 아님)</small> <small id="finger-note"></small></h2>
+    <div class="grid" id="servo-finger"></div>
+  </section>
+  <section class="page" id="page-arm" data-tab="arm">
+    <h2 class="sec">켜기 / 끄기</h2>
+    <div class="grid" id="svc-arm"></div>
+    <h2 class="sec">보정 (calibrate)</h2>
+    <div class="grid" id="calib"></div>
+    <h2 class="sec">관절 14개 <small id="joints-note"></small></h2>
+    <div class="grid" id="joints"></div>
+  </section>
+  <section class="page" id="page-ik" data-tab="ik">
+    <h2 class="sec">pick_place 계획·검사 <small>--dry-run 만 (모터 안 움직임)</small></h2>
+    <div class="grid" id="svc-ik"></div>
+  </section>
+  <section class="page" id="page-vision" data-tab="vision">
+    <h2 class="sec">켜기 / 끄기</h2>
+    <div class="grid" id="svc-vision"></div>
+    <h2 class="sec">/object_pose <small id="pose-note"></small></h2>
+    <div class="grid" id="objpose"></div>
+  </section>
   <footer class="foot" id="foot"></footer>
 </main>
 <div class="toasts" id="toasts"></div>

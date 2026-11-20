@@ -1,9 +1,11 @@
-"""JAX 팔 대시보드: 노드 켜기/끄기/로그 + AK45 상태(읽기 전용) + 원점(homing_guard 서비스 부르기).
+"""JAX 팔 대시보드: 탭 6개(AK / 서보 / 손가락 / 팔 / 역기구학 / 비전). 노드 켜기/끄기/로그 + 상태(읽기 전용)
++ 원점(homing_guard 서비스 부르기) + pick_place --dry-run(계획·검사만).
 
     python3 dashboard/server.py                 # http://localhost:8080 (이 PC에서만)
     python3 dashboard/server.py --host 0.0.0.0  # 같은 네트워크의 폰·노트북에서도 (보호 없음, 주의)
 
-AK45 상태 칸을 보려면 서버를 켜기 전에 ROS 를 source 한다(rclpy 필요). 없으면 그 칸만 'ROS 없음'.
+ROS 구독은 서버 안이 아니라 자식 프로세스(ros_monitor_proc.py, /opt/ros/<distro> + <ws>/install 을 source)에서 돈다.
+서버를 source 없이 켜도 되고, 실패하면 화면의 'ROS 연결(source)' 버튼으로 다시 시도한다.
 """
 import argparse
 import asyncio
@@ -23,11 +25,12 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse   # 
 from fastapi.staticfiles import StaticFiles   # noqa: E402
 
 from procman import IS_LINUX, LOG_DIR, ProcessManager, tail_file   # noqa: E402
-from ros_monitor import HOMING_SRV, RosMonitor   # noqa: E402
+from ros_bridge import RosBridge   # noqa: E402
+from ros_monitor import HOMING_SRV   # noqa: E402  (rclpy 는 import 하지 않음 — 구독은 자식 프로세스)
 from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, REPO, ROS_DISTRO, WS   # noqa: E402
 
 pm = ProcessManager()
-ros = RosMonitor()
+ros = RosBridge()
 can_state = {"available": IS_LINUX, "text": "Linux 아님" if not IS_LINUX else "확인 중"}
 
 
@@ -52,6 +55,23 @@ def _can_watch():
 
 
 HOMING_FILE = REPO / "arm_control" / "homing.json"
+CALIB_FILE = REPO / "arm_control" / "calibration.json"
+_calib_cache = {"mtime": None, "data": None}
+
+
+def _calibration():
+    """calibration.json 의 관절 표(관절↔모터·ID·verified). 파일이 바뀌면 다시 읽는다. 없거나 깨지면 error."""
+    try:
+        m = CALIB_FILE.stat().st_mtime
+        if _calib_cache["mtime"] != m:
+            d = json.loads(CALIB_FILE.read_text(encoding="utf-8"))
+            joints = [{k: j.get(k) for k in ("joint", "motor", "id", "name", "sign", "scale", "zero_deg",
+                                             "sim_range_deg", "verified", "limit_deg")}
+                      for j in d.get("joints") or []]
+            _calib_cache.update(mtime=m, data={"file": str(CALIB_FILE), "joints": joints})
+        return _calib_cache["data"]
+    except Exception as e:
+        return {"file": str(CALIB_FILE), "joints": [], "error": f"{type(e).__name__}: {e}"}
 
 
 def _home_poses():
@@ -81,6 +101,7 @@ def state():
         "can": dict(can_state, up_cmd=CAN_UP_CMD),
         "calibrate": CALIBRATE_GUIDE,
         "home_poses": _home_poses(),
+        "calibration": _calibration(),
         "info": {"ws": WS, "distro": ROS_DISTRO, "repo": str(REPO), "logs": str(LOG_DIR),
                  "platform": sys.platform},
     }
@@ -127,6 +148,12 @@ def api_stop():
     return pm.stop_all()
 
 
+@app.post("/api/ros/connect")
+async def api_ros_connect():
+    """ROS 를 source 한 자식 프로세스를 (다시) 띄운다. 서버를 source 없이 켰어도 이 버튼으로 붙는다."""
+    return JSONResponse(await asyncio.to_thread(ros.start))
+
+
 @app.post("/api/homing/home")
 async def api_homing_home(req: Request):
     return JSONResponse(await asyncio.to_thread(_homing_call, "home", await _body(req)))
@@ -165,11 +192,11 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("JAX_DASH_PORT", "8080")))
     a = ap.parse_args()
     import uvicorn
-    ros.start()
+    threading.Thread(target=ros.start, daemon=True).start()   # 시작할 때 한 번 자동 시도(실패하면 화면 버튼)
     if IS_LINUX:
         threading.Thread(target=_can_watch, daemon=True).start()
     shown = "localhost" if a.host in ("127.0.0.1", "localhost") else a.host
-    print(f"대시보드: http://{shown}:{a.port}/   ws={WS} distro={ROS_DISTRO} ROS={'있음' if ros.available else ros.reason}",
+    print(f"대시보드: http://{shown}:{a.port}/   ws={WS} distro={ROS_DISTRO} ROS=자식 프로세스로 연결 시도 중",
           flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         print("주의: 외부 접속 열림 — 같은 네트워크 누구나 노드를 켜고 끌 수 있다.", flush=True)

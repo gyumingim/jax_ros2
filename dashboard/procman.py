@@ -329,7 +329,7 @@ class ProcessManager:
             it.pid, it.adopted, it.started, it.cmd = pid, True, d.get("t"), d.get("cmd", "")
 
     # ---------- 상태 ----------
-    def snapshot(self, tail=30):
+    def snapshot(self):
         now = time.time()
         out = []
         for it in self.items.values():
@@ -337,7 +337,7 @@ class ProcessManager:
             alive = it.alive()
             s = it.svc
             out.append({
-                "id": s.id, "label": s.label, "kind": s.kind, "group": s.group, "help": s.help,
+                "id": s.id, "label": s.label, "kind": s.kind, "group": s.group, "help": s.help, "tab": s.tab,
                 "available": ok, "why": why, "alive": alive, "stopping": it.stopping,
                 "pid": it.pid if alive else None, "adopted": it.adopted and alive,
                 "uptime": (now - it.started) if alive and it.started else None,
@@ -346,6 +346,6 @@ class ProcessManager:
                 "params": [{"key": p.key, "label": p.label, "value": it.params.get(p.key, ""), "hint": p.hint}
                            for p in s.params],
                 "stop_warn": s.stop_warn, "conflicts": list(s.conflicts),
-                "log": tail_file(it.log_path, tail),
+                "log": tail_file(it.log_path, s.tail), "tail": s.tail,
             })
         return out

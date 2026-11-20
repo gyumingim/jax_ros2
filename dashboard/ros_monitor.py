@@ -1,5 +1,6 @@
 """ROS 구독: /diagnostics (ak45_node 의 ak45/<joint>, ak45/can_bus), /joint_states,
-/arm_control/homing (homing_guard 의 원점 상태 JSON, transient local).
+/arm_control/homing (homing_guard 의 원점 상태 JSON, transient local),
+/servo/state (stm_bridge_node 가 마지막으로 보낸 서보 각도 — 측정값 아님), /object_pose (vision_node).
 
 rclpy 가 없으면(Windows, 또는 ROS 를 source 하지 않고 서버를 켬) available=False 로 두고 아무것도 안 한다.
 명령 토픽은 발행하지 않는다. 부르는 것은 homing_guard 의 std_srvs/Trigger 서비스
@@ -26,6 +27,9 @@ class RosMonitor:
         self.diag_t = None
         self.homing = None    # homing_guard 의 마지막 JSON (homing.Homing.status + stamp)
         self.homing_t = None  # 받은 시각(이 PC time.time)
+        self.servos = {}      # name -> {deg, t}  (/servo/state: 마지막으로 보낸 모터 각, rad -> deg)
+        self.servo_t = None
+        self.obj = None       # /object_pose 마지막 값 {x, y, z, yaw_deg, frame_id, stamp, t}
         self._node = None
         self._Trigger = None
         self._clients = {}
@@ -35,6 +39,7 @@ class RosMonitor:
         try:
             import rclpy
             from diagnostic_msgs.msg import DiagnosticArray
+            from geometry_msgs.msg import PoseStamped
             from sensor_msgs.msg import JointState
             from std_msgs.msg import String
             from std_srvs.srv import Trigger
@@ -51,6 +56,8 @@ class RosMonitor:
             node = rclpy.create_node("jax_dashboard")
             node.create_subscription(DiagnosticArray, "/diagnostics", self._on_diag, 10)
             node.create_subscription(JointState, "/joint_states", self._on_joints, 10)
+            node.create_subscription(JointState, "/servo/state", self._on_servo, 10)
+            node.create_subscription(PoseStamped, "/object_pose", self._on_pose, 10)
             # homing_guard 는 depth 1, transient local 로 발행 -> 늦게 켠 대시보드도 마지막 상태를 받는다
             node.create_subscription(String, HOMING_TOPIC, self._on_homing,
                                      QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -98,6 +105,22 @@ class RosMonitor:
             for n, p in zip(msg.name, msg.position):
                 self.joints[n] = {"deg": math.degrees(p), "t": now}
             self.joint_t = now
+
+    def _on_servo(self, msg):
+        now = time.time()
+        with self.lock:
+            for n, p in zip(msg.name, msg.position):
+                self.servos[n] = {"deg": math.degrees(p), "t": now}
+            self.servo_t = now
+
+    def _on_pose(self, msg):
+        p, q = msg.pose.position, msg.pose.orientation
+        # vision_node 는 z 축 회전만 넣는다(yaw). 일반 쿼터니언에서도 z 축 yaw 를 뽑는다.
+        yaw = math.degrees(math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+        st = msg.header.stamp
+        with self.lock:
+            self.obj = {"x": p.x, "y": p.y, "z": p.z, "yaw_deg": yaw, "frame_id": msg.header.frame_id,
+                        "stamp": st.sec + st.nanosec * 1e-9, "t": time.time()}
 
     def _on_homing(self, msg):
         try:
@@ -176,4 +199,8 @@ class RosMonitor:
                 "diag_age": (now - self.diag_t) if self.diag_t else None,
                 "joint_age": (now - self.joint_t) if self.joint_t else None,
                 "homing": self._homing_snapshot(now),
+                "joints": {n: {"deg": d["deg"], "age": now - d["t"]} for n, d in self.joints.items()},
+                "servos": {n: {"deg": d["deg"], "age": now - d["t"]} for n, d in self.servos.items()},
+                "servo_age": (now - self.servo_t) if self.servo_t else None,
+                "object_pose": dict(self.obj, age=now - self.obj["t"]) if self.obj else None,
             }

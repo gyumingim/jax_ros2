@@ -68,3 +68,34 @@ pre.logbox { font: 11.5px/1.35 ui-monospace, Consolas, monospace; background: #0
   .btn-stop { width: 100%; }
   .grid { grid-template-columns: 1fr; }
 }
+/* ---------- 탭 (폰 폭에서는 가로 스크롤) ---------- */
+.tabs { position: sticky; top: var(--topbar-h, 0px); z-index: 40; display: flex; gap: 4px; overflow-x: auto; background: #fff;
+  border-bottom: 1px solid var(--line); padding: 6px 12px 0; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.tab { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; padding: 9px 18px; border-radius: 10px 10px 0 0;
+  color: var(--muted); font-weight: 700; font-size: 15px; text-decoration: none; border-bottom: 3px solid transparent; white-space: nowrap; }
+.tab:hover { color: var(--navy); background: #f6f8fb; }
+.tab.active { color: var(--blue-d); border-bottom-color: var(--blue); background: #eef3fe; }
+.tdot { min-width: 8px; height: 8px; border-radius: 999px; font-size: 11px; line-height: 1; color: #fff; display: inline-flex;
+  align-items: center; justify-content: center; }
+.tdot.on { background: var(--green); min-width: 18px; height: 18px; padding: 0 5px; }
+.tdot.bad { background: var(--red); }
+.page[hidden] { display: none; }
+.vlist { display: flex; flex-direction: column; gap: 8px; }
+.hrow .big { font-size: 22px; }
+pre.logbox.tall { max-height: 520px; }
+.tablewrap { overflow-x: auto; margin-top: 8px; }
+table.jt { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.jt th, table.jt td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; white-space: nowrap; }
+table.jt th { color: var(--muted); font-weight: 600; background: #f6f8fb; }
+table.jt td.n { text-align: right; }
+table.jt td.ok { color: var(--green); font-weight: 800; text-align: center; }
+table.jt td.no { color: var(--red-d); font-weight: 800; text-align: center; }
+table.jt tr.stale td { color: #b45309; }
+table.jt small { color: var(--muted); }
+@media (max-width: 640px) {
+  .tab { padding: 8px 13px; font-size: 14px; }
+}
+.foot, .sec small, .help, .note { overflow-wrap: anywhere; }
+.main { min-width: 0; overflow-x: hidden; }
+.big small.unit { font-size: 12px; font-weight: 500; color: var(--muted); }
+.btn.small { padding: 3px 10px; font-size: 12px; border-radius: 999px; }

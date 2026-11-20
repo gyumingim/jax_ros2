@@ -6,8 +6,7 @@
 
 ```bash
 sudo apt install -y python3-fastapi python3-uvicorn python3-websockets   # 또는 pip install fastapi uvicorn websockets
-source /opt/ros/jazzy/setup.bash && source ~/ros2_ws/install/setup.bash   # AK45 상태 칸(rclpy)이 필요할 때
-python3 dashboard/server.py
+python3 dashboard/server.py      # ROS 를 source 하지 않아도 된다(아래 'ROS 연결')
 ```
 
 브라우저에서 **http://localhost:8080** 을 연다. 기본은 **이 PC에서만** 열린다(127.0.0.1).
@@ -24,7 +23,27 @@ python3 dashboard/server.py
 | `JAX_DASH_SIGINT_WAIT`, `JAX_DASH_SIGTERM_WAIT` | 5, 3 초 | 끄기 단계 사이 대기 |
 | `JAX_DASH_DEMO=1` | | Linux 에서도 가짜 시험 항목을 보인다 |
 
+## ROS 연결 (자식 프로세스)
+
+서버는 rclpy 를 import 하지 않는다. ROS 구독(`ros_monitor.RosMonitor`)은 `ros_bridge.py` 가 띄우는 자식 프로세스에서 돈다:
+`bash -c "source /opt/ros/$JAX_ROS_DISTRO/setup.bash; source $JAX_WS/install/setup.bash(있으면); exec python3 -u dashboard/ros_monitor_proc.py"`.
+자식은 0.25초마다 상태를 JSON 줄로 stdout 에 쓰고, 원점 서비스 호출은 stdin JSON 명령으로 받는다. stdin 이 닫히면(서버 종료) 끝난다. stderr 는 `logs/ros_monitor.log`.
+
+- 서버가 켜질 때 한 번 자동 시도. 실패하면 'ROS 없음' 카드에 이유 + **ROS 연결(source)** 버튼, 연결되면 위 칩 옆 버튼이 **ROS 다시 연결**. 자식이 죽으면 'ROS 자식 죽음 (코드 N)', 3초 넘게 줄이 없으면 'ROS 응답 없음'.
+- `/opt/ros/<distro>/setup.bash` 가 없으면(Windows 등) 바로 '이 PC엔 ROS 없음 (… 없음)'. API: `POST /api/ros/connect`.
+
 ## 화면
+
+탭 6개(위 칩·전부 정지·경고 띠는 모든 탭 공통). 고른 탭은 주소 해시(`#ak` `#servo` `#finger` `#arm` `#ik` `#vision`)와 브라우저 localStorage 에 기억. 폰 폭에서는 탭 바가 가로로 스크롤된다. 탭 이름 옆 초록 숫자 = 그 탭에서 켜진 항목 수, 빨간 점 = 죽은 항목.
+
+| 탭 | 내용 |
+|---|---|
+| AK | can0 올리기, ak45_node, AK45 카드 4개 + CAN 버스 카드, 원점(homing) 패널 |
+| 서보 | stm_bridge_node, 손목 서보 W_PITCH·W_YAW·W_X 의 `/servo/state`(**마지막으로 보낸 값, 측정 아님**) + sim 환산 |
+| 손가락 | stm_bridge_node 상태 칩·로그(켜기/끄기는 서보 탭), F1_1~F3_2·F_ROT 마지막 보낸 값(손가락별 묶음) |
+| 팔 | arm.launch.py / arm_homed.launch.py / arm_control_node, vcan 시험, 보정 안내, 관절 14개 표(calibration.json 의 관절·모터·ID·verified + 현재 모터 각: AK = `/joint_states`, 서보 = `/servo/state`, sim 환산 = (모터 각 − zero_deg)/(sign×scale)) |
+| 역기구학 | `ros2 run arm_control pick_place --cube X Y YAW --target X Y --max-speed V [--d] [--ik] --dry-run` 한 번 실행형. **--dry-run 고정**(계획·검사만, 모터 안 움직임). 출력은 마지막 실행분만 최대 200줄 |
+| 비전 | vision_node(fixed_pose 또는 result_json), `/object_pose` 최근 값(x, y, z, yaw, frame_id, 나이; 3초 넘으면 '오래됨'). frame 이 shoulder_roll_axis 이면 '역기구학 탭 cube 칸에 넣기'(칸만 채움) |
 
 - 위: 연결·ROS·can0 상태 칩, 실행 개수, 큰 **■ 전부 정지**(Esc). 아래 띠에 경고: 정지하면 `ak45_node` 가 끝나며 브레이크 0A → **홀드가 풀려 팔이 떨어질 수 있다.** 터미널에서 켠 노드가 있으면 빨간 띠로 알린다(전부 정지로 안 꺼짐).
 - **AK45 상태**: `/diagnostics`·`/joint_states` 구독. 모터 4개 카드(위치°, 온도, 에러 코드, 워치독, target, command_active, 오차, 전류, 속도) + CAN 버스 카드(state, 에러 프레임, 버스오프). 3초 넘게 안 오면 '오래됨'. rclpy 가 없으면 'ROS 없음'만 보이고 나머지는 그대로 돈다.
@@ -43,7 +62,7 @@ python3 dashboard/server.py
 - 같이 켜면 안 되는 것은 켜기를 거절: `arm.launch.py` ↔ `arm_homed.launch.py` ↔ 개별 `ak45`/`stm_bridge`/`arm_control` (서로 전부). 보정 칸은 `arm_homed.launch.py` 가 켜져 있어도 빨간 경고. 대시보드 밖(터미널)에서 같은 노드가 이미 떠 있어도 거절.
 - `can0 올리기`: 이미 UP 이면 그대로, 아니면 `sudo -n` → `pkexec`(로봇 PC 화면에 암호창) 순서. 둘 다 안 되면 로그에 복사할 명령 `sudo ip link set can0 up type can bitrate 1000000`.
 - 대시보드 서버를 꺼도 노드는 **그대로 둔다**(끄면 팔이 떨어질 수 있어서). 다시 켜면 `logs/pids.json` 으로 다시 붙잡는다(Linux).
-- 대시보드는 `jax_dashboard` 라는 ROS 노드로 `/diagnostics`, `/joint_states`, `/arm_control/homing` 을 구독하고, 원점 버튼을 누를 때만 homing_guard 서비스 클라이언트를 만든다. `arm_control/tests/check_topics.sh` 를 돌릴 때는 대시보드를 끄거나 ROS 없이 켠다(구독자가 하나 늘어 표와 달라질 수 있음).
+- 대시보드는 `jax_dashboard` 라는 ROS 노드로 `/diagnostics`, `/joint_states`, `/arm_control/homing`, `/servo/state`, `/object_pose` 를 구독하고, 원점 버튼을 누를 때만 homing_guard 서비스 클라이언트를 만든다. `arm_control/tests/check_topics.sh` 를 돌릴 때는 대시보드를 끄거나 ROS 없이 켠다(구독자가 하나 늘어 표와 달라질 수 있음).
 
 ## 항목 추가
 
@@ -73,7 +92,17 @@ Service("my_node", "내 노드", lambda p: f"exec ros2 run my_pkg my_node --ros-
   - guard 를 끈 뒤: 상태 나이가 계속 늘어남(화면은 3초 넘으면 '오래됨, arm_homed.launch.py 를 켜세요'), `home elbow` → 약 1초 뒤 '/arm_control/home_elbow 없음: homing_guard 가 안 켜짐'.
 - 시험 끝에 서버·guard 프로세스 모두 끔.
 
+### 탭 6개 (2026-11-20)
+
+- Windows `--port 8097`: `/` 200, `/api/state` 에 항목마다 `tab`, `calibration.joints` 14개. `node --check static/app.js` 통과. headless Edge 로 탭 6개(1280 폭)와 폰 폭(390 px, iframe 으로 실제 폭) 스크린샷 확인 — 가로 넘침 없음(관절 표는 카드 안에서 가로 스크롤).
+- `pick_dry` 명령: 기본값 → `… pick_place --cube 0.1 -0.3 20 --target 0.05 -0.27 --max-speed 30 --dry-run`. `0.1;rm`·범위 밖·공백 든 ik 경로 거절. Windows 에서 켜기 → '이 PC에서 못 씀'.
+- WSL Humble + venv(fastapi 0.162) `--port 8098`, `ros2 topic pub` 로 가짜 `/servo/state`(10개), `/object_pose`(shoulder_roll_axis, yaw 20°), `/joint_states`(ak45_1..4): `/api/state` 에 각도·yaw 20.0°·frame_id 그대로, 서보·손가락·팔 표·비전 화면에 값이 뜸.
+
+- ROS 자식 프로세스: Windows → `/api/ros/connect` '이 PC엔 ROS 없음 (/opt/ros/jazzy/setup.bash 없음)', 원점 호출도 같은 이유로 거절. WSL: 서버를 **ROS source 없이**(`env -i`, venv python) `JAX_ROS_DISTRO=humble` 로 켬 → 자식이 자동으로 붙어 가짜 `/servo/state`·`/joint_states` 수신, homing_guard(python 직접 실행) 상태 수신, `home elbow`·`release all` 이 stdin 명령으로 성공. 자식 `kill -9` → 'ROS 자식 프로세스 끝남 (코드 -9)', 원점 호출 거절 → `/api/ros/connect` 로 새 pid 로 다시 붙음(옛 자식 안 남음). 서버 SIGINT → 자식도 끝남.
+
 ## 확인 안 한 것
+
+- 역기구학 탭의 실제 `pick_place --dry-run` 실행(로봇 PC + team-jax/IK 필요)과 출력 표시.
 
 - **Linux 쪽 전부**: 실제 `ros2 launch/run` 켜기·끄기, 프로세스 그룹 SIGINT/SIGTERM/SIGKILL, `ak45_node` 가 안 끝나는 경우 표시, `can0` 올리기(sudo -n / pkexec), `ip -json` can0 상태 칩, 터미널 노드 감지(/proc), `pids.json` 다시 붙잡기, rclpy 구독과 AK45 카드, `launch_vcan.sh` 버튼(레포가 `<ws>/src/` 안에 있어야 한다).
 - 폰 화면은 CSS 만 맞춰 두었고 실제 폰으로 보지 않았다.
@@ -85,4 +114,4 @@ Service("my_node", "내 노드", lambda p: f"exec ros2 run my_pkg my_node --ros-
 1. 로봇 PC 에서 위 '확인 안 한 것' 시험(먼저 `JAX_DASH_DEMO=1` 가짜 항목, 다음 vcan 시험 버튼, 그다음 실물).
 2. **모터 명령 패널**(이번엔 일부러 안 만듦): 작은 각도(2°) 한 관절 명령, 누르는 동안만 움직이기, 원점 확인 후에만 활성, 속도 제한 표시.
 3. '정지'의 뜻 정하기: 지금은 노드 종료 = 브레이크 0A(팔 떨어짐). 홀드 유지 정지(현재 위치를 target 으로)가 필요한지.
-4. 서보(`/servo/state`) 칸, `/object_pose` 표시, systemd 자동 실행과 연결.
+4. systemd 자동 실행과 연결.
