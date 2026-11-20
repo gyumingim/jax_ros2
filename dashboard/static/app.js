@@ -941,8 +941,9 @@ function onUser(n, v) {
   }
   renderAngles();
 }
-const JLABEL = { shoulder_roll: "어깨 roll", shoulder_yaw: "어깨 yaw", upper_arm_roll: "위팔 roll", elbow: "팔꿈치",
-  wrist_pitch: "손목 비틀기 (W_YAW)", wrist_yaw: "손목 굽힘 (W_PITCH)", hand_roll: "손 yaw (W_X)", finger_rotation: "손가락 회전" };
+// 이름 = 실제 움직임 (시뮬 이름은 CAD 에서 와서 roll/pitch/yaw 가 안 맞는다 — arm.xml 0° 자세에서 손이 움직이는 방향으로 확인, 2026-11-20)
+const JLABEL = { shoulder_roll: "어깨 앞뒤 (pitch)", shoulder_yaw: "어깨 옆으로 (roll)", upper_arm_roll: "위팔 비틀기 (yaw)", elbow: "팔꿈치 (pitch)",
+  wrist_pitch: "손목 비틀기 (W_YAW)", wrist_yaw: "손목 굽힘 (W_PITCH)", hand_roll: "손 비틀기 (W_X)", finger_rotation: "손가락 회전" };
 const jLabel = (n) => JLABEL[n] || n.replace(/^finger(\d)_joint(\d)$/, "손가락$1 마디$2");
 function angleRow(j) {
   const r = {}, rg = j.cmd_range_deg || [0, 0];
