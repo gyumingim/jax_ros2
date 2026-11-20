@@ -592,6 +592,7 @@ function buildMap(c) {
   M.svg.addEventListener("mouseleave", () => mapHover(null));
   M.svg.addEventListener("click", (e) => mapClick(mapPt(e)));
   M.hover = el("div", { class: "mhover" }, " ");
+  M.guide = el("div", { class: "mguide", hidden: true });
   M.res = el("div", { class: "result" }, "지도 읽는 중…");
   M.err = el("div", { class: "note warn", hidden: true });
   mapMode("cube");
@@ -599,14 +600,51 @@ function buildMap(c) {
     el("div", { class: "lead", style: "margin:0 0 10px" }, "지도에서 ", el("b", {}, "큐브"), " → ", el("b", {}, "놓을 자리"), " 순서로 누르세요."),
     el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기")),
     el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
-    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "집고 놓기 됨"), el("span", {}, el("i", { class: "sw half" }), "한쪽만·가장자리"),
+    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw both" }), "손 그대로·반 바퀴 둘 다 됨"), el("span", {}, el("i", { class: "sw ok" }), "한쪽 손 모양만 됨"),
+      el("span", {}, el("i", { class: "sw half" }), "집기·놓기 한쪽만·가장자리"),
       el("span", {}, el("i", { class: "sw no" }), "안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
       el("span", {}, el("i", { class: "sw vis" }), "비전")),
-    el("div", { class: "mwrap" }, M.svg), M.hover, M.res, M.err);
+    M.guide, el("div", { class: "mwrap" }, M.svg), M.hover, M.res, M.err);
 }
 function mapMode(m) {
   M.mode = m;
   M.bCube.className = m === "cube" ? "on" : ""; M.bTarget.className = m === "target" ? "on" : "";
+  mapPaint();
+}
+// 파지 = {hand_yaw, flip}: flip = 손 반 바퀴(HAND_FLIP). 한 배달은 한 파지로 끝까지 가므로(env._servable)
+// 큐브 칸과 놓을 자리 칸에 같은 파지가 있어야 됨(realcoords.plan).
+const gKey = (g) => `${g.hand_yaw}|${g.flip}`;
+const gHand = (g) => (g.flip === true ? "손 반 바퀴" : g.flip === false ? "손 그대로" : "손");
+const gName = (g) => `${gHand(g)}, ${degS(g.hand_yaw)}`;
+function gKinds(gs) {   // 파지 목록 -> "반 바퀴 손으로만" 처럼
+  const p = gs.some((g) => g.flip === false), f = gs.some((g) => g.flip === true);
+  return p && f ? "손 그대로·반 바퀴 둘 다로" : f ? "반 바퀴 손으로만" : p ? "그대로 손으로만" : "어떤 손으로든";
+}
+function cubeCell() { const v = mapVals(); return v.cube ? mapCell(v.cube) : null; }
+// 큐브를 찍은 뒤 '놓을 자리 고르기'면 그 큐브를 잡을 수 있는 파지로 놓기가 되는 칸만 파랗게, 나머지는 흐리게.
+function mapPaint() {
+  const d = M.data; if (!d || !M.rects || !M.guide) return;
+  const v = mapVals(), cc = v.cube ? mapCell(v.cube) : null;
+  const pick = M.mode === "target" && v.cube;
+  const keys = pick && cc ? new Set(cc.grasps.map(gKey)) : null;
+  d.cells.forEach((c, n) => {
+    let cls;
+    if (pick) cls = keys && c.grasps.some((g) => keys.has(gKey(g))) ? "ok" : "dim";
+    else cls = c.feasible ? (c.plain && c.flip ? "both" : "ok") : c.grasp || c.place ? "half" : "no";
+    M.rects[n].setAttribute("class", "rc " + cls);
+  });
+  let txt = "", bad = false;
+  if (pick) {
+    if (!cc) { txt = "큐브가 지도 밖이라 놓을 자리를 칠할 수 없음"; bad = true; }
+    else if (!cc.grasps.length) { txt = "이 큐브 자리는 어느 손 모양으로도 집고 놓기가 안 됨 — 큐브를 파란 칸으로 옮기세요"; bad = true; }
+    else {
+      const k = gKinds(cc.grasps), n = d.cells.filter((c) => c.grasps.some((g) => keys.has(gKey(g)))).length;
+      const head = k === "반 바퀴 손으로만" ? "이 큐브는 손을 반 바퀴 돌려 잡아야 해서" : k === "그대로 손으로만" ? "이 큐브는 손을 그대로 두고 잡아야 해서" :
+        k === "손 그대로·반 바퀴 둘 다로" ? "이 큐브는 손 그대로·반 바퀴 둘 다로 잡을 수 있어" : "이 큐브를 잡는 손 모양으로";
+      txt = `${head}, 놓을 수 있는 곳은 파란 칸만 (${n}칸 · ${cc.grasps.map(gName).join(" / ")})`;
+    }
+  }
+  M.guide.hidden = !txt; M.guide.textContent = txt; M.guide.className = "mguide" + (bad ? " bad" : "");
 }
 function mapPt(e) {
   const p = M.svg.createSVGPoint(); p.x = e.clientX; p.y = e.clientY;
@@ -620,7 +658,7 @@ function mapCell(p) {
 }
 function cellText(c) {
   if (!c) return "지도 밖 (판정 칸 없음)";
-  const t = c.turns.length ? ` (손 ${c.turns.map(degS).join(" 또는 ")})` : "";
+  const t = c.grasps.length ? ` (${c.grasps.map(gName).join(" 또는 ")})` : "";
   return c.feasible ? "집고 놓기 됨" + t : c.grasp && c.place ? "가장자리 — 집기·놓기는 되지만 옆 칸이 안 돼 여유 없음" :
     c.grasp ? "집기만 됨 (놓기 안 됨)" : c.place ? "놓기만 됨 (집기 안 됨)" : "안 됨 — 팔이 못 감";
 }
@@ -643,7 +681,10 @@ function mapClick(p) {
   const at = M.snap && cell ? { x: cell.x, y: cell.y } : p;
   const k = M.mode === "cube" ? ["cube_x", "cube_y"] : ["target_x", "target_y"];
   c.fields[k[0]].value = at.x.toFixed(3); c.fields[k[1]].value = at.y.toFixed(3);
+  const cc = M.mode === "target" ? cubeCell() : null;
   if (!cell || !cell.feasible) toast(`⚠ 그 자리는 지도상 ${cell ? "안 되는 칸" : "지도 밖"} — 그래도 계획 돌려 보기는 됨`, "warn");
+  else if (cc && !cell.grasps.some((g) => cc.grasps.some((h) => gKey(g) === gKey(h))))
+    toast("⚠ 그 칸은 이 큐브를 잡는 손 모양으로는 못 놓음 — 그래도 계획 돌려 보기는 됨", "warn");
   if (M.mode === "cube") mapMode("target");
   mapUpdate();
 }
@@ -663,9 +704,11 @@ async function mapLoad(yaw) {
     M.err.hidden = true;
     M.data = d;
     const w = d.cell.dx * MS - 2, h = d.cell.dy * MS - 2;
-    M.gCells.replaceChildren(...d.cells.map((c) => sv("rect", {
-      x: (msx(c.x) - w / 2).toFixed(1), y: (msy(c.y) - h / 2).toFixed(1), width: w.toFixed(1), height: h.toFixed(1), rx: 3,
-      class: "rc " + (c.feasible ? "ok" : c.grasp || c.place ? "half" : "no") })));
+    for (const c of d.cells) c.grasps = c.grasps || c.turns.map((t) => ({ hand_yaw: t, flip: null }));   // 옛 서버
+    M.rects = d.cells.map((c) => sv("rect", {
+      x: (msx(c.x) - w / 2).toFixed(1), y: (msy(c.y) - h / 2).toFixed(1), width: w.toFixed(1), height: h.toFixed(1), rx: 3, class: "rc no" }));
+    M.gCells.replaceChildren(...M.rects);
+    mapPaint();
   } catch (e) { if (my === M.seq) { M.err.hidden = false; M.err.textContent = "⚠ 도달 맵을 못 받음 (서버)"; } }
 }
 function mapUpdate() {
@@ -695,6 +738,7 @@ function mapUpdate() {
     M.yawKey = key;
     clearTimeout(M.tLoad); M.tLoad = setTimeout(() => mapLoad(yaw), 80);
   }
+  mapPaint();
   clearTimeout(M.tChk); M.tChk = setTimeout(mapCheck, 150);
 }
 async function mapCheck() {
@@ -713,7 +757,7 @@ async function mapCheck() {
 }
 function checkText(r) {
   if (!r.ok) return ["⚠ 판정 못 함: " + (r.error || "?"), "warn"];
-  if (r.reachable) return [`✅ 됨 (손 ${degS(r.hand_yaw)} 돌림) — 이제 ② 계획 돌려 보기`, "ok"];
+  if (r.reachable) return [`✅ 됨 (${gHand(r)}, ${degS(r.hand_yaw)}) — 이제 ② 계획 돌려 보기`, "ok"];
   const tail = " — 그래도 계획 돌려 보기는 됨 (시뮬이 다시 확인)";
   if (/no reach map for D/.test(r.reason)) return [`⚠ d(어깨~책상) ${r.d} m 가 지도(${r.map_d} m)와 달라 판정 못 함` + tail, "warn"];
   const a = r.alone || {}, cu = a.cube || {}, tg = a.target || {};
@@ -722,7 +766,11 @@ function checkText(r) {
   if (!cu.reachable && !tg.reachable) why = out(cu) && out(tg) ? "둘 다 지도 밖" : "팔이 큐브 자리·놓을 자리 둘 다 못 감";
   else if (!cu.reachable) why = out(cu) ? "큐브가 지도 밖" : "팔이 큐브 자리에 못 감";
   else if (!tg.reachable) why = out(tg) ? "놓을 자리가 지도 밖" : "팔이 놓을 자리에 못 감";
-  else why = `집을 때(손 ${degS(cu.hand_yaw)})와 놓을 때(손 ${degS(tg.hand_yaw)}) 손 돌림이 달라야 함`;
+  else {   // 둘 다 따로는 되지만 같은 파지(손 모양·손 돌림)가 없음
+    const cg = r.cube_grasps || cu.grasps || [], tgg = r.target_grasps || tg.grasps || [];
+    why = gKinds(cg) !== gKinds(tgg) ? `큐브는 ${gKinds(cg)}, 놓을 자리는 ${gKinds(tgg)} 됨 — 같은 손으로 둘 다 안 됨`
+      : `큐브는 ${cg.map(gName).join(" / ")}, 놓을 자리는 ${tgg.map(gName).join(" / ")} 로만 됨 — 같은 손으로 둘 다 안 됨`;
+  }
   return [`⛔ 안 됨: ${why} (큐브 yaw ${degS(foldYaw(r.input.cube[2]))} 기준)` + tail, "bad"];
 }
 
@@ -894,7 +942,7 @@ function onUser(n, v) {
   renderAngles();
 }
 const JLABEL = { shoulder_roll: "어깨 roll", shoulder_yaw: "어깨 yaw", upper_arm_roll: "위팔 roll", elbow: "팔꿈치",
-  wrist_pitch: "손목 pitch", wrist_yaw: "손목 yaw", hand_roll: "손 roll", finger_rotation: "손가락 회전" };
+  wrist_pitch: "손목 비틀기 (W_YAW)", wrist_yaw: "손목 굽힘 (W_PITCH)", hand_roll: "손 yaw (W_X)", finger_rotation: "손가락 회전" };
 const jLabel = (n) => JLABEL[n] || n.replace(/^finger(\d)_joint(\d)$/, "손가락$1 마디$2");
 function angleRow(j) {
   const r = {}, rg = j.cmd_range_deg || [0, 0];

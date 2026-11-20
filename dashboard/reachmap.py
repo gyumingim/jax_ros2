@@ -31,6 +31,7 @@ def _load(ik_dir):
             base = {k: z[k] for k in ("xs", "ys", "grasp", "place", "feasible")}
         with np.load(files[2]) as z:
             yaw = {k: z[k] for k in ("yaws", "offsets", "xs", "ys", "grasp", "place", "feasible")}
+            yaw["by_flip"] = "feasible_by_flip" in z.files   # 파지(손 그대로/반 바퀴)별 맵이 있나
         _cache.update(key=key, rc=rc, base=base, yaw=yaw)
     return _cache["rc"], _cache["base"], _cache["yaw"]
 
@@ -48,42 +49,55 @@ def _real_xy(rc, xs, ys):
 
 
 def _yaw_masks(rc, ym, yaw_real):
-    """실 yaw 하나에 대해 칸마다 (grasp, place, feasible, 되는 손 돌림 목록) — reachable_turned 와 같은 yaw·손 돌림 고르기."""
+    """실 yaw 하나에 대해 (sim yaw, 고른 맵 yaw, 맵 yaw 번호, 파지 목록 [(손 돌림, flip, feasible[i,j])]) —
+    realcoords.grasp_maps 와 같은 yaw·손 돌림·손 모양(그대로/반 바퀴) 고르기."""
     yaw_sim = rc.fold_yaw(yaw_real + rc.SIM_FROM_REAL_YAW)
-    yaws, offsets = ym["yaws"], ym["offsets"]
+    yaws = ym["yaws"]
     k = min(range(len(yaws)), key=lambda q: abs(rc.fold_yaw(float(yaws[q]) - yaw_sim)))
-    rep = float(yaws[k]) + rc.fold_yaw(yaw_sim - float(yaws[k]))
-    picks = []
-    for turn in rc.hand_turns(yaw_sim):
-        o = min(range(len(offsets)), key=lambda q: abs(float(offsets[q]) - (turn - rep)))
-        if abs(float(offsets[o]) - (turn - rep)) <= 1.0:
-            picks.append((turn, o))
-    return yaw_sim, float(yaws[k]), k, picks
+    _, _, maps = rc.grasp_maps(yaw_sim)
+    return yaw_sim, float(yaws[k]), k, maps
+
+
+def _gkey(turn, flip):
+    return {"hand_yaw": float(turn), "flip": flip}
 
 
 def reachmap(ik_dir, yaw_real=0.0):
-    """GET /api/reachmap?yaw= : 칸 목록(실좌표) + 그 큐브 yaw 에서의 grasp/place/feasible."""
+    """GET /api/reachmap?yaw= : 칸 목록(실좌표) + 그 큐브 yaw 에서의 grasp/place/feasible + 칸마다 되는 파지.
+
+    grasps = 그 칸에서 집기·놓기가 다 되는 파지 [{hand_yaw, flip}] (flip = 손 반 바퀴). 한 배달은 한 파지로
+    끝까지 가므로 큐브 칸과 놓을 자리 칸에 같은 파지가 있어야 됨(realcoords.plan)."""
     try:
         rc, base, ym = _load(ik_dir)
     except FileNotFoundError as e:
         return {"ok": False, "error": f"도달 맵 없음 — {e}"}
     except Exception as e:
         return {"ok": False, "error": f"도달 맵을 못 읽음: {type(e).__name__}: {e}"}
-    yaw_sim, map_yaw, k, picks = _yaw_masks(rc, ym, float(yaw_real))
+    if not hasattr(rc, "grasp_maps"):
+        return {"ok": False, "error": "realcoords.py 가 옛 버전 (grasp_maps 없음) — team-jax/IK handroll-limit 최신으로"}
+    yaw_sim, map_yaw, k, maps = _yaw_masks(rc, ym, float(yaw_real))
+    turns_all = sorted({t for t, _, _ in maps}, key=abs)
+    os_ = {t: min(range(len(ym["offsets"])), key=lambda q: abs(float(ym["offsets"][q]) - (t - (map_yaw + rc.fold_yaw(yaw_sim - map_yaw)))))
+           for t in turns_all}
+    by_flip = bool(ym["by_flip"])
     cells = []
     for i, j, x, y in _real_xy(rc, ym["xs"], ym["ys"]):
-        g = any(bool(ym["grasp"][k, o, i, j]) for _, o in picks)
-        p = any(bool(ym["place"][k, o, i, j]) for _, o in picks)
-        turns = [t for t, o in picks if ym["feasible"][k, o, i, j]]
-        cells.append({"x": round(x, 4), "y": round(y, 4), "grasp": g, "place": p, "feasible": bool(turns),
-                      "turns": turns, "base": bool(base["feasible"][i, j])})
+        g = any(bool(ym["grasp"][k, os_[t], i, j]) for t in turns_all)
+        p = any(bool(ym["place"][k, os_[t], i, j]) for t in turns_all)
+        grasps = [_gkey(t, f) for t, f, m in maps if m[i, j]]
+        turns = sorted({gg["hand_yaw"] for gg in grasps}, key=abs)
+        cells.append({"x": round(x, 4), "y": round(y, 4), "grasp": g, "place": p, "feasible": bool(grasps),
+                      "turns": turns, "grasps": grasps,
+                      "plain": any(gg["flip"] is False for gg in grasps), "flip": any(gg["flip"] is True for gg in grasps),
+                      "base": bool(base["feasible"][i, j])})
     xs, ys = ym["xs"], ym["ys"]
     return {"ok": True, "yaw_real": float(yaw_real), "yaw_sim": yaw_sim, "map_yaw_sim": map_yaw,
-            "hand_turns": [t for t, _ in picks],
+            "hand_turns": turns_all, "by_flip": by_flip,
             "cell": {"dx": abs(float(ys[1] - ys[0])), "dy": abs(float(xs[1] - xs[0]))},   # 실 x 폭 = sim y 간격
             "d": rc.MAP_D, "cube_size": rc.CUBE_SIZE, "cells": cells,
             "files": [k_[0] for k_ in _cache["key"]],
-            "note": "feasible = 집기·놓기 다 되고 상하좌우 칸도 됨(realcoords.plan 이 보는 값). 칸 판정은 가장 가까운 칸, 사이 보간 없음."}
+            "note": "feasible = 어떤 파지로든 집기·놓기 다 되고 상하좌우 칸도 됨. grasps = 그 칸이 되는 파지(flip = 손 반 바퀴). "
+                    "배달은 큐브 칸과 놓을 자리 칸에 같은 파지가 있어야 됨(realcoords.plan). 칸 판정은 가장 가까운 칸, 사이 보간 없음."}
 
 
 def check(ik_dir, body):
@@ -110,7 +124,8 @@ def check(ik_dir, body):
     yaw_sim = out.get("yaw", rc.fold_yaw(cube[2] + rc.SIM_FROM_REAL_YAW))
     one = {}
     for name, xy in (("cube", out["cube"][:2]), ("target", out["target"][:2])):
-        ok, turn, why = rc.reachable_turned([xy], yaw_sim)
-        one[name] = {"reachable": bool(ok), "hand_yaw": turn, "reason": why}
+        g = rc.grasps_for([xy], yaw_sim)
+        one[name] = {"reachable": bool(g), "hand_yaw": g[0]["hand_yaw"] if g else None, "grasps": g or [],
+                     "reason": "outside the reach map's grid" if g is None else ("in the reach band" if g else "no grasp serves it")}
     out.update(ok=True, alone=one, d=d, map_d=rc.MAP_D, input={"cube": cube, "target": target})
     return out
