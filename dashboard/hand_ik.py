@@ -41,6 +41,7 @@ MAP_PARTS = max(1, min(8, (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸�
 # 지도(grasp_eval)·계획(pick_plan: 집기·놓기 — 놓을 때도 큐브 바닥 = 책상)·IK 탭 기본 높이(ref_info → app.js)가 모두 이 값 하나를 쓴다.
 # 패드: 손가락 판 안쪽 면은 집는 점 −16 ~ +34 mm (손 축 따라). 닿는 곳(판 끝, 큐브 면 1 mm 안) −16 ~ +2 mm → 책상 위 19~37 mm, 큐브 면(0~50) 안.
 GRIP_ABOVE_CENTER = 0.010
+MAP_TIMEOUT_S = 1500.0        # 지도 계산 시간 상한 (집는 점 +1 cm 뒤 이 PC 약 400 초 — 지나는 칸이 많아 판정이 길어짐. 예전 120 s 면 시간 초과)
 GRASP_TILT_TOL = 3.0          # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
 
@@ -948,7 +949,7 @@ class _Solver:
         def run(i):
             try:
                 rq = {**b, "op": "graspmap", "parts": 1, "y_list": groups[i]}
-                r = helpers[i - 1].call(self.ik_dir, rq, timeout=600.0)
+                r = helpers[i - 1].call(self.ik_dir, rq, timeout=MAP_TIMEOUT_S)
                 if not r.get("ok"):
                     raise RuntimeError(r.get("reason"))
                 res[i] = r["rows"]
@@ -1167,7 +1168,7 @@ def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=MAP_BOX, step=0.01):
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
     try:
         return MAP_SOLVER.call(ik_dir, {"op": "graspmap", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
-                                    "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=120.0)
+                                    "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=MAP_TIMEOUT_S + 60.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
 
