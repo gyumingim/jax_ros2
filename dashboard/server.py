@@ -514,6 +514,51 @@ async def api_ik_pair(req: Request):
     return JSONResponse(await asyncio.to_thread(hand_ik.pair, _ik_dir(), await _body(req), ranges))
 
 
+_GRASP_CACHE = {}   # (관절 범위, shoulder_yaw) -> 집을 수 있는 곳 지도 (메모리만, 저장 안 함)
+
+
+def _cal_ranges():
+    cal = _calibration()
+    return {j["joint"]: j["cmd_range_deg"] for j in cal.get("joints") or [] if j.get("cmd_range_deg")}
+
+
+def _sy(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
+
+
+@app.get("/api/ik/graspmap")
+def api_ik_graspmap(shoulder_yaw: float = 0.0):
+    """책상 위 1 cm 격자마다 큐브를 집을 수 있나 (해석 IK, 정의는 hand_ik._Solver.grasp_eval). 처음 한 번 몇 초, 이후 캐시."""
+    import hand_ik
+    ranges, sy = _cal_ranges(), _sy(shoulder_yaw)
+    key = (json.dumps(ranges, sort_keys=True), round(sy, 3))
+    r = _GRASP_CACHE.get(key)
+    cached = r is not None
+    if not cached:
+        r = hand_ik.graspmap(_ik_dir(), ranges, sy)
+        if r.get("ok"):
+            _GRASP_CACHE.clear(); _GRASP_CACHE[key] = r
+    return JSONResponse({**r, "cached": cached})
+
+
+@app.post("/api/ik/graspable")
+async def api_ik_graspable(req: Request):
+    """한 점 {x, y, shoulder_yaw?} (실좌표 m) 을 집을 수 있나 — 지도와 같은 판정, 그 점 그대로 (격자 칸 아님)."""
+    import hand_ik
+    b = await _body(req)
+    try:
+        x, y = float(b["x"]), float(b["y"])
+        if not (math.isfinite(x) and math.isfinite(y)) or max(abs(x), abs(y)) > 2:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "reason": "x, y 숫자 (m, |x|,|y| ≤ 2)"}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(hand_ik.graspcheck, _ik_dir(), _cal_ranges(), x, y, _sy(b.get("shoulder_yaw"))))
+
+
 @app.post("/api/ik/fk")
 async def api_ik_fk(req: Request):
     return JSONResponse(await asyncio.to_thread(_hand_ik, await _body(req), "fk"))

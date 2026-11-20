@@ -195,6 +195,7 @@ export class Viewer {
     if (!Number.isFinite(d) || (d === this.d && this._dset)) return;
     this.d = d; this._dset = true;
     this.grid.position.set(0, -0.25, -d);
+    if (this.grasp) this.grasp.position.z = -d + 0.001;
     this.frontLabel.position.set(0, -0.62, -d + 0.02);
     this.dirty();
   }
@@ -260,8 +261,35 @@ export class Viewer {
     }
     this.dirty();
   }
-  setObject(o) {   // /object_pose (shoulder_roll_axis 틀): 보라 반투명 상자
+  setGraspArea(d) {   // 집을 수 있는 곳 (GET /api/ik/graspmap): 책상 위 반투명 초록, 1 칸 = 1 픽셀 텍스처
+    if (this.grasp) { this.scene.remove(this.grasp); this.grasp.geometry.dispose(); this.grasp.material.map.dispose(); this.grasp.material.dispose(); this.grasp = null; }
+    if (d && d.rows && d.rows.length) {
+      const nx = d.xs.length, ny = d.ys.length, c = document.createElement("canvas");
+      c.width = nx; c.height = ny;
+      const x = c.getContext("2d"), img = x.createImageData(nx, ny);
+      d.rows.forEach((row, j) => {
+        for (let i = 0; i < nx; i++) {
+          if (row[i] !== "2") continue;
+          const k = ((ny - 1 - j) * nx + i) * 4;   // 캔버스 위 = y 큰 쪽
+          img.data[k] = 34; img.data[k + 1] = 197; img.data[k + 2] = 94; img.data[k + 3] = 255;
+        }
+      });
+      x.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(c);
+      tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.generateMipmaps = false;
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(nx * d.step, ny * d.step),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide }));
+      m.position.set((d.xs[0] + d.xs[nx - 1]) / 2, (d.ys[0] + d.ys[ny - 1]) / 2, -this.d + 0.001);
+      m.renderOrder = 1;
+      m.visible = this._graspVis !== false;
+      this.grasp = m; this.scene.add(m);
+    }
+    this.dirty();
+  }
+  setGraspVisible(on) { this._graspVis = !!on; if (this.grasp) this.grasp.visible = !!on; this.dirty(); }
+  setObject(o) {   // /object_pose (shoulder_roll_axis 틀): 보라 반투명 상자. o.grasp: true 초록 / false 빨강 / 없음 보라
     this.objMark.visible = !!o;
+    if (o) this.objMark.material.color.setHex(o.grasp === true ? 0x22c55e : o.grasp === false ? 0xef4444 : 0xa855f7);
     if (o) { this.objMark.position.set(o.x, o.y, Number.isFinite(o.z) ? o.z : -this.d + CUBE / 2); this.objMark.rotation.set(0, 0, (o.yaw || 0) * Math.PI / 180); }
     this.dirty();
   }

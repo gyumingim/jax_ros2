@@ -583,6 +583,7 @@ function buildMap(c) {
     sv("path", { d: `M${ox - 92},${oy - 22} v30 m-6,-8 l6,9 l6,-9`, class: "mfront" }),
     sv("text", { x: ox - 104, y: oy - 2, "text-anchor": "end", class: "mt" }, "앞 (책상)"));
   M.gCells = sv("g");
+  M.gGrasp = sv("g");   // 집을 수 있는 곳 (해석 IK, GET /api/ik/graspmap): 파랑 = 됨, 회색 = 안 됨
   M.gHover = sv("rect", { class: "mhl", visibility: "hidden", rx: 3 });
   M.gVis = sv("rect", { class: "mvis", width: 50, height: 50, x: -25, y: -25, rx: 4, visibility: "hidden" });
   M.gArrow = sv("line", { class: "marrow", "marker-end": "url(#marr)", visibility: "hidden" });
@@ -593,7 +594,7 @@ function buildMap(c) {
   const defs = sv("defs", {}, sv("marker", { id: "marr", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
     sv("path", { d: "M0,0 L10,5 L0,10 z", fill: "#4e5968" })));
   M.svg = sv("svg", { viewBox: `0 0 ${MW.toFixed(0)} ${MH.toFixed(0)}`, class: "rmap", role: "img", "aria-label": "책상 위에서 본 도달 지도" },
-    defs, g0, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube, M.gHand);
+    defs, g0, M.gGrasp, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube, M.gHand);
   M.svg.addEventListener("mousemove", (e) => mapHover(mapPt(e)));
   M.svg.addEventListener("mouseleave", () => mapHover(null));
   M.svg.addEventListener("click", (e) => mapClick(mapPt(e)));
@@ -605,12 +606,18 @@ function buildMap(c) {
   M.guide = el("div", { class: "mguide", hidden: true });
   M.res = el("div", { class: "result" }, "지도 읽는 중…");
   M.err = el("div", { class: "note warn", hidden: true });
+  G.box3d = el("input", { type: "checkbox", checked: "" });
+  G.box3d.addEventListener("change", () => { if (VW.ik && VW.ik.setGraspVisible) VW.ik.setGraspVisible(G.box3d.checked); });
+  G.note = el("span", { class: "help", style: "margin:0" }, "집을 수 있는 곳 계산 중…");
   mapMode("cube");
+  setTimeout(graspLoad, 0);
   return el("div", { class: "mapbox" },
     el("div", { class: "lead", style: "margin:0 0 10px" }, "지도에서 ", el("b", {}, "큐브"), " → ", el("b", {}, "놓을 자리"), " 순서로 누르세요."),
     el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기"),
       el("label", { class: "chk", title: "−40° 고정 파지로 만든 옛 reachmap_real_yaw.npz 색칠·판정 (다시 만들지 않음)" }, old, "옛 도달 지도 보기")),
     el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
+    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "집을 수 있음"), el("span", {}, el("i", { class: "sw no" }), "못 집음"),
+      el("label", { class: "chk", title: "3D 뷰 책상에 집을 수 있는 곳을 반투명 초록으로" }, G.box3d, "3D 에 초록으로"), G.note),
     el("div", { class: "mlegend" }, el("span", {}, "판정은 실제 IK (아래 결과 줄) · 옛 지도 보기를 켜면 "), el("span", {}, el("i", { class: "sw ok" }), "옛 맵 됨"),
       el("span", {}, el("i", { class: "sw no" }), "옛 맵 안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
       el("span", {}, el("i", { class: "sw vis" }), "비전")),
@@ -685,7 +692,7 @@ function mapHover(p) {
     M.gHover.setAttribute("width", w); M.gHover.setAttribute("height", h); M.gHover.setAttribute("visibility", "visible");
   } else M.gHover.setAttribute("visibility", "hidden");
   M.hover.textContent = `x ${cm(p.x)} cm · y ${cm(p.y)} cm — ${p.y < 0 ? `앞으로 ${Math.abs(p.y * 100).toFixed(0)} cm` : "어깨 뒤"}, ` +
-    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm` + (M.old ? ` · 옛 맵: ${cellText(c)}` : "");
+    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm` + graspHover(p) + (M.old ? ` · 옛 맵: ${cellText(c)}` : "");
 }
 function mapClick(p) {
   const c = M.c;
@@ -718,7 +725,68 @@ function mapVision(o) {
   if (!M.gVis) return;
   if (!o) { M.gVis.setAttribute("visibility", "hidden"); return; }
   M.gVis.setAttribute("transform", `translate(${msx(o.x).toFixed(1)},${msy(o.y).toFixed(1)}) rotate(${(-o.yaw_deg).toFixed(1)})`);
+  M.gVis.setAttribute("class", "mvis" + (G.vis ? (G.vis.graspable ? " gy" : " gn") : ""));
   M.gVis.setAttribute("visibility", "visible");
+}
+// ---------- 집을 수 있는 곳 (해석 IK) ----------
+// 정의(서버 hand_ik.grasp_eval): 손목 중앙 = 큐브 위 책상 위 27 cm 가 해석 IK(어깨 옆 고정, 관절 한계 안)로 풀리고,
+// 그 자세에서 손목 두 관절로 손을 수직 아래 3° 안으로 돌릴 수 있으면 '집을 수 있음'. 지도 = 1 cm 격자, 비전 큐브 = 그 점 그대로.
+const G = { data: null, seq: 0, vis: null, visKey: null, visBusy: false };
+const graspSy = () => (HK.f && HK.f.fix.checked ? parseFloat(HK.f.fixv.value) || 0 : 0);
+async function graspLoad() {
+  const my = ++G.seq, sy = graspSy();
+  if (G.note) G.note.textContent = "집을 수 있는 곳 계산 중… (처음 한 번 약 10초)";
+  try {
+    const d = await (await fetch(`/api/ik/graspmap?shoulder_yaw=${encodeURIComponent(sy)}`)).json();
+    if (my !== G.seq) return;
+    if (!d.ok) { G.data = null; if (G.note) G.note.textContent = "⚠ 집을 수 있는 곳 계산 실패: " + (d.reason || "?"); graspPaint(); return; }
+    G.data = d;
+    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손목 책상 위 ${(d.z_table_m * 100).toFixed(0)} cm · 어깨 옆 ${d.shoulder_yaw}°`;
+    graspPaint();
+  } catch (e) { if (my === G.seq && G.note) G.note.textContent = "⚠ 집을 수 있는 곳을 못 받음 (서버)"; }
+}
+function graspPaint() {
+  const d = G.data;
+  if (VW.ik && VW.ik.setGraspArea) { VW.ik.setGraspArea(d); VW.ik.setGraspVisible(!G.box3d || G.box3d.checked); }
+  if (!M.gGrasp) return;
+  if (!d) { M.gGrasp.replaceChildren(); return; }
+  const h = d.step * MS;
+  let ok = "";
+  d.rows.forEach((row, j) => {
+    const y = msy(d.ys[j]) - h / 2;
+    for (let i = 0; i < row.length;) {
+      if (row[i] !== "2") { i++; continue; }
+      let k = i; while (k < row.length && row[k] === "2") k++;
+      ok += `M${(msx(d.xs[i]) - h / 2).toFixed(1)},${y.toFixed(1)}h${((k - i) * h).toFixed(1)}v${h.toFixed(1)}h${(-(k - i) * h).toFixed(1)}z`;
+      i = k;
+    }
+  });
+  const x0 = msx(d.xs[0]) - h / 2, y0 = msy(d.ys[d.ys.length - 1]) - h / 2;
+  M.gGrasp.replaceChildren(
+    sv("rect", { x: x0.toFixed(1), y: y0.toFixed(1), width: (d.xs.length * h).toFixed(1), height: (d.ys.length * h).toFixed(1), class: "gno" }),
+    sv("path", { d: ok, class: "gok" }));
+}
+function graspAt(p) {   // 격자 칸 코드: 2 됨, 1 손목만 닿음, 0 안 닿음, null 지도 밖
+  const d = G.data; if (!d || !p) return null;
+  const i = Math.round((p.x - d.xs[0]) / d.step), j = Math.round((p.y - d.ys[0]) / d.step);
+  return i >= 0 && j >= 0 && j < d.rows.length && i < d.rows[j].length ? +d.rows[j][i] : null;
+}
+function graspHover(p) {
+  const c = graspAt(p);
+  return c == null ? "" : c === 2 ? " · ✅ 집을 수 있음" : c === 1 ? " · ❌ 못 집음 (손을 수직으로 못 내림)" : " · ❌ 못 집음 (팔이 안 닿음)";
+}
+async function graspVision(o) {   // 비전 큐브 자리 그대로 판정 (격자 칸 아님). 1 mm·어깨 옆 값이 바뀌면 다시.
+  if (!o) { G.vis = null; G.visKey = null; return; }
+  const key = `${o.x.toFixed(3)},${o.y.toFixed(3)},${graspSy()}`;
+  if (key === G.visKey || G.visBusy) return;
+  G.visBusy = true;
+  try {
+    const r = await (await fetch("/api/ik/graspable", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ x: o.x, y: o.y, shoulder_yaw: graspSy() }) })).json();
+    G.visKey = key; G.vis = r.ok ? r : null;
+  } catch (e) { G.vis = null; }
+  G.visBusy = false;
+  renderPose(); updateIkView();
 }
 async function mapLoad(yaw) {
   const my = ++M.seq;
@@ -989,8 +1057,8 @@ function buildHandIk() {
   f.open = el("input", { type: "checkbox" });
   f.followBox = el("input", { type: "checkbox" });
   f.mode.addEventListener("change", () => { hkRefUi(); hkEdit(false); });
-  f.fix.addEventListener("change", () => hkEdit(false));
-  f.fixv.addEventListener("input", () => hkEdit(false));
+  f.fix.addEventListener("change", () => { hkEdit(false); graspLoad(); });
+  f.fixv.addEventListener("input", () => { hkEdit(false); clearTimeout(G.tFix); G.tFix = setTimeout(graspLoad, 400); });
   f.followBox.addEventListener("change", () => {
     if (f.followBox.checked && !confirm((VIRT() ? "(가상 팔) " : "⚠ 실제 모터가 움직인다.\n\n") +
       "팔도 바로 따라가기: 풀린 자세를 0.2초마다 각도 보내기 길(같은 막힘·원점 규칙, arm_control 램프)로 보낸다.\n" +
@@ -1474,6 +1542,7 @@ function renderPose() {
   if (!box) return;
   if (!P.root) {
     P.chip = el("span", { class: "chip" }); P.val = el("span", { class: "help", style: "margin:0" });
+    P.gb = el("span", { class: "chip", hidden: true });
     P.bUse = el("button", { class: "btn line small", onclick: usePose, title: "/object_pose (frame shoulder_roll_axis) 값을 큐브 칸에 넣는다. frame camera 는 못 넣음. vision_node 켜기/끄기는 연결 탭 '고급'." }, "비전 값 넣기");
     P.vin = {};
     const fld = (k, v, lab) => { const i = el("input", { value: v }); P.vin[k] = i; return el("label", { class: "field" }, lab, i); };
@@ -1487,7 +1556,7 @@ function renderPose() {
           P.vin.x.value = v.cube.x.toFixed(3); P.vin.y.value = v.cube.y.toFixed(3); P.vin.yaw.value = v.cube.yaw.toFixed(1);
           post("/api/virtual/cube", Object.fromEntries(Object.entries(P.vin).map(([k, i]) => [k, parseFloat(i.value)])));
         } }, "지도 큐브 자리에 놓기")));
-    P.root = el("div", { class: "vline" }, el("b", {}, "비전"), P.chip, P.val, el("span", { class: "spacer" }), P.bUse);
+    P.root = el("div", { class: "vline" }, el("b", {}, "비전"), P.chip, P.val, P.gb, el("span", { class: "spacer" }), P.bUse);
     box.replaceChildren(P.root, P.virt);
   }
   const vs = svcById("vision");
@@ -1499,7 +1568,18 @@ function renderPose() {
   P.val.textContent = o ? `x ${o.x.toFixed(3)} · y ${o.y.toFixed(3)} · yaw ${o.yaw_deg.toFixed(0)}°${o.frame_id !== "shoulder_roll_axis" ? ` (${o.frame_id || "빈 frame"})` : ""}` : "";
   P.val.title = o ? `z ${o.z.toFixed(3)} · frame ${o.frame_id || "(빈)"}` : "";
   P.bUse.disabled = !o || o.frame_id !== "shoulder_roll_axis";
+  const vo = o && o.frame_id === "shoulder_roll_axis" && !stale ? o : null;
+  graspVision(vo);
+  const gv = graspVis(vo);
+  P.gb.hidden = !vo;
+  P.gb.textContent = !gv ? "집기 판정 중…" : gv.graspable ? "집을 수 있음 ✅" : "못 집음 ❌";
+  P.gb.className = "chip" + (gv ? (gv.graspable ? " on" : " bad") : "");
+  P.gb.title = gv ? `${gv.reason} · 해석 IK: 손목 책상 위 ${(gv.z_table_m * 100).toFixed(0)} cm, 해 ${gv.n_solutions}개` +
+    (gv.tilt_min_deg != null ? `, 손 수직에서 최소 ${gv.tilt_min_deg}°` : "") + ` · 어깨 옆 ${gv.shoulder_yaw}°` : "";
   mapVision(o && o.frame_id === "shoulder_roll_axis" && !stale ? o : null);
+}
+function graspVis(o) {   // 지금 비전 큐브 자리의 판정 (자리가 1 mm 넘게 바뀌었으면 아직 없음)
+  return o && G.vis && Math.abs(G.vis.x - o.x) < 1e-3 && Math.abs(G.vis.y - o.y) < 1e-3 ? G.vis : null;
 }
 function usePose() {
   const o = S.ros.object_pose, c = cards.pick_dry;
@@ -1605,7 +1685,7 @@ function initViewers() {
   }
   if (curTab === "ik" && !VW.ik) {
     VW.ik = window.JaxViewer.create($("#v3d-ik"), { ghost: true });   // 유령 = 손 위치로 보내기의 목표 자세
-    VW.ik.load(S.robot.mesh_ok).then(updateIkView);
+    VW.ik.load(S.robot.mesh_ok).then(() => { graspPaint(); updateIkView(); });
   }
 }
 window.addEventListener("jaxviewer-ready", initViewers);
@@ -1623,7 +1703,7 @@ function renderViewers() {
   }
   VW.angle.setGhost(show ? toRad(A.val) : null);
   const o = S.ros.available ? S.ros.object_pose : null;
-  VW.angle.setObject(o && o.frame_id === "shoulder_roll_axis" ? { x: o.x, y: o.y, z: o.z, yaw: o.yaw_deg } : null);
+  VW.angle.setObject(o && o.frame_id === "shoulder_roll_axis" ? { x: o.x, y: o.y, z: o.z, yaw: o.yaw_deg, grasp: (graspVis(o) || {}).graspable } : null);
   const nPose = Object.keys(S.pose || {}).length;
   const vn = $("#v3d-angle-note");
   vn.textContent = nPose ? "" : "지금 자세 값 없음 — 0° 로 그림";
@@ -1636,7 +1716,7 @@ function updateIkView() {
   VW.ik.setCube(sc.cube);
   VW.ik.setTarget(sc.target);
   const o = S.ros.available ? S.ros.object_pose : null;
-  VW.ik.setObject(o && o.frame_id === "shoulder_roll_axis" ? { x: o.x, y: o.y, z: o.z, yaw: o.yaw_deg } : null);
+  VW.ik.setObject(o && o.frame_id === "shoulder_roll_axis" ? { x: o.x, y: o.y, z: o.z, yaw: o.yaw_deg, grasp: (graspVis(o) || {}).graspable } : null);
   const pbRun = VIRT() && ((((S.ros || {}).virtual_state || {}).playback) || {}).running;   // 가상 재생 중엔 가상 팔(실제 자세)을 보인다
   // 손 위치로 보내기: 풀린 자세를 유령으로(손가락 등 나머지 관절은 지금 값), 목표점은 분홍 표시
   // 유령 = 마지막 좋은 해(HK.good). 지금 입력에서 못 풀면(HK.ghostBad) 빨강.

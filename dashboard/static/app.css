@@ -294,3 +294,6 @@ i.sw.hand { border: 2px solid #db2777; border-radius: 50%; width: 12px; height: 
 .hk .hkmeta { font-size: 13px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
 .hk .mctl input[type=number] { border: 1.5px solid transparent; background: var(--fill); border-radius: 10px; padding: 7px 9px; font: inherit; width: 80px; }
 .hk .frow .field input { width: 100%; }
+/* 집을 수 있는 곳 (해석 IK): 파랑 = 됨, 회색 = 안 됨. 비전 큐브 테두리: 초록 = 집을 수 있음, 빨강 = 못 집음 */
+.rmap .gno { fill: var(--fill-d); opacity: .55; } .rmap .gok { fill: var(--blue); opacity: .85; }
+.rmap .mvis.gy { stroke: var(--green); stroke-width: 3.5; } .rmap .mvis.gn { stroke: var(--red); stroke-width: 3.5; }

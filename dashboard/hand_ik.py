@@ -36,6 +36,7 @@ TIE_DEG = 2.0                 # 해 고르기: 최소 회전에서 이 각 안�
 TILT_PULL = 0.05              # auto: 남는 자유도로 기울기를 0 쪽으로 당기는 세기 (한 반복에 t 의 몇 배)
 TOL_ANALYTIC = 0.0005         # 해석 IK 해의 MuJoCo FK 검증 (손목 중앙 0.5 mm)
 A3 = ("shoulder_roll", "upper_arm_roll", "elbow")   # 해석 IK 가 푸는 관절 (shoulder_yaw 고정, 손목 3 관절 지금 값)
+GRASP_TILT_TOL = 3.0          # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
 
 # ============================================================ worker (자식 프로세스)
@@ -728,6 +729,119 @@ class _Solver:
         return {"ok": True, "both": False, "pick_any": bool(pick_ok), "place_alone": place_alone, "tries": tries,
                 "fixed": fix, "ms": round((time.time() - t0) * 1000)}
 
+    # ---- 집을 수 있는 곳 (graspable): 해석 IK 로 책상 위 (x, y) 마다
+    # 정의: 큐브(5 cm)가 책상 위 (x, y) 에 있을 때, 손을 수직으로 내려 집는 점이 큐브 중심(책상 위 2.5 cm)에 오는 자세가 있나 =
+    #   (1) 손목 중앙 = (x, y, 책상 위 GRASP_WRIST_Z) 를 해석 IK(shoulder_yaw 고정, 관절 한계 = calibration 보낼 수 있는 범위)로 풀 수 있고
+    #   (2) 그 해 중 하나에서 손목 두 관절(wrist_pitch·wrist_yaw, 한계 안)로 손 축을 수직 아래 GRASP_TILT_TOL 안으로 돌릴 수 있다.
+    #   손 비틀기(hand_roll ±88°)는 손 축 둘레라 수직에 영향 없고, 큐브는 90° 마다 같아 176° 범위면 어떤 yaw 든 맞춘다 → 검사 안 함.
+    #   GRASP_WRIST_Z = 2.5 cm + 수직 손에서 손목↔집는 점 거리(ref_info, 24.35 cm) 를 0.5 cm 로 반올림 = 27 cm (IK 탭 기본·'큐브 잡는 높이' 와 같음).
+    def grasp_z(self):
+        return round((0.025 + self.wrist_above_site) * 200) / 200
+
+    def grasp_setup(self, ranges, sy_deg):
+        """한계(shoulder_yaw = sy 고정) + 해석 IK 기하 + 도달 상한(어깨 roll 축 기준 손목 중앙 최대 거리)."""
+        np, mj, m, d = self.np, self.mj, self.m, self.d
+        lim = self.set_ranges({**(ranges or {}), "shoulder_yaw": [sy_deg, sy_deg]})
+        q0 = np.clip(np.asarray(self.E.HOME_ARM_QPOS, dtype=float), lim[:, 0], lim[:, 1])
+        for n in A3:
+            q0[self.arm.index(n)] = 0.0
+        q0[self.arm.index("shoulder_yaw")] = math.radians(sy_deg)
+        d.qpos[self.qadr] = q0
+        mj.mj_kinematics(m, d)
+        g = []
+        for n in A3:
+            j = m.joint(n).id
+            g += [d.xanchor[j].copy(), d.xaxis[j].copy() / np.linalg.norm(d.xaxis[j])]
+        g.append(self.wrist_pos().copy())
+        o1, _, o3, _, o4, a4, w0 = g
+        from analytic_ik import rot
+        rmax = max(float(np.linalg.norm(o4 + rot(a4, t, w0 - o4) - o3)) for t in np.linspace(-math.pi, math.pi, 361))
+        return {"lim": lim, "q0": q0, "g": tuple(g), "reach": float(np.linalg.norm(o3 - o1)) + rmax + 0.002}
+
+    def hand_down_tilt(self, q, lim):
+        """팔 앞 4 관절 = q 일 때 wrist_pitch·wrist_yaw(한계 안)로 만들 수 있는 손 축의 수직(아래) 에서 최소 기울기 (°).
+        손 축 = site z (PALM_DOWN 이면 세계 +z, fk_req 와 같은 정의). q6 은 1° 격자, q5 는 닫힌 식(구간 끝·극값)."""
+        np, mj, m, d = self.np, self.mj, self.m, self.d
+        i5, i6 = self.arm.index("wrist_pitch"), self.arm.index("wrist_yaw")
+        qq = q.copy(); qq[i5] = 0.0; qq[i6] = 0.0
+        d.qpos[self.qadr] = qq
+        mj.mj_kinematics(m, d)
+        a5 = d.xaxis[m.joint("wrist_pitch").id].copy(); a5 /= np.linalg.norm(a5)
+        a6 = d.xaxis[m.joint("wrist_yaw").id].copy(); a6 /= np.linalg.norm(a6)
+        h = d.site_xmat[self.site].reshape(3, 3)[:, 2].copy()
+        lo6, hi6 = float(lim[i6, 0]), float(lim[i6, 1])
+        t6 = np.linspace(lo6, hi6, max(2, int(math.degrees(hi6 - lo6)) + 1))[:, None]
+        v = a6 * (h @ a6) * (1 - np.cos(t6)) + np.cos(t6) * h + np.sin(t6) * np.cross(a6, h)   # (n, 3)
+        z = np.array([0.0, 0.0, 1.0])
+        A = (v @ a5) * a5[2]
+        B = v[:, 2] - A
+        C = np.cross(a5, v)[:, 2]
+        lo5, hi5 = float(lim[i5, 0]), float(lim[i5, 1])
+        cands = [np.full(len(v), lo5), np.full(len(v), hi5)]
+        ph = np.arctan2(C, B)
+        for k in (-2, 0, 2):
+            c = ph + k * math.pi
+            cands.append(np.where((c >= lo5) & (c <= hi5), c, lo5))
+        best = max(float(np.max(A + B * np.cos(c) + C * np.sin(c))) for c in cands)
+        return math.degrees(math.acos(max(-1.0, min(1.0, best))))
+
+    def grasp_eval(self, S, x, y, verify):
+        """(x, y) 실좌표 -> (코드, 최소 기울기 °, 해 수). 코드 2 = 집을 수 있음, 1 = 손목은 닿지만 손을 수직으로 못 내림, 0 = 안 닿음."""
+        import itertools
+        from analytic_ik import solve3
+        np = self.np
+        lim, q0, g = S["lim"], S["q0"], S["g"]
+        p = np.asarray(self.to_sim([x, y, self.grasp_z() - self.R.MAP_D]))
+        if float(np.linalg.norm(p - g[0])) > S["reach"]:
+            return 0, None, 0
+        idx = [self.arm.index(n) for n in A3]
+        qs = []
+        for q3, _ in solve3(g, p):
+            opts = [[v for v in (q3[k] - 2 * math.pi, q3[k], q3[k] + 2 * math.pi) if lim[i, 0] - 1e-9 <= v <= lim[i, 1] + 1e-9]
+                    for k, i in enumerate(idx)]
+            for combo in itertools.product(*opts):
+                q = q0.copy(); q[idx] = np.clip(combo, lim[idx, 0], lim[idx, 1])
+                if verify:   # MuJoCo FK 로 다시 확인 (analytic_position 과 같은 0.5 mm)
+                    self.d.qpos[self.qadr] = q
+                    self.mj.mj_kinematics(self.m, self.d)
+                    if float(np.linalg.norm(self.wrist_pos() - p)) >= TOL_ANALYTIC:
+                        continue
+                qs.append(q)
+        if not qs:
+            return 0, None, 0
+        tilt = min(self.hand_down_tilt(q, lim) for q in qs)
+        return (2 if tilt <= GRASP_TILT_TOL else 1), tilt, len(qs)
+
+    def graspmap(self, b):
+        """op graspmap: 책상 위 격자 (x0..x1, y0..y1, step) 마다 grasp_eval. rows[j] = y 한 줄의 코드 문자열 ('2'/'1'/'0')."""
+        np = self.np
+        t0 = time.time()
+        S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
+        st = float(b.get("step") or 0.01)
+        xs = [round(float(v), 4) for v in np.arange(float(b["x0"]), float(b["x1"]) + st / 2, st)]
+        ys = [round(float(v), 4) for v in np.arange(float(b["y0"]), float(b["y1"]) + st / 2, st)]
+        rows, n = [], [0, 0, 0]
+        for y in ys:
+            r = ""
+            for x in xs:
+                c = self.grasp_eval(S, x, y, verify=False)[0]
+                n[c] += 1
+                r += str(c)
+            rows.append(r)
+        return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(),
+                "counts": {"graspable": n[2], "wrist_only": n[1], "no": n[0]}, "tilt_tol_deg": GRASP_TILT_TOL,
+                "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000)}
+
+    def graspcheck(self, b):
+        """op graspcheck: 한 점 (x, y) — 격자와 같은 판정 + MuJoCo FK 검증."""
+        t0 = time.time()
+        S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
+        c, tilt, ns = self.grasp_eval(S, float(b["x"]), float(b["y"]), verify=True)
+        why = {2: "집을 수 있음", 1: f"손목은 닿지만 손을 수직으로 못 내림 (최소 {tilt:.0f}°)" if tilt is not None else "", 0: "팔이 안 닿음"}[c]
+        return {"ok": True, "graspable": c == 2, "code": c, "reason": why, "tilt_min_deg": None if tilt is None else round(tilt, 1),
+                "n_solutions": ns, "z_table_m": self.grasp_z(), "x": float(b["x"]), "y": float(b["y"]),
+                "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000, 1)}
+
     def fk_req(self, b):
         np = self.np
         js = b.get("joints_deg") or {}
@@ -754,7 +868,7 @@ def _worker(ik_dir):
         try:
             b = json.loads(line)
             op = b.get("op")
-            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else s.pair(b) if op == "pair" else {"ok": False, "reason": f"모르는 op {op!r}"}
+            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else s.pair(b) if op == "pair" else s.graspmap(b) if op == "graspmap" else s.graspcheck(b) if op == "graspcheck" else {"ok": False, "reason": f"모르는 op {op!r}"}
         except Exception as e:
             r = {"ok": False, "reason": f"풀이 중 오류: {type(e).__name__}: {e}", "kind": "error"}
         print(json.dumps(r), flush=True)
@@ -890,6 +1004,26 @@ def pair(ik_dir, body, ranges_deg):
     try:
         return SOLVER.call(ik_dir, {"op": "pair", "cube": cube, "target": target, "fix_deg": fix, "tilt_max_deg": tm,
                                     "ranges_deg": ranges_deg}, timeout=30.0)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
+def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=(-0.28, 0.38, -0.45, 0.075), step=0.01):
+    """책상 위 집을 수 있는 곳 지도 (해석 IK, 서버가 메모리에 캐시)."""
+    if ik_dir is None:
+        return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
+    try:
+        return SOLVER.call(ik_dir, {"op": "graspmap", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
+                                    "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=120.0)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
+def graspcheck(ik_dir, ranges_deg, x, y, shoulder_yaw=0.0):
+    if ik_dir is None:
+        return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
+    try:
+        return SOLVER.call(ik_dir, {"op": "graspcheck", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "x": x, "y": y}, timeout=20.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
 
