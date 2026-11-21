@@ -73,11 +73,18 @@ ELBOW_BRANCH = -1           # 계획·지도가 쓰는 팔꿈치 가지 (elbow �
 # 책상 면 + 41.6 mm 이상): elbow −120 이면 이동이 10° 짧지만 여유 21~25 mm 라 이것. elbow −130 은 한계 ±135 에 5° 남음 (실물 끝 간섭 미확인, calibration note).
 CUBE_EDGE_IN = 0.01          # 큐브(놓을 자리 포함)는 책상 발자국 안쪽으로 반 변 + 이만큼 (env CUBE_X_MAX 와 같은 1 cm, 2026-11-21)
 HOME_STRAIGHT_DEG = 5.0
-HOME_EXIT_MID_DEG = {"shoulder_roll": 0.0, "upper_arm_roll": 0.0, "elbow": -40.0, "wrist_pitch": -30.0, "wrist_yaw": -30.0, "hand_roll": 0.0}
-# ↑ 2026-11-21 바꿈: 예전 (shoulder_roll −40, upper_arm_roll 180, elbow −130, wrist −45/90) 은 '여유 41 mm 이상' 으로 고른 값이라 어깨를 뒤로 크게
-#   젖혀(기둥 쪽) 돌아갔다 — HOME→책상 위 19.7 s, 여유 52 mm. 경유점 격자(shoulder_roll −45..0, elbow −60..0, wrist ±30, 5~15° 간격)에서
-#   HOME → 이 자세 → 책상 위 손목 자리 (위팔 돌림은 둘째 구간에서 같이) 가 12.0 s, 여유 72.9 mm (80 등분 검사). 첫 구간의 '위팔만 180° 돌림' 경유점은 뺌.
-HOME_EXIT_TURN_FIRST = False   # True: 예전처럼 먼저 upper_arm_roll 만 180 (곧은 팔 제자리 돌림) 경유점을 넣는다
+HOME_EXIT_MID_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 180.0, "elbow": -120.0, "wrist_pitch": 60.0, "wrist_yaw": 85.0, "hand_roll": 0.0}
+# ↑ 2026-11-21: 위팔을 곧은 팔로 먼저 180° 돌린 뒤(HOME_EXIT_TURN_FIRST) 어깨 젖히고 팔꿈치 접기. 기둥 검사(COLUMN_BOXES)를 넣고 격자 검색
+#   (shoulder_roll −40..40, elbow −130..−60, wrist ±85; 관절 한계에서 5° 이상) — 책상 여유 46.3 mm, 기둥 여유 52.3 mm (HOME 자세 그대로), HOME→책상 위 19.6 s.
+#   위팔을 안 먼저 돌리는 길(팔꿈치를 굽힌 채 위팔 0→180)은 앞팔이 기둥 쪽으로 휩쓸어 전부 기둥을 판다 (잠깐 쓴 elbow −40·wrist −30/−30 은 서보가 기둥 40 mm 안,
+#   그 전 값 elbow −130·wrist −45/90 은 손가락이 기둥 6 mm 안).
+HOME_EXIT_TURN_FIRST = True    # 먼저 upper_arm_roll 만 180 (곧은 팔 제자리 돌림) 경유점
+# 기둥 (IK arm.xml 의 column 메시를 상자로, sim 월드 m): 세로 기둥과 위 가로대, 기둥에 붙은 Holder. 바닥 받침(높이 8 cm)은 팔이 못 닿아 뺌.
+COLUMN_BOXES = (((0.30, -0.19, 0.0), (0.38, -0.11, 1.13)),
+                ((0.30, -0.29, 1.13), (0.38, 0.0, 1.17)),
+                ((0.194, -0.198, 1.027), (0.30, -0.10, 1.292)))
+COLUMN_MARGIN = 0.02           # 팔·손 메시 꼭짓점이 기둥 상자에서 이만큼(m) 떨어져야 (HOME 자세가 52 mm)
+COLUMN_VOXEL = 0.008           # 기둥 검사 꼭짓점을 이 격자(m)로 솎음 (한 자세 12 ms → 약 1 ms)
 HOME_EXIT_SEED_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 180.0, "elbow": -130.0, "wrist_pitch": -45.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
 # ↑ 책상 위 손목 자리 해를 고를 때 가까운 쪽 기준 (예전 경유점 값 그대로 → 그 자리 해 = 10.4/0/180/−133/0/90/0 이 예전과 같다)
 HOME_EXIT_WRIST_X = 0.18     # 그다음 경유점: 손목 중앙 sim x (책상 앞 끝 0.20 에서 2 cm 안, 책상 위), y = HOME 손목 y, 높이 z_clear
@@ -153,6 +160,7 @@ class Planner:
         self.obj_body = int(s.env.object_body_ids[0])
         self.cube_geom = [g for g in range(s.m.ngeom) if s.m.geom_bodyid[g] == self.obj_body][0]
         self.fgeoms = set(s.finger_geoms)   # 충돌하는 손 상자는 손가락 6 개뿐 (손바닥·서보 메시는 충돌 없음)
+        self._column_init()
         self._home_exit()
 
     def _home_exit(self):
@@ -193,9 +201,53 @@ class Planner:
             for k in range(81):
                 q = a + (b - a) * (k / 80)
                 low = min(low, self.finger_low(q, self.open) - s.table_z, self.arm_low(q) - s.table_z + TABLE_MARGIN)
+        col = min(self.column_low(self.exit[i] + (self.exit[i + 1] - self.exit[i]) * (k / 80), self.open)
+                  for i in range(len(self.exit) - 1) for k in range(81))
         self.exit_clear_mm = round(low * 1000, 1)
-        self.exit_ok = low >= TABLE_MARGIN
-        self.exit_why = None if self.exit_ok else f"HOME 에서 나가는 경유점 길에서 손가락이 책상 위 {low * 1000:+.1f} mm (여유 {TABLE_MARGIN * 1000:.0f} mm)"
+        self.exit_column_mm = round(col * 1000, 1)
+        self.exit_ok = low >= TABLE_MARGIN and col >= COLUMN_MARGIN
+        self.exit_why = (None if self.exit_ok else
+                         f"HOME 에서 나가는 경유점 길에서 손가락이 책상 위 {low * 1000:+.1f} mm (여유 {TABLE_MARGIN * 1000:.0f} mm)" if low < TABLE_MARGIN else
+                         f"HOME 에서 나가는 경유점 길에서 팔이 기둥에서 {col * 1000:+.1f} mm (여유 {COLUMN_MARGIN * 1000:.0f} mm)")
+
+    def _column_init(self):
+        """기둥 검사용: 관절에 따라 움직이는 팔·손 메시 geom 과 그 꼭짓점 (geom 틀). 기둥·Holder·base_link 처럼 안 움직이는 것은 뺀다."""
+        s, np = self.s, self.np
+        m, d = s.m, s.d
+        mesh = [g for g in range(m.ngeom) if int(m.geom_type[g]) == 7]
+        s.fk(self.home0)
+        a = {g: d.geom_xpos[g].copy() for g in mesh}
+        q = self.home0.copy() + 0.3
+        s.fk(q)
+        self.col_geoms = [g for g in mesh if float(np.linalg.norm(d.geom_xpos[g] - a[g])) > 1e-6]
+        self.col_verts = {}
+        for g in self.col_geoms:
+            mid = int(m.geom_dataid[g])
+            a0, n = int(m.mesh_vertadr[mid]), int(m.mesh_vertnum[mid])
+            v = m.mesh_vert[a0:a0 + n].copy()
+            _, keep = np.unique(np.round(v / COLUMN_VOXEL), axis=0, return_index=True)   # 꼭짓점을 격자로 솎음 (빠르게; 여유 20 mm 가 덮음)
+            self.col_verts[g] = v[np.sort(keep)]
+        self.col_lo = [np.array(lo) for lo, _ in COLUMN_BOXES]
+        self.col_hi = [np.array(hi) for _, hi in COLUMN_BOXES]
+
+    def column_low(self, q, f=None):
+        """팔·손 메시 꼭짓점과 기둥 상자 사이 가장 짧은 거리 (m, 안에 들어가면 음수)."""
+        s, np = self.s, self.np
+        d = s.d
+        if f is not None:
+            d.qpos[s.fadr] = f
+        s.fk(q)
+        V = np.concatenate([self.col_verts[g] @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g] for g in self.col_geoms])
+        best = 9.0
+        for lo, hi in zip(self.col_lo, self.col_hi):
+            out = np.maximum(np.maximum(lo - V, V - hi), 0.0)
+            dist = np.sqrt((out * out).sum(axis=1))
+            inside = (dist == 0.0)
+            if inside.any():
+                pen = np.minimum(V[inside] - lo, hi - V[inside]).min(axis=1)
+                best = min(best, -float(pen.max()))
+            best = min(best, float(dist.min()))
+        return best
 
     def exit_frames(self, fa, sp, back=False):
         """HOME0 ↔ 손목 길 시작 경유점 프레임 (구간마다 따로 사다리꼴). back: 거꾸로 (손목 길 끝 → HOME0)."""
@@ -846,6 +898,8 @@ def plan(a):
     low = [P.finger_low(q, f) for q, f in frames]
     arm_lo = [P.arm_low(q) for q, _ in frames]   # 팔 기준점(팔꿈치·손목)도 책상 발자국 위에선 책상 면 위 (2026-11-21)
     below = [i for i, z in enumerate(low) if z < s.table_z + TABLE_MARGIN or arm_lo[i] < s.table_z]
+    col = [P.column_low(q, f) for q, f in frames]   # 팔·손 ↔ 기둥 (2026-11-21)
+    near_col = [i for i, c in enumerate(col) if c < COLUMN_MARGIN]
     names = list(s.arm) + list(s.fingers)
     traj_q = [list(map(float, q)) + list(map(float, f)) for q, f in frames]
     sy = s.arm.index("shoulder_yaw")   # 0 고정 (HOME 만 6.3°: 그 사이 보간은 범위 안)
@@ -873,6 +927,9 @@ def plan(a):
                         f"가장 낮게 책상 위 {(min(low) - s.table_z) * 1000:+.1f} mm")
     if over:
         problems.append("관절 한계 밖: " + ", ".join(over))
+    if near_col:
+        problems.append(f"팔·손이 기둥에 {COLUMN_MARGIN * 1000:.0f} mm 보다 가까이 감: 프레임 {near_col[0]}~{near_col[-1]} ({len(near_col)}개), "
+                        f"가장 가까이 {min(col) * 1000:+.1f} mm")
     if carry_low < TABLE_MARGIN:
         problems.append(f"들고 가는 큐브의 가장 낮은 모서리가 책상 위 {carry_low * 1000:+.1f} mm (여유 {TABLE_MARGIN * 1000:.0f} mm 아래)")
     if fallback:
@@ -897,6 +954,7 @@ def plan(a):
             "checks": {"grasp_grip_error_mm": round(grip_err * 1000, 2), "place_grip_error_mm": round(place_err * 1000, 2),
                        "pad_face_deg": {"pick": round(pad_face(qg, ycube), 1), "place": round(pad_face(qp, yplace), 1)},
                        "lowest_finger_above_table_mm": round((min(low) - s.table_z) * 1000, 1),
+                       "column_min_mm": round(min(col) * 1000, 1),
                        "finger_cube_hits": {"pick": len(hit_pick), "place": len(hit_place)},
                        "descent_side_max_mm": {"pick": round(side(mk["above_pick"], mk["grasp"], pc) * 1000, 1),
                                                "place": round(side(mk["above_place"], mk["place"], pt) * 1000, 1)},
@@ -969,7 +1027,7 @@ def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
     if path is not None:
         cands.append(("손목 길 → HOME 나가기 경유점 거꾸로", [path] + back_from(len(ex) - 1)))
     # ③ 관절 직선 (팔이 책상 옆에 늘어져 있을 때 등). 아래 책상 검사를 통과할 때만
-    cands.append(("관절 직선 (책상 검사 통과)", [[q1, ex[0]]]))
+    cands.append(("관절 직선 (책상·기둥 검사 통과)", [[q1, ex[0]]]))
     sp = float(max_speed)
     lim = P.lim
     first = None
@@ -982,13 +1040,18 @@ def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
         arm_lo = [P.arm_low(q) for q, _ in frames]
         below = [i for i, z in enumerate(low) if z < s.table_z + TABLE_MARGIN or arm_lo[i] < s.table_z]
         over = [n for j, n in enumerate(s.arm) if j != sy and any(not (lim[j, 0] - 1e-4 <= q[j] <= lim[j, 1] + 1e-4) for q, _ in frames)]
+        col = [P.column_low(q, f) for q, f in frames]
+        near_col = [i for i, c in enumerate(col) if c < COLUMN_MARGIN]
         problems = []
+        if near_col:
+            problems.append(f"팔·손이 기둥에 {COLUMN_MARGIN * 1000:.0f} mm 보다 가까이 감: 프레임 {near_col[0]}~{near_col[-1]}, 가장 가까이 {min(col) * 1000:+.1f} mm"
+                            + (" — 지금 자세부터 이미 가까움" if near_col[0] == 0 else ""))
         if below:
             problems.append(f"손가락·팔이 책상 위 여유 {TABLE_MARGIN * 1000:.0f} mm 보다 낮게 감: 프레임 {below[0]}~{below[-1]} ({len(below)}개), "
                             f"가장 낮게 책상 위 {(min(low) - s.table_z) * 1000:+.1f} mm" + (" — 지금 자세부터 이미 낮음" if below[0] == 0 else ""))
         if over:
             problems.append("관절 한계 밖: " + ", ".join(over))
-        r = {"route": route, "legs": legs, "frames": frames, "low": low, "below": below, "problems": problems}
+        r = {"route": route, "legs": legs, "frames": frames, "low": low, "below": below, "problems": problems, "col": col}
         first = first or r
         if not problems:
             break
@@ -1004,7 +1067,7 @@ def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
             "reason": f"HOME 으로 ({route}, {len(frames) * DT:.1f}초)" if not problems else "; ".join(problems),
             "positions": traj_q, "problems": problems,
             "checks": {"joint_space_fallback": [], "lowest_finger_above_table_mm": round((min(r["low"]) - s.table_z) * 1000, 1),
-                       "route": route, "legs": len(r["legs"])},
+                       "column_min_mm": round(min(r["col"]) * 1000, 1), "route": route, "legs": len(r["legs"])},
             "seconds": round(len(frames) * DT, 1)}
 
 
