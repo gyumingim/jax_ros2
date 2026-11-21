@@ -587,6 +587,66 @@ def api_ik_stop():
     return JSONResponse(VM["arm"].stop_trajectory())
 
 
+def _go_home(b):
+    """'HOME(모든 관절 0)으로 가기': 지금 자세 → HOME 궤적을 pick_plan.plan_home 으로 계획(책상 안 파고드는 길)하고 지금 모드의 팔로 재생.
+    계획 궤적 파일(PICK_TRAJ)은 건드리지 않는다. ROS 모드는 아직 없음."""
+    kind = mode_kind()
+    if kind == "ros":
+        return {"ok": False, "error": "ROS 모드에선 아직 없음 (가상 또는 실물 직접 CAN)"}
+    if kind == "virtual" and VM["arm"] is None:
+        return {"ok": False, "error": "가상 팔 없음"}
+    if kind == "direct" and not direct_api.DIRECT.connected():
+        return {"ok": False, "error": "팔 연결 안 됨 (연결 탭 ② 팔 연결)"}
+    cal = _calibration()
+    pose = actual_pose(backend().snapshot(), cal)
+    now = {n: v["deg"] for n, v in pose.items() if v.get("deg") is not None}
+    # 서보는 피드백이 없어 한 번도 안 보낸 서보는 각을 모른다 → 0°(HOME 값)로 보고 계획. 실물은 real_arm.play_trajectory 가
+    # '한 번도 안 보낸 서보'를 따로 거절한다(첫 명령이 램프 없이 튐). AK45 를 모르면 plan_home 이 거절.
+    for j in cal.get("joints") or []:
+        if j["motor"] == "servo" and j["joint"] not in now:
+            now[j["joint"]] = 0.0
+    try:
+        speed = float((b or {}).get("max_speed") or 0) or float(_trajectory()["params"].get("max_speed") or 30.0)
+    except (TypeError, ValueError):
+        speed = 30.0
+    try:
+        import pick_plan
+        traj = pick_plan.plan_home(now, ik=os.environ.get("JAX_IK_DIR") or None, max_speed=speed)
+    except Exception as e:
+        return {"ok": False, "error": f"HOME 길 계획 실패: {type(e).__name__}: {e}"}
+    if traj["status"] == "already":
+        return {"ok": True, "msg": traj["reason"]}
+    if traj["status"] != "playable":
+        return {"ok": False, "error": f"HOME 으로 못 감: {traj['reason']}"}
+    from arm_control.play import check_trajectory
+    if kind == "direct":
+        arm = direct_api.DIRECT.arm
+        fatal = direct_api.analytic_fatal(traj)
+        problems = []
+        if not fatal:
+            fatal, problems = check_trajectory(traj, arm.cal)
+        if fatal:
+            return {"ok": False, "error": f"HOME 재생 거절: {fatal}"}
+        if problems and not (b or {}).get("force"):   # 실물 궤적 재생(play_real)과 같은 규칙: 화면이 확인창을 띄우고 force 로 다시
+            return {"ok": False, "need_force": True, "problems": problems,
+                    "error": f"검사 {len(problems)}건 (--force 가 필요한 것): " + " / ".join(problems)}
+        r = arm.play_trajectory(traj, speed)
+    else:
+        from arm_control import calibration as C
+        fatal, _ = check_trajectory(traj, C.load())
+        if fatal:
+            return {"ok": False, "error": f"HOME 재생 거절: {fatal}"}
+        r = VM["arm"].play_trajectory(traj, speed)
+    if r.get("ok"):
+        r["msg"] = f"HOME 으로 가는 중 — {traj['reason']}"
+    return r
+
+
+@app.post("/api/arm/go_home")
+async def api_go_home(req: Request):
+    return JSONResponse(await asyncio.to_thread(_go_home, await _body(req)))
+
+
 direct_api.install(app, mode_kind, pm, can_state, _trajectory, str(LOG_DIR / "direct.log"))
 
 _MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")

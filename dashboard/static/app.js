@@ -167,6 +167,7 @@ function render() {
   renderMotors();
   renderCalib();
   renderHoming();
+  renderGoHome();
   renderAngles();
   renderPose();
   renderTraj();
@@ -1749,3 +1750,41 @@ function updateIkView() {
 
 connect();
 poll();
+
+// ---------- HOME(모든 관절 0)으로 가기 ----------
+const GH = {};
+function buildGoHome() {
+  GH.btn = el("button", { class: "btn", onclick: goHome }, "⌂ HOME(원점 자세)으로 가기");
+  GH.stop = el("button", { class: "btn line", onclick: stopAll }, "멈춤");
+  GH.vb = el("span", { class: "vbadge", hidden: true }, "가상");
+  GH.note = el("div", { class: "note" });
+  GH.card = el("div", { class: "card", style: "margin-bottom:16px" },
+    el("h3", {}, GH.vb, "HOME 자세로 가기"),
+    el("p", { class: "help" }, "지금 자세에서 HOME(모든 관절 0, 팔이 책상 옆에 곧게 늘어진 자세)으로 간다. " +
+      "계획이 HOME 으로 돌아올 때와 같은 길(책상 위 → 팔꿈치 펴며 어깨 젖힘 → 팔 돌림)을 거꾸로 따라가고, 손가락은 벌린다. " +
+      "책상을 파고드는 길이면 거절한다 (책상 옆 기둥·받침은 검사 안 함)."),
+    el("div", { class: "row" }, GH.btn, GH.stop), GH.note);
+  $("#gohome").append(GH.card);
+}
+function renderGoHome() {
+  if (!GH.card) buildGoHome();
+  const kind = (S.mode || {}).kind, v = VIRT();
+  const pb = v ? (((S.ros || {}).virtual_state || {}).playback || {}) : ((S.ros || {}).direct_state || {}).playback || {};
+  GH.vb.hidden = !v;
+  const why = kind === "ros" ? "ROS 모드에선 아직 없음" : kind === "direct" && !DC() ? "연결 탭 ② 팔 연결 먼저" : pb.running ? "재생 중 — 끝나거나 멈춘 뒤" : "";
+  GH.btn.disabled = !!why; GH.btn.title = why;
+  GH.stop.disabled = !pb.running;
+  GH.note.textContent = why || (pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1}` : "");
+}
+async function goHome() {
+  const real = !VIRT();
+  if (!confirm((real ? "⚠ 실물 팔이 움직인다.\n\n" : "(가상) ") + "지금 자세에서 HOME(모든 관절 0)으로 갈까요?\n\n" +
+    "책상 위로 손을 들고 → 어깨를 젖히며 팔꿈치를 펴고 → 팔을 돌려 내린다. 멈춤 = ■ STOP / Esc" + (real ? "\n\n팔 주변을 비웠나요?" : ""))) return;
+  T.view = "actual";
+  let r = await post("/api/arm/go_home", { force: false }, true);
+  if (!r.ok && r.need_force) {
+    if (!confirm("검사에서 문제가 나왔다:\n\n- " + r.problems.join("\n- ") + "\n\n그래도 HOME 으로 갈까요?")) return;
+    r = await post("/api/arm/go_home", { force: true }, true);
+  }
+  if (r.ok) toast(r.msg || "HOME 으로");
+}

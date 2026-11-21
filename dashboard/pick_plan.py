@@ -902,6 +902,103 @@ def plan(a):
             "plan_s": round(time.time() - t0, 2)}
 
 
+HOME_AT_DEG = 1.0        # 팔 관절이 모두 HOME 에서 이 안이면 '이미 HOME'
+HOME_NEAR_EXIT_DEG = 5.0 # 지금 자세가 HOME 나가기 경유점 하나에서 이 안이면 손목 길 없이 그 경유점부터 거꾸로
+_HOME_PLANNER = {}
+
+
+def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
+    """지금 자세 → HOME(모든 관절 0) 궤적 (2026-11-21 '원점 자세로 가기' 버튼). now_deg = {관절: sim °}.
+    계획(pick_plan)이 HOME 으로 돌아오는 길과 같게: (shoulder_yaw 만 0) → 손목 길(transit)로 HOME 나가기 경유점의 책상 위 자리
+    → 나가기 경유점을 거꾸로 → HOME. 손가락은 첫 구간 동안 벌림. 곧장 관절 직선으로 HOME 에 가면 앞팔이 책상 모서리를 파고들어서
+    (_home_exit 설명) 쓰지 않는다 — 길을 못 찾으면 거절. 결과는 pick_plan 궤적과 같은 모양 (재생·검사 코드를 그대로 씀)."""
+    cal_file = cal_file or (REPO / "arm_control" / "calibration.json")
+    key = (str(ik), str(cal_file))
+    if key not in _HOME_PLANNER:
+        _HOME_PLANNER[key] = Planner(_find_ik(ik), _cmd_ranges(cal_file))
+    P = _HOME_PLANNER[key]
+    s, np = P.s, P.np
+    names = list(s.arm) + list(s.fingers)
+    out = {"planner": "analytic", "kind": "home", "joint_names": names, "dt": DT, "unit": "rad"}
+    miss = [n for n in s.arm if n not in now_deg]
+    if miss:
+        return {**out, "status": "unreachable", "reason": "지금 각을 모르는 관절: " + ", ".join(miss) + " (AK45 피드백이 없음)"}
+    q0 = np.radians([float(now_deg[n]) for n in s.arm])
+    f0 = np.array([math.radians(float(now_deg[n])) if n in now_deg else float(o) for n, o in zip(s.fingers, P.open)])
+    home = P.exit[0]
+    if float(np.degrees(np.abs(q0 - home)).max()) <= HOME_AT_DEG and float(np.degrees(np.abs(f0 - P.open)).max()) <= HOME_AT_DEG:
+        return {**out, "status": "already", "reason": "이미 HOME (모든 관절 0)"}
+    if not P.exit_ok:
+        return {**out, "status": "unreachable", "reason": P.exit_why}
+    sy = s.arm.index("shoulder_yaw")
+    pre = []                        # 관절 꺾은선 목록 (구간마다 따로 사다리꼴 = 모서리에서 멈춤)
+    q1 = q0.copy()
+    if abs(q1[sy]) > math.radians(0.5):
+        q1[sy] = 0.0
+        pre.append([q0, q1])        # 해석 IK 는 shoulder_yaw 0 고정 → 먼저 그것만 0
+    ex = P.exit                     # [HOME, h1, mid, 책상 위 손목 자리]
+
+    def back_from(k):               # ex[k] → … → HOME
+        return [[a, b] for a, b in zip(ex[k::-1], ex[k - 1::-1])] if k > 0 else []
+
+    cands = []                      # (길 이름, 꺾은선 목록) — 차례대로, 검사를 통과한 첫 길
+    # ① 나가기 경유점 꺾은선(HOME 나가는·들어오는 중) 위나 가까이: 거기서 꺾은선을 거꾸로 (손목 길은 이 자세들에서 책상을 판다)
+    best = None                     # (관절 최대 차 °, 구간 j, 그 구간 위 점)
+    for j in range(len(ex) - 1):
+        a, b = ex[j], ex[j + 1]
+        for u in np.linspace(0.0, 1.0, 201):
+            p = a + (b - a) * u
+            d = float(np.degrees(np.abs(q1 - p)).max())
+            if best is None or d < best[0] - 1e-9 or (abs(d - best[0]) <= 1e-9 and j > best[1]):
+                best = (d, j, p)
+    if best and best[0] <= HOME_NEAR_EXIT_DEG:
+        _, j, p = best
+        cands.append((f"HOME 나가기 경유점 길 위 (구간 {j + 1}) → 거꾸로",
+                      [[q1, p, ex[j]] if best[0] > 1e-6 else [q1, ex[j]]] + back_from(j)))
+    # ② 손목 길(계획이 HOME 으로 돌아올 때와 같은 길)로 책상 위 손목 자리 → 나가기 경유점 거꾸로
+    path = P.transit(q1, ex[-1], t_home=P.exit_fh)
+    if path is not None:
+        cands.append(("손목 길 → HOME 나가기 경유점 거꾸로", [path] + back_from(len(ex) - 1)))
+    # ③ 관절 직선 (팔이 책상 옆에 늘어져 있을 때 등). 아래 책상 검사를 통과할 때만
+    cands.append(("관절 직선 (책상 검사 통과)", [[q1, ex[0]]]))
+    sp = float(max_speed)
+    lim = P.lim
+    first = None
+    for route, legs in cands:
+        legs = pre + legs
+        frames = [(q0.copy(), f0.copy())]
+        for i, qs in enumerate(legs):
+            frames += P.frames(qs, f0 if i == 0 else P.open, P.open, sp)
+        low = [P.finger_low(q, f) for q, f in frames]
+        arm_lo = [P.arm_low(q) for q, _ in frames]
+        below = [i for i, z in enumerate(low) if z < s.table_z + TABLE_MARGIN or arm_lo[i] < s.table_z]
+        over = [n for j, n in enumerate(s.arm) if j != sy and any(not (lim[j, 0] - 1e-4 <= q[j] <= lim[j, 1] + 1e-4) for q, _ in frames)]
+        problems = []
+        if below:
+            problems.append(f"손가락·팔이 책상 위 여유 {TABLE_MARGIN * 1000:.0f} mm 보다 낮게 감: 프레임 {below[0]}~{below[-1]} ({len(below)}개), "
+                            f"가장 낮게 책상 위 {(min(low) - s.table_z) * 1000:+.1f} mm" + (" — 지금 자세부터 이미 낮음" if below[0] == 0 else ""))
+        if over:
+            problems.append("관절 한계 밖: " + ", ".join(over))
+        r = {"route": route, "legs": legs, "frames": frames, "low": low, "below": below, "problems": problems}
+        first = first or r
+        if not problems:
+            break
+    else:
+        r = first
+    frames, problems, route = r["frames"], r["problems"], r["route"]
+    if problems:
+        tried = ", ".join(c[0] for c in cands)
+        problems = [f"[{route}] " + p for p in problems] + [f"해 본 길: {tried} — 모두 검사에 걸림. 각도 제어로 손을 책상 위로 옮긴 뒤 다시"]
+    traj_q = [list(map(float, q)) + list(map(float, f)) for q, f in frames]
+    status = "playable" if not problems else ("finger below table" if r["below"] else "check failed")
+    return {**out, "status": status, "playable": status == "playable",
+            "reason": f"HOME 으로 ({route}, {len(frames) * DT:.1f}초)" if not problems else "; ".join(problems),
+            "positions": traj_q, "problems": problems,
+            "checks": {"joint_space_fallback": [], "lowest_finger_above_table_mm": round((min(r["low"]) - s.table_z) * 1000, 1),
+                       "route": route, "legs": len(r["legs"])},
+            "seconds": round(len(frames) * DT, 1)}
+
+
 def main(argv=None):
     try:
         sys.stdout.reconfigure(encoding="utf-8")   # 로그(procman)는 utf-8 로 읽는다
