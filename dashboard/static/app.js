@@ -597,6 +597,7 @@ function buildMap(c) {
     sv("path", { d: `M${ox - 92},${oy - 22} v30 m-6,-8 l6,9 l6,-9`, class: "mfront" }),
     sv("text", { x: ox - 104, y: oy - 2, "text-anchor": "end", class: "mt" }, "앞 (책상)"));
   M.gCells = sv("g");
+  M.gReach = sv("g");   // 갈 수 있는 곳 (손 패널 높이·기준점에서 위치 IK 가 풀림, GET /api/ik/reachxyz): 초록
   M.gGrasp = sv("g");   // 집을 수 있는 곳 (해석 IK, GET /api/ik/graspmap): 파랑 = 됨, 회색 = 안 됨
   M.gHover = sv("rect", { class: "mhl", visibility: "hidden", rx: 3 });
   M.gVis = sv("rect", { class: "mvis", width: 50, height: 50, x: -25, y: -25, rx: 4, visibility: "hidden" });
@@ -608,7 +609,7 @@ function buildMap(c) {
   const defs = sv("defs", {}, sv("marker", { id: "marr", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
     sv("path", { d: "M0,0 L10,5 L0,10 z", fill: "#4e5968" })));
   M.svg = sv("svg", { viewBox: `0 0 ${MW.toFixed(0)} ${MH.toFixed(0)}`, class: "rmap", role: "img", "aria-label": "책상 위에서 본 도달 지도" },
-    defs, g0, M.gGrasp, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube, M.gHand);
+    defs, g0, M.gGrasp, M.gReach, M.gCells, gR, M.gHover, M.gVis, M.gArrow, M.gTgt, M.gCube, M.gHand);
   M.svg.addEventListener("mousemove", (e) => mapHover(mapPt(e)));
   M.svg.addEventListener("mouseleave", () => mapHover(null));
   M.svg.addEventListener("click", (e) => mapClick(mapPt(e)));
@@ -623,6 +624,9 @@ function buildMap(c) {
   G.box3d = el("input", { type: "checkbox", checked: "" });
   G.box3d.addEventListener("change", () => { if (VW.ik && VW.ik.setGraspVisible) VW.ik.setGraspVisible(G.box3d.checked); });
   G.note = el("span", { class: "help", style: "margin:0" }, "집을 수 있는 곳 계산 중…");
+  RX.chk = el("input", { type: "checkbox" });
+  RX.chk.addEventListener("change", () => { RX.on = RX.chk.checked; M.gGrasp.style.display = RX.on ? "none" : ""; reachLoad(); });
+  RX.note = el("span", { class: "help", style: "margin:0" }, "");
   mapMode("cube");
   setTimeout(graspLoad, 0);
   return el("div", { class: "mapbox" },
@@ -632,6 +636,8 @@ function buildMap(c) {
     el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
     el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "집을 수 있음"), el("span", {}, el("i", { class: "sw no" }), "못 집음"),
       el("label", { class: "chk", title: "3D 뷰 책상에 집을 수 있는 곳을 반투명 초록으로" }, G.box3d, "3D 에 초록으로"), G.note),
+    el("div", { class: "mlegend" }, el("label", { class: "chk", title: "집기 조건 없이: 아래 '손 위치로 보내기'의 높이·기준점으로 x, y 마다 같은 역기구학(위치만)이 풀리면 초록" },
+      RX.chk, "갈 수 있는 곳 보기 (손 위치 높이에서 IK 풀림)"), el("span", {}, el("i", { class: "sw reach" }), "갈 수 있음"), RX.note),
     el("div", { class: "mlegend" }, el("span", {}, "판정은 실제 IK (아래 결과 줄) · 옛 지도 보기를 켜면 "), el("span", {}, el("i", { class: "sw ok" }), "옛 맵 됨"),
       el("span", {}, el("i", { class: "sw no" }), "옛 맵 안 됨"), el("span", {}, el("i", { class: "sw cube" }), "큐브"), el("span", {}, el("i", { class: "sw tgt" }), "놓을 자리"),
       el("span", {}, el("i", { class: "sw vis" }), "비전")),
@@ -706,7 +712,7 @@ function mapHover(p) {
     M.gHover.setAttribute("width", w); M.gHover.setAttribute("height", h); M.gHover.setAttribute("visibility", "visible");
   } else M.gHover.setAttribute("visibility", "hidden");
   M.hover.textContent = `x ${cm(p.x)} cm · y ${cm(p.y)} cm — ${p.y < 0 ? `앞으로 ${Math.abs(p.y * 100).toFixed(0)} cm` : "어깨 뒤"}, ` +
-    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm` + graspHover(p) + (M.old ? ` · 옛 맵: ${cellText(c)}` : "");
+    `${p.x >= 0 ? "왼쪽" : "오른쪽"} ${Math.abs(p.x * 100).toFixed(0)} cm` + (RX.on ? reachHover(p) : graspHover(p)) + (M.old ? ` · 옛 맵: ${cellText(c)}` : "");
 }
 function mapClick(p) {
   const c = M.c;
@@ -971,6 +977,7 @@ function hkMapMark() {
 // 입력이 바뀜: live = 끄는 중(빠른 풀이), 아니면 300 ms 뒤 전체 풀이
 function hkEdit(live) {
   hkMapMark();
+  if (!live && RX.on) { clearTimeout(RX.t); RX.t = setTimeout(reachLoad, 500); }
   clearTimeout(HK.timer);
   if (live && HK.good) hkFast();
   else HK.timer = setTimeout(hkSolve, live ? 400 : 300);
@@ -1787,4 +1794,51 @@ async function goHome() {
     r = await post("/api/arm/go_home", { force: true }, true);
   }
   if (r.ok) toast(r.msg || "HOME 으로");
+}
+
+// ---------- 갈 수 있는 곳 (2026-11-21): 손 패널 높이·기준점에서 x, y 마다 위치 역기구학이 풀리나 (집기 조건 없음) ----------
+var RX = { on: false, data: null, seq: 0, t: null };
+function reachKey() {
+  const v = hkVals(); if (!v) return null;
+  return { z_cm: v.z_table_cm, ref: v.ref, shoulder_yaw: (v.fix_deg && v.fix_deg.shoulder_yaw) || 0 };
+}
+async function reachLoad() {
+  if (!RX.on) { RX.data = null; reachPaint(); if (RX.note) RX.note.textContent = ""; return; }
+  const k = reachKey(); if (!k) return;
+  const my = ++RX.seq;
+  RX.note.textContent = `계산 중… (높이 ${k.z_cm} cm, ${k.ref === "wrist" ? "손목 중앙" : "손끝 사이"} · 높이마다 몇 초, 한 번 한 높이는 바로)`;
+  try {
+    const d = await (await fetch(`/api/ik/reachxyz?z_cm=${encodeURIComponent(k.z_cm)}&ref=${k.ref}&shoulder_yaw=${encodeURIComponent(k.shoulder_yaw)}`)).json();
+    if (my !== RX.seq) return;
+    if (!d.ok) { RX.data = null; RX.note.textContent = "⚠ 계산 실패: " + (d.reason || "?"); reachPaint(); return; }
+    RX.data = d;
+    RX.note.textContent = `${d.counts.reachable}칸 (${Math.round(d.step * 100)} cm 격자) · ${d.ref === "wrist" ? "손목 중앙" : "손끝 사이"} 책상 위 ${(d.z_table_m * 100).toFixed(1)} cm · 어깨 옆 ${d.shoulder_yaw}° · 높이는 아래 손 위치 칸에서`;
+    reachPaint();
+  } catch (e) { if (my === RX.seq) RX.note.textContent = "⚠ 서버에서 못 받음"; }
+}
+function reachPaint() {
+  if (!M.gReach) return;
+  const d = RX.on ? RX.data : null;
+  if (!d) { M.gReach.replaceChildren(); return; }
+  const h = d.step * MS;
+  let ok = "";
+  d.rows.forEach((row, j) => {
+    const y = msy(d.ys[j]) - h / 2;
+    for (let i = 0; i < row.length;) {
+      if (row[i] !== "2") { i++; continue; }
+      let k = i; while (k < row.length && row[k] === "2") k++;
+      ok += `M${(msx(d.xs[i]) - h / 2).toFixed(1)},${y.toFixed(1)}h${((k - i) * h).toFixed(1)}v${h.toFixed(1)}h${(-(k - i) * h).toFixed(1)}z`;
+      i = k;
+    }
+  });
+  const x0 = msx(d.xs[0]) - h / 2, y0 = msy(d.ys[d.ys.length - 1]) - h / 2;
+  M.gReach.replaceChildren(
+    sv("rect", { x: x0.toFixed(1), y: y0.toFixed(1), width: (d.xs.length * h).toFixed(1), height: (d.ys.length * h).toFixed(1), class: "rno" }),
+    sv("path", { d: ok, class: "rok" }));
+}
+function reachHover(p) {
+  const d = RX.data; if (!d || !p) return "";
+  const i = Math.round((p.x - d.xs[0]) / d.step), j = Math.round((p.y - d.ys[0]) / d.step);
+  if (!(i >= 0 && j >= 0 && j < d.rows.length && i < d.rows[j].length)) return "";
+  return d.rows[j][i] === "2" ? ` · ✅ 갈 수 있음 (높이 ${(d.z_table_m * 100).toFixed(1)} cm)` : ` · ❌ 못 감 (높이 ${(d.z_table_m * 100).toFixed(1)} cm)`;
 }

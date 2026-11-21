@@ -556,6 +556,29 @@ def api_ik_graspmap(shoulder_yaw: float = 0.0):
     return JSONResponse({**r, "cached": cached})
 
 
+_REACH_CACHE = {}
+
+
+@app.get("/api/ik/reachxyz")
+def api_ik_reachxyz(z_cm: float = 3.5, ref: str = "grip", shoulder_yaw: float = 0.0, step_cm: float = 2.0):
+    """'갈 수 있는 곳' (2026-11-21): 높이 z_cm(기준점의 책상 위 cm)에서 격자마다 위치 역기구학이 풀리나 (집기 조건 없음). 높이마다 캐시."""
+    import hand_ik
+    if not (math.isfinite(z_cm) and -10 <= z_cm <= 80) or not (0.5 <= step_cm <= 5):
+        return JSONResponse({"ok": False, "reason": "z_cm −10~80, step_cm 0.5~5"}, status_code=400)
+    ranges, sy = _cal_ranges(), _sy(shoulder_yaw)
+    ref = "wrist" if ref == "wrist" else "grip"
+    key = (json.dumps(ranges, sort_keys=True), round(sy, 3), ref, round(z_cm, 1), round(step_cm, 2))
+    r = _REACH_CACHE.get(key)
+    if r is None:
+        r = hand_ik.reachxyz(_ik_dir(), ranges, round(z_cm, 1) / 100.0, ref, sy, step=step_cm / 100.0)
+        if r.get("ok"):
+            if len(_REACH_CACHE) > 60:
+                _REACH_CACHE.clear()
+            _REACH_CACHE[key] = r
+        return JSONResponse({**r, "cached": False})
+    return JSONResponse({**r, "cached": True})
+
+
 @app.post("/api/ik/graspable")
 async def api_ik_graspable(req: Request):
     """한 점 {x, y, shoulder_yaw?} (실좌표 m) 을 집을 수 있나 — 지도와 같은 판정, 그 점 그대로 (격자 칸 아님)."""

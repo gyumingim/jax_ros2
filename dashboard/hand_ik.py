@@ -985,7 +985,7 @@ class _Solver:
 
         def run(i):
             try:
-                rq = {**b, "op": "graspmap", "parts": 1, "y_list": groups[i]}
+                rq = {**b, "op": b.get("op") or "graspmap", "parts": 1, "y_list": groups[i]}
                 r = helpers[i - 1].call(self.ik_dir, rq, timeout=MAP_TIMEOUT_S)
                 if not r.get("ok"):
                     raise RuntimeError(r.get("reason"))
@@ -995,7 +995,7 @@ class _Solver:
         ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(1, parts)]
         for t in ts:
             t.start()
-        res[0] = self.graspmap({**b, "parts": 1, "y_list": groups[0]})["rows"]
+        res[0] = (self.reachxyz if b.get("op") == "reachxyz" else self.graspmap)({**b, "parts": 1, "y_list": groups[0]})["rows"]
         for t in ts:
             t.join()
         if errs:
@@ -1005,6 +1005,49 @@ class _Solver:
             for k, r in enumerate(res[i]):
                 rows[i + k * parts] = r
         return rows
+
+    def reachxyz(self, b):
+        """op reachxyz (2026-11-21 '갈 수 있는 곳'): 집기 조건 없이, 높이 z 에서 격자 (x, y) 마다 기준점(손끝 사이 = 집는 점 / 손목 중앙)을
+        그 점에 두는 위치 역기구학이 관절 범위 안에서 풀리나 — 손 패널의 '위치만' 모드 풀이(self.solve) 그대로, shoulder_yaw 고정.
+        rows[j] = y 한 줄의 코드 ('2' 풀림, '0' 안 풀림). z_table_m = 기준점의 책상 위 높이."""
+        np, R = self.np, self.R
+        t0 = time.time()
+        st = float(b.get("step") or 0.01)
+        xs = [round(float(v), 4) for v in np.arange(float(b["x0"]), float(b["x1"]) + st / 2, st)]
+        ys = [round(float(v), 4) for v in np.arange(float(b["y0"]), float(b["y1"]) + st / 2, st)]
+        if b.get("y_list") is not None:
+            ys = [float(v) for v in b["y_list"]]
+        parts = int(b.get("parts") or MAP_PARTS)
+        if parts > 1 and len(ys) >= 2 * parts:   # 지도처럼 y 줄을 도우미 worker 들에 나눠 (칸마다 해석 IK 반복이라 한 줄 수백 ms)
+            rows = self._graspmap_parts({**b, "op": "reachxyz"}, ys, parts)
+            n = sum(r.count("2") for r in rows)
+            zt = float(b["z_table_m"])
+            ref = "wrist" if b.get("ref") == "wrist" else "grip"
+            return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": zt, "ref": ref,
+                    "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "counts": {"reachable": n, "no": len(xs) * len(ys) - n},
+                    "meaning": f"초록 = {'손목 중앙' if ref == 'wrist' else '손끝 사이(집는 점)'}을 책상 위 {zt * 100:.1f} cm 에 두는 위치 역기구학이 풀림 (집기 조건 없음)",
+                    "ms": round((time.time() - t0) * 1000), "parts": parts}
+        sy = float(b.get("shoulder_yaw") or 0.0)
+        ref = "wrist" if b.get("ref") == "wrist" else "grip"
+        zt = float(b["z_table_m"])
+        z = zt - R.MAP_D
+        # 손 패널(POST /api/ik/hand)과 같은 풀이: mode position, 기준점 ref, shoulder_yaw 고정 — 지도 초록 = 패널에 그 x, y, z 를 넣으면 풀림
+        rq = {"mode": "position", "ref": ref, "ranges_deg": b.get("ranges_deg") or {}, "fix_deg": {"shoulder_yaw": sy}, "z": z}
+        rows = []
+        for y in ys:
+            row = []
+            for x in xs:
+                try:
+                    ok = bool(self.solve({**rq, "x": x, "y": y}).get("ok"))
+                except Exception:
+                    ok = False
+                row.append("2" if ok else "0")
+            rows.append("".join(row))
+        n = sum(r.count("2") for r in rows)
+        return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": zt, "ref": ref, "shoulder_yaw": sy,
+                "counts": {"reachable": n, "no": len(xs) * len(ys) - n},
+                "meaning": f"초록 = {'손목 중앙' if ref == 'wrist' else '손끝 사이(집는 점)'}을 책상 위 {zt * 100:.1f} cm 에 두는 위치 역기구학이 풀림 (집기 조건 없음)",
+                "ms": round((time.time() - t0) * 1000)}
 
     def graspcheck(self, b):
         """op graspcheck: 한 점 (x, y) — 격자와 같은 판정 + MuJoCo FK 검증."""
@@ -1042,7 +1085,7 @@ def _worker(ik_dir):
         try:
             b = json.loads(line)
             op = b.get("op")
-            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else s.pair(b) if op == "pair" else s.graspmap(b) if op == "graspmap" else s.graspcheck(b) if op == "graspcheck" else {"ok": False, "reason": f"모르는 op {op!r}"}
+            r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else s.pair(b) if op == "pair" else s.graspmap(b) if op == "graspmap" else s.graspcheck(b) if op == "graspcheck" else s.reachxyz(b) if op == "reachxyz" else {"ok": False, "reason": f"모르는 op {op!r}"}
         except Exception as e:
             r = {"ok": False, "reason": f"풀이 중 오류: {type(e).__name__}: {e}", "kind": "error"}
         print(json.dumps(r), flush=True)
@@ -1206,6 +1249,17 @@ def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=MAP_BOX, step=0.01):
     try:
         return MAP_SOLVER.call(ik_dir, {"op": "graspmap", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
                                     "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=MAP_TIMEOUT_S + 60.0)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
+def reachxyz(ik_dir, ranges_deg, z_table_m, ref="grip", shoulder_yaw=0.0, box=MAP_BOX, step=0.02):
+    """높이 z 에서 위치 역기구학이 풀리는 곳 (집기 조건 없음). 손 IK 와 따로 지도 worker 로."""
+    if ik_dir is None:
+        return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
+    try:
+        return MAP_SOLVER.call(ik_dir, {"op": "reachxyz", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step, "ref": ref,
+                                    "z_table_m": z_table_m, "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=300.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
 
