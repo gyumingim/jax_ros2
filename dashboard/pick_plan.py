@@ -73,7 +73,13 @@ ELBOW_BRANCH = -1           # 계획·지도가 쓰는 팔꿈치 가지 (elbow �
 # 책상 면 + 41.6 mm 이상): elbow −120 이면 이동이 10° 짧지만 여유 21~25 mm 라 이것. elbow −130 은 한계 ±135 에 5° 남음 (실물 끝 간섭 미확인, calibration note).
 CUBE_EDGE_IN = 0.01          # 큐브(놓을 자리 포함)는 책상 발자국 안쪽으로 반 변 + 이만큼 (env CUBE_X_MAX 와 같은 1 cm, 2026-11-21)
 HOME_STRAIGHT_DEG = 5.0
-HOME_EXIT_MID_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 180.0, "elbow": -130.0, "wrist_pitch": -45.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+HOME_EXIT_MID_DEG = {"shoulder_roll": 0.0, "upper_arm_roll": 0.0, "elbow": -40.0, "wrist_pitch": -30.0, "wrist_yaw": -30.0, "hand_roll": 0.0}
+# ↑ 2026-11-21 바꿈: 예전 (shoulder_roll −40, upper_arm_roll 180, elbow −130, wrist −45/90) 은 '여유 41 mm 이상' 으로 고른 값이라 어깨를 뒤로 크게
+#   젖혀(기둥 쪽) 돌아갔다 — HOME→책상 위 19.7 s, 여유 52 mm. 경유점 격자(shoulder_roll −45..0, elbow −60..0, wrist ±30, 5~15° 간격)에서
+#   HOME → 이 자세 → 책상 위 손목 자리 (위팔 돌림은 둘째 구간에서 같이) 가 12.0 s, 여유 72.9 mm (80 등분 검사). 첫 구간의 '위팔만 180° 돌림' 경유점은 뺌.
+HOME_EXIT_TURN_FIRST = False   # True: 예전처럼 먼저 upper_arm_roll 만 180 (곧은 팔 제자리 돌림) 경유점을 넣는다
+HOME_EXIT_SEED_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 180.0, "elbow": -130.0, "wrist_pitch": -45.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+# ↑ 책상 위 손목 자리 해를 고를 때 가까운 쪽 기준 (예전 경유점 값 그대로 → 그 자리 해 = 10.4/0/180/−133/0/90/0 이 예전과 같다)
 HOME_EXIT_WRIST_X = 0.18     # 그다음 경유점: 손목 중앙 sim x (책상 앞 끝 0.20 에서 2 cm 안, 책상 위), y = HOME 손목 y, 높이 z_clear
 HOME_EXIT_LIFT = 0.04        # 그 경유점 손목 높이 = z_clear + 이만큼. 0 이면 책상 앞 끝 가까이(실좌표 y −0.18) 놓은 큐브를 빠질 때 ③→② 에서
                              # 손가락이 건드렸다 (plan_check 3/30). 0.07 은 손목이 안 닿음. 0.04 면 그 해 elbow −133° (한계 135 에 2° 남음)
@@ -170,15 +176,18 @@ class Planner:
         mid = self.home0.copy()
         for n, v in HOME_EXIT_MID_DEG.items():
             mid[s.arm.index(n)] = math.radians(v)
+        seed = self.home0.copy()
+        for n, v in HOME_EXIT_SEED_DEG.items():
+            seed[s.arm.index(n)] = math.radians(v)
         w = self.wrist(self.home0)
-        sols, _ = s.analytic_position(np.array([HOME_EXIT_WRIST_X, w[1], self.z_clear + HOME_EXIT_LIFT]), mid, self.lim)
+        sols, _ = s.analytic_position(np.array([HOME_EXIT_WRIST_X, w[1], self.z_clear + HOME_EXIT_LIFT]), seed, self.lim)
         sols = [c for c in sols if (c[ie] < 0) == (ELBOW_BRANCH < 0)]
         if not sols:
             self.exit_ok = False
             self.exit_why = "HOME 에서 나가는 경유점(책상 위 손목 자리)을 못 풂"
             return
-        e = min(sols, key=lambda c: float(np.abs(c - mid).max()))
-        self.exit, self.exit_fh = [self.home0.copy(), h1, mid, e], False
+        e = min(sols, key=lambda c: float(np.abs(c - seed).max()))
+        self.exit, self.exit_fh = ([self.home0.copy(), h1, mid, e] if HOME_EXIT_TURN_FIRST else [self.home0.copy(), mid, e]), False
         low = 9.0
         for a, b in zip(self.exit, self.exit[1:]):
             for k in range(81):
