@@ -62,6 +62,7 @@ from arm_control.watch import TrackingWatch   # noqa: E402
 from stm_bridge.protocol import SERVO_STDID, Frame, servo_frame   # noqa: E402
 
 LOCK_PATH = "/tmp/ak45_ctrl.lock"     # ak45_can LOCK_FILE_PATH 와 같은 파일
+SERVO_PIN_MAX = 15           # 서보 핀(STM32 채널) 번호 상한
 START_TOL_DEG = 5.0           # 실물 재생: 첫 프레임과 지금 자세가 이만큼(°) 넘게 다르면 거절 (첫 프레임까지는 검사 없는 관절 직선)
 AK45_MODE_BRAKE = 2
 
@@ -904,6 +905,32 @@ class RealArm:
             elif action == "verify":
                 j.verified = bool(value)
                 text = f"보정 {j.joint}: verified → {j.verified} (저장 전)"
+            elif action == "pin":      # 서보 핀(STM32 채널 id) 바꾸기. 그 핀을 쓰던 관절과 맞바꿈 (2026-11-23 사용자: 실시간으로)
+                if j.motor != "servo":
+                    return {"ok": False, "error": "서보만 핀을 바꿀 수 있음"}
+                try:
+                    pin = int(value)
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "핀이 숫자가 아님"}
+                if not 0 <= pin <= SERVO_PIN_MAX:
+                    return {"ok": False, "error": f"핀 0~{SERVO_PIN_MAX}"}
+                if pin == j.id:
+                    return {"ok": True, "msg": f"{j.joint}: 이미 핀 {pin}"}
+                other = next((o for o in self.cal.joints if o.motor == "servo" and o.id == pin and o is not j), None)
+                # 위치를 모르는 채널이 되므로 두 관절 모두 '안 보낸 서보'로 (다음 명령은 램프 없이 바로, 재전송도 멈춤)
+                for o in (j, other):
+                    if o is None:
+                        continue
+                    self.servo_sent.pop(o.name, None)
+                    self.servo_mover.target.pop(o.joint, None)
+                    self.servo_mover.current.pop(o.joint, None)
+                if other is not None:
+                    j.id, other.id = other.id, j.id
+                    j.name, other.name = other.name, j.name
+                    text = f"서보 핀: {j.joint} ↔ {other.joint} 맞바꿈 → {j.joint} 핀 {j.id}, {other.joint} 핀 {other.id} (저장 전, 둘 다 '안 보냄')"
+                else:
+                    j.id = pin
+                    text = f"서보 핀: {j.joint} → 핀 {pin} (저장 전, '안 보냄')"
             else:
                 return {"ok": False, "error": f"모르는 보정 동작 {action}"}
             self.calib_dirty = True
