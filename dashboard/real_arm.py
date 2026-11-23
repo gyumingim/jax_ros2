@@ -62,6 +62,7 @@ from arm_control.watch import TrackingWatch   # noqa: E402
 from stm_bridge.protocol import SERVO_STDID, Frame, servo_frame   # noqa: E402
 
 LOCK_PATH = "/tmp/ak45_ctrl.lock"     # ak45_can LOCK_FILE_PATH 와 같은 파일
+START_TOL_DEG = 5.0           # 실물 재생: 첫 프레임과 지금 자세가 이만큼(°) 넘게 다르면 거절 (첫 프레임까지는 검사 없는 관절 직선)
 AK45_MODE_BRAKE = 2
 
 DEFAULTS = {
@@ -200,6 +201,7 @@ class RealArm:
         self.play = {"running": False}
         self._play_stop = threading.Event()
         self._play_bad = None
+        self.stop_gen = 0           # STOP·힘 빼기·재생 멈춤마다 +1. 계획을 세우는 동안 STOP 이 눌렸는지 play_trajectory(stop_gen=) 가 본다
 
     # ------------------------------------------------------------------ 시작 / 끝
     def start(self):
@@ -720,6 +722,7 @@ class RealArm:
     def hold_all(self, why="STOP"):
         """STOP: 모든 AK45 지금 측정 자리 홀드(힘 있는 것만), 서보 램프 멈춤, 재생 멈춤. 팔이 안 떨어진다."""
         self._play_stop.set()
+        self.stop_gen += 1
         now = time.monotonic()
         held, stale = [], []
         with self.lock:
@@ -745,6 +748,7 @@ class RealArm:
     def limp(self, names=None):
         """힘 빼기: AK45 프레임 중단 + 브레이크 0 A. 팔이 떨어진다. 원점 지움."""
         self._play_stop.set()
+        self.stop_gen += 1
         with self.lock:
             ms = [self.ak[n] for n in (names or list(self.ak))]
             had = [m.name for m in ms if self._limp_motor(m, "힘 뺌(사용자)", brake=False)]
@@ -907,16 +911,31 @@ class RealArm:
         return {"ok": True, "msg": text}
 
     # ------------------------------------------------------------------ 궤적 재생 (실물)
-    def play_trajectory(self, traj, max_speed, hold=5.0, max_error=15.0):
+    def play_trajectory(self, traj, max_speed, hold=5.0, max_error=15.0, stop_gen=None, start_tol=START_TOL_DEG):
         """play.play 로 프레임을 joint_command 에 넣고, TrackingWatch 로 AK45 추종을 본다. 벗어나면 그 자리 홀드.
-        check_trajectory 는 서버가 먼저 한다(거절·--force 확인창)."""
+        check_trajectory 는 서버가 먼저 한다(거절·--force 확인창).
+        stop_gen: 호출한 쪽이 계획을 세우기 전에 읽은 self.stop_gen. 그 사이 STOP 이 눌렸으면(값이 바뀜) 재생하지 않는다.
+        첫 프레임과 지금 자세가 start_tol° 넘게 다르면 거절 — 첫 프레임 홀드는 관절 직선이라 책상·기둥 검사가 없다."""
+        with self.lock:      # 확인과 running 표시를 한 잠금 안에서: 두 요청이 같이 통과해 재생 스레드 둘이 뜨지 않게
+            r = self._play_begin(traj, max_speed, hold, max_error, stop_gen, start_tol)
+        return r
+
+    def _play_begin(self, traj, max_speed, hold, max_error, stop_gen, start_tol):
         from arm_control import play as P
         why = self._ready()
         if why:
             return {"ok": False, "error": why}
         if self.play.get("running"):
             return {"ok": False, "error": "이미 재생 중"}
+        if stop_gen is not None and stop_gen != self.stop_gen:
+            return {"ok": False, "error": "계획을 세우는 동안 STOP(또는 힘 빼기·재생 멈춤)이 눌림 — 재생 안 함"}
+        if self.calib_dirty:
+            return {"ok": False, "error": "보정을 바꾸고 저장 안 함 — 계획은 저장된 calibration.json 으로 세워져 실제 팔과 다르다. "
+                    "연결 탭에서 'calibration.json 저장' 뒤 다시"}
         names = traj["joint_names"]
+        unknown = [n for n in names if n not in self.joints]
+        if unknown:
+            return {"ok": False, "error": "모르는 관절: " + ", ".join(unknown)}
         not_homed = [n for n in names if self.joints[n].motor == "ak45"
                      and not self.homing.m[f"ak45_{self.joints[n].id}"].homed]
         if not_homed:
@@ -927,7 +946,13 @@ class RealArm:
         if unsent:
             return {"ok": False, "error": "한 번도 안 보낸 서보: " + ", ".join(unsent) + " — 첫 명령은 램프 없이 바로 튄다. "
                     "각도 제어 탭에서 이 서보들을 지금 자리 근처로 먼저 보낸 뒤 재생"}
+        far = self._start_far(names, traj["positions"][0], start_tol)
+        if far:
+            return {"ok": False, "error": f"지금 자세가 첫 프레임에서 {start_tol:g}° 넘게 떨어짐: " + ", ".join(far) +
+                    " — 첫 프레임까지는 검사 없는 관절 직선이라 거절. 'HOME 으로' 버튼으로 원점에 간 뒤(또는 계획을 지금 자세에서 다시) 재생"}
         speed = min(float(max_speed), self.p["max_speed"])
+        if not speed > 0:
+            return {"ok": False, "error": f"속도 {max_speed} °/s — 0 보다 커야"}
         period, slow, peak = P.schedule(traj, speed)     # play.play 는 안 쓴다(아래 play_loop)
         n = len(traj["positions"])
         motors = [(k, self.joints[nm]) for k, nm in enumerate(names) if self.joints[nm].motor == "ak45"]
@@ -1006,8 +1031,33 @@ class RealArm:
         self._log(f"실물 궤적 재생 시작: {n} 프레임, {slow:.1f}배 느리게({speed:g} °/s), 약 {self.play['seconds']:.0f}초")
         return {"ok": True, "msg": f"실물 재생: {n} 프레임, {slow:.1f}배 느리게, 약 {self.play['seconds']:.0f}초. 멈춤 = STOP"}
 
+    def _start_far(self, names, frame0, tol):
+        """첫 프레임(rad)과 지금 자세의 차이가 tol° 넘는 관절 'joint 지금→첫 (°)' 목록. AK45 = 원점 기준 피드백(없거나 끊기면 넘는 것으로),
+        서보 = 마지막으로 보낸 각(피드백이 없음). 잠금 안에서 부른다."""
+        now = time.monotonic()
+        out = []
+        for k, n in enumerate(names):
+            j = self.joints[n]
+            want = math.degrees(frame0[k])
+            if j.motor == "ak45":
+                m = self.ak[f"ak45_{j.id}"]
+                raw = self.homing.from_raw(m.name, m.pos) if m.pos is not None and m.fresh(now, self.p["fresh_s"]) else None
+                if raw is None:
+                    out.append(f"{n} 피드백 없음")
+                    continue
+                cur = j.to_sim(raw)
+            else:
+                sent = self.servo_sent.get(j.name)
+                if sent is None:
+                    continue          # 한 번도 안 보낸 서보는 위(unsent)에서 이미 거절
+                cur = j.to_sim(sent[0])
+            if abs(cur - want) > tol:
+                out.append(f"{n} {cur:.0f}→{want:.0f}°")
+        return out
+
     def stop_trajectory(self):
         self._play_stop.set()
+        self.stop_gen += 1
         return {"ok": True, "msg": "재생 멈춤 요청 (팔은 그 자리 홀드)"}
 
     # ------------------------------------------------------------------ 상태 (RosMonitor.snapshot 과 같은 모양)

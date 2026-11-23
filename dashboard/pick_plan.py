@@ -22,6 +22,7 @@
 import argparse
 import json
 import math
+import threading
 import os
 import sys
 import time
@@ -972,9 +973,16 @@ def plan(a):
 HOME_AT_DEG = 1.0        # 팔 관절이 모두 HOME 에서 이 안이면 '이미 HOME'
 HOME_NEAR_EXIT_DEG = 5.0 # 지금 자세가 HOME 나가기 경유점 하나에서 이 안이면 손목 길 없이 그 경유점부터 거꾸로
 _HOME_PLANNER = {}
+_HOME_LOCK = threading.Lock()   # 캐시한 Planner 하나가 MuJoCo MjData 를 같이 쓴다 → 동시에 두 계획이면 서로의 검사(qpos)를 덮어씀
 
 
 def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
+    """_plan_home 을 한 번에 하나씩 (폰·PC 가 거의 같이 HOME 을 눌러도 검사가 섞이지 않게)."""
+    with _HOME_LOCK:
+        return _plan_home(now_deg, ik, cal_file, max_speed)
+
+
+def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
     """지금 자세 → HOME(모든 관절 0) 궤적 (2026-11-21 '원점 자세로 가기' 버튼). now_deg = {관절: sim °}.
     계획(pick_plan)이 HOME 으로 돌아오는 길과 같게: (shoulder_yaw 만 0) → 손목 길(transit)로 HOME 나가기 경유점의 책상 위 자리
     → 나가기 경유점을 거꾸로 → HOME. 손가락은 첫 구간 동안 벌림. 곧장 관절 직선으로 HOME 에 가면 앞팔이 책상 모서리를 파고들어서

@@ -620,6 +620,12 @@ def _go_home(b):
         return {"ok": False, "error": "가상 팔 없음"}
     if kind == "direct" and not direct_api.DIRECT.connected():
         return {"ok": False, "error": "팔 연결 안 됨 (연결 탭 ② 팔 연결)"}
+    gen = None
+    if kind == "direct":
+        arm = direct_api.DIRECT.arm
+        gen = arm.stop_gen            # 계획(0.2~1.2 s) 동안 STOP 이 눌리면 play_trajectory 가 거절
+        if arm.calib_dirty:           # 계획은 파일(calibration.json)로, 팔은 메모리 보정으로 → 다르면 지금 자세를 잘못 읽는다
+            return {"ok": False, "error": "보정을 바꾸고 저장 안 함 — 연결 탭에서 'calibration.json 저장' 뒤 HOME"}
     cal = _calibration()
     pose = actual_pose(backend().snapshot(), cal)
     now = {n: v["deg"] for n, v in pose.items() if v.get("deg") is not None}
@@ -632,6 +638,9 @@ def _go_home(b):
         speed = float((b or {}).get("max_speed") or 0) or float(_trajectory()["params"].get("max_speed") or 30.0)
     except (TypeError, ValueError):
         speed = 30.0
+    if not math.isfinite(speed):
+        speed = 30.0
+    speed = min(max(speed, 1.0), 90.0)    # 0·음수면 프레임이 경유점만 남아 검사가 빈다, 아주 작으면 프레임 수가 폭발
     try:
         import pick_plan
         traj = pick_plan.plan_home(now, ik=os.environ.get("JAX_IK_DIR") or None, max_speed=speed)
@@ -653,7 +662,7 @@ def _go_home(b):
         if problems and not (b or {}).get("force"):   # 실물 궤적 재생(play_real)과 같은 규칙: 화면이 확인창을 띄우고 force 로 다시
             return {"ok": False, "need_force": True, "problems": problems,
                     "error": f"검사 {len(problems)}건 (--force 가 필요한 것): " + " / ".join(problems)}
-        r = arm.play_trajectory(traj, speed)
+        r = arm.play_trajectory(traj, speed, stop_gen=gen)
     else:
         from arm_control import calibration as C
         fatal, _ = check_trajectory(traj, C.load())

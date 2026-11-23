@@ -109,12 +109,13 @@ def analytic_fatal(traj):
 def play_real(trajectory, b):
     if not DIRECT.connected():
         return {"ok": False, "error": "팔 연결 안 됨 (직접 CAN)"}
+    arm = DIRECT.arm
+    gen = arm.stop_gen          # 이 사이 STOP 이 눌리면 play_trajectory 가 거절
     t = trajectory()
     if not t["ok"]:
         return {"ok": False, "error": t.get("error") or "궤적 없음"}
     traj = t["traj"]
     from arm_control.play import check_trajectory
-    arm = DIRECT.arm
     fatal = analytic_fatal(traj)
     if fatal:
         return {"ok": False, "error": f"재생 거절: {fatal}"}
@@ -128,7 +129,7 @@ def play_real(trajectory, b):
         speed = float(t["params"].get("max_speed") or 30.0)
     except ValueError:
         speed = 30.0
-    r = arm.play_trajectory(traj, speed)
+    r = arm.play_trajectory(traj, speed, stop_gen=gen)
     if r.get("ok") and problems:
         r["msg"] += f" (검사 {len(problems)}건 무시하고 재생: force)"
     return r

@@ -282,7 +282,31 @@ def review_tests(a, cal, tmp, check, wait):
     # R1. 재생 첫 프레임 홀드(5 s) 중 STOP → 그 자리 홀드, 첫 프레임으로 다시 안 감
     fake, arm = rig()
     traj = {"joint_names": names, "dt": 0.05, "positions": [[0, 0, 0, rad(90)]] * 6, "status": "playable"}
-    arm.play_trajectory(traj, 30.0, hold=5.0)
+
+    # R0. 재생 시작 규칙: 첫 프레임이 멀면 거절 / 계획 중 STOP 이면 거절 / 저장 안 한 보정이면 거절 / 동시에 둘이면 하나만
+    r = arm.play_trajectory(traj, 30.0, hold=0.3)
+    check("첫 프레임 90° 떨어짐 → 재생 거절", not r["ok"] and "첫 프레임" in r.get("error", "") and not arm.play.get("running")
+          and abs(fake.pos(4)) < 1, r.get("error", r.get("msg"))[:110])
+    near = dict(traj, positions=[[0, 0, 0, rad(2)]] * 6)
+    g = arm.stop_gen
+    arm.hold_all("STOP")
+    r = arm.play_trajectory(near, 30.0, hold=0.3, stop_gen=g)
+    check("계획 중 STOP → 재생 거절", not r["ok"] and "STOP" in r.get("error", "") and not arm.play.get("running"), r.get("error", r.get("msg")))
+    arm.calib_dirty = True
+    r = arm.play_trajectory(near, 30.0, hold=0.3)
+    arm.calib_dirty = False
+    check("보정 저장 안 함 → 재생 거절", not r["ok"] and "저장" in r.get("error", ""), r.get("error", r.get("msg"))[:80])
+    res = []
+    ts = [threading.Thread(target=lambda: res.append(arm.play_trajectory(near, 30.0, hold=0.3))) for _ in range(4)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    nok = sum(1 for x in res if x["ok"])
+    wait(lambda: not arm.play.get("running"), 5)
+    check("동시에 재생 4개 → 하나만 시작", nok == 1 and all("이미 재생 중" in x.get("error", "") for x in res if not x["ok"]),
+          f"시작 {nok}개, 나머지: {[x.get('error') for x in res if not x['ok']][:1]}")
+    arm.call_trigger("/arm_control/home_all")
+    time.sleep(0.2)
+
+    arm.play_trajectory(traj, 30.0, hold=5.0, start_tol=999)    # 아래 시험은 첫 프레임 홀드 동작을 본다(시작 자세 검사 끔)
     time.sleep(0.5)
     p_stop = fake.pos(4)
     arm.hold_all("STOP")
@@ -294,7 +318,7 @@ def review_tests(a, cal, tmp, check, wait):
     # R2. 첫 프레임 홀드 중 '재생 멈춤'(stop_trajectory) → 끝에 hold_all
     arm.call_trigger("/arm_control/home_all")
     time.sleep(0.2)
-    arm.play_trajectory(traj, 30.0, hold=5.0)
+    arm.play_trajectory(traj, 30.0, hold=5.0, start_tol=999)
     time.sleep(0.5)
     arm.stop_trajectory()
     wait(lambda: not arm.play.get("running"), 1.0)
