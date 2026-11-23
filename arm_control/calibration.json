@@ -10,9 +10,9 @@
     {"joint": "hand_roll", "motor": "servo", "id": 7, "name": "W_X", "sign": 1, "scale": 1.0, "zero_deg": 90.0, "sim_range_deg": [-120.0, 120.0], "verified": false},
     {"joint": "finger1_joint1", "motor": "servo", "id": 0, "name": "F1_1", "sign": 1, "scale": 1.0, "zero_deg": 90.0, "sim_range_deg": [-90.0, 90.0], "verified": false},
     {"joint": "finger1_joint2", "motor": "servo", "id": 1, "name": "F1_2", "sign": 1, "scale": 1.0, "zero_deg": 0.0, "sim_range_deg": [0.0, 180.0], "verified": false},
-    {"joint": "finger2_joint1", "motor": "servo", "id": 2, "name": "F2_1", "sign": 1, "scale": 1.0, "zero_deg": 90.0, "sim_range_deg": [-90.0, 90.0], "verified": false},
+    {"joint": "finger2_joint1", "motor": "servo", "id": 4, "name": "F3_1", "sign": 1, "scale": 1.0, "zero_deg": 90.0, "sim_range_deg": [-90.0, 90.0], "verified": false},
     {"joint": "finger2_joint2", "motor": "servo", "id": 3, "name": "F2_2", "sign": 1, "scale": 1.0, "zero_deg": 0.0, "sim_range_deg": [0.0, 180.0], "verified": false},
-    {"joint": "finger3_joint1", "motor": "servo", "id": 4, "name": "F3_1", "sign": 1, "scale": 1.0, "zero_deg": 90.0, "sim_range_deg": [-90.0, 90.0], "verified": false},
+    {"joint": "finger3_joint1", "motor": "servo", "id": 2, "name": "F2_1", "sign": 1, "scale": 1.0, "zero_deg": 90.0, "sim_range_deg": [-90.0, 90.0], "verified": false},
     {"joint": "finger3_joint2", "motor": "servo", "id": 5, "name": "F3_2", "sign": 1, "scale": 1.0, "zero_deg": 0.0, "sim_range_deg": [0.0, 180.0], "verified": false},
     {"joint": "finger_rotation", "motor": "servo", "id": 6, "name": "F_ROT", "sign": 1, "scale": 1.0, "zero_deg": 0.0, "sim_range_deg": [0.0, 180.0], "verified": false, "note": "fixed in the sim (hand_base_to_rotation_base = -pi, finger 3 facing fingers 1 and 2). Sim 0 here means that pose; zero_deg is the servo angle that gives it."}
   ]
