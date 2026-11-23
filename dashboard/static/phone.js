@@ -100,7 +100,7 @@ async function phDetect(file) {
   phShow(PH.grasp_el, "집을 수 있는지 확인 중…", "run");
   let g;
   try {
-    g = await (await fetch("/api/ik/graspable", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ x: r.cube.x, y: r.cube.y }) })).json();
+    g = await (await fetch("/api/ik/graspable", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ x: r.cube.x, y: r.cube.y, d: tableD() }) })).json();
   } catch (e) { g = { ok: false, reason: "서버 연결 실패" }; }
   if (PH.cube !== r.cube) return;   // 그 사이 새 사진
   PH.grasp = g;
@@ -159,5 +159,6 @@ function phTick() {
   PH.bGo.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1}` : PH.going ? "계획 중…" : `집으러 가기 (${kind === "virtual" ? "가상 팔" : "실물 팔"})`;
   PH.bStop.disabled = !pb.running;
   const v = mapVals();
-  PH.target.textContent = v.target ? `놓을 자리: x ${v.target.x.toFixed(3)}, y ${v.target.y.toFixed(3)} m (역기구학 탭에서 바꾼다)` : "놓을 자리: 역기구학 탭에서 정한다";
+  PH.target.textContent = (v.target ? `놓을 자리: x ${v.target.x.toFixed(3)}, y ${v.target.y.toFixed(3)} m (역기구학 탭에서 바꾼다)` : "놓을 자리: 역기구학 탭에서 정한다") +
+    ` · 책상 높이 ${tableDNum().toFixed(3)} m`;
 }
