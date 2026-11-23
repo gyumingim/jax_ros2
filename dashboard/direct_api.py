@@ -124,6 +124,14 @@ def play_real(trajectory, b):
     t = trajectory()
     if not t["ok"]:
         return {"ok": False, "error": t.get("error") or "궤적 없음"}
+    m = b.get("mtime")      # 화면이 보고 확인한 계획의 mtime. 그 사이 다른 기기가 다시 계획했으면 거절 (없으면 검사 안 함: 스크립트·시험)
+    if m is not None:
+        try:
+            same = abs(float(m) - float(t["mtime"])) <= 1e-6
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return {"ok": False, "error": "계획이 바뀜 — 화면의 계획을 확인하고 다시 재생"}
     traj = t["traj"]
     from arm_control.play import check_trajectory
     fatal = analytic_fatal(traj)

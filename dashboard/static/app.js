@@ -536,8 +536,18 @@ function lastRun(s) {
   for (let i = lines.length - 1; i >= 0; i--) if (/^===== .* 켜기: /.test(lines[i])) { k = i; break; }
   return k >= 0 ? lines.slice(k) : (s.exit_code == null ? [] : lines);
 }
+// 칸 값이 지금 계획(T.traj.real = 계획에 쓴 값)과 다른가 — 다르면 재생을 막는다 (화면에 보이는 값 ≠ 재생될 계획)
+function planStale() {
+  const r = T.traj && T.traj.real, c = M.c;
+  if (!r || !c || !Array.isArray(r.cube) || !Array.isArray(r.target)) return false;
+  const far = (k, v, tol) => v != null && !(Math.abs(parseFloat(c.fields[k].value) - v) <= tol);
+  return far("cube_x", r.cube[0], 0.0005) || far("cube_y", r.cube[1], 0.0005) || far("cube_yaw", r.cube[2], 0.05) ||
+    far("target_x", r.target[0], 0.0005) || far("target_y", r.target[1], 0.0005) || (r.d != null && Math.abs(tableDNum() - r.d) > 0.0005);
+}
 function pickSummary(s) {
   if (s.alive) return ["⏳ 계획 중… (보통 10~30초)", "run"];
+  // (새 계획이 막 끝나 궤적을 아직 다시 읽는 중이면 판단하지 않는다 — 옛 궤적과 비교하게 됨)
+  if (planStale() && (T.info || {}).mtime === S.traj_mtime) return ["값이 바뀜 — '계획 돌려 보기'를 다시", "warn"];
   const lines = lastRun(s);
   if (!lines.length || s.exit_code == null) return [s.available ? "아직 안 돌림 — 위 칸을 확인하고 '계획 돌려 보기'" : (s.why || ""), ""];
   const t = T.traj, an = t && t.planner === "analytic";
@@ -1487,7 +1497,7 @@ async function sendJoints(names) {
   if (r.ok) for (const n of ok) { A.base[n] = A.val[n]; A.sent[n] = joints[n]; }
   if (skip.length) toast("안 보낸 관절: " + skip.map((n) => `${n} (${(g.joints[n] || {}).reason})`).join(", "), "error");
 }
-function syncToActual() {
+function syncToActual(quiet) {
   let k = 0;
   for (const [n, j] of Object.entries(calJ())) {
     const p = (S.pose || {})[n];
@@ -1496,7 +1506,7 @@ function syncToActual() {
     setVal(n, clampR(j, v), true);
     k++;
   }
-  toast(k ? `현재 자세로 ${k}개 관절 맞춤 (AK45 = 피드백, 서보 = 마지막으로 보낸 값)` : "현재 자세 값이 없음 (피드백·보낸 값 없음)");
+  if (!quiet) toast(k ? `현재 자세로 ${k}개 관절 맞춤 (AK45 = 피드백, 서보 = 마지막으로 보낸 값)` : "현재 자세 값이 없음 (피드백·보낸 값 없음)");
 }
 function setVal(n, v, asBase) {
   A.val[n] = v;
@@ -1538,7 +1548,7 @@ function buildAngles() {
   A.gate = el("div", { class: "gate" });
   A.vb = el("span", { class: "vbadge", hidden: true }, "가상");
   A.bAll = el("button", { class: "btn", onclick: () => sendJoints(Object.keys(cal).filter((n) => Math.abs((A.val[n] ?? 0) - (A.base[n] ?? 0)) > 1e-9)) }, "바뀐 것 보내기");
-  A.bSync = el("button", { class: "btn line", onclick: syncToActual, title: "슬라이더를 지금 팔 자세로 (AK45 = 피드백, 서보 = 마지막으로 보낸 값)" }, "지금 자세로 맞추기");
+  A.bSync = el("button", { class: "btn line", onclick: () => syncToActual(), title: "슬라이더를 지금 팔 자세로 (AK45 = 피드백, 서보 = 마지막으로 보낸 값)" }, "지금 자세로 맞추기");
   A.bReset = el("button", { class: "btn line", onclick: () => { for (const n of Object.keys(cal)) setVal(n, A.base[n] ?? 0); renderAngles(); }, title: "아직 안 보낸 슬라이더 변경을 취소" }, "바꾼 것 취소");
   const linkBox = el("input", { type: "checkbox" });
   linkBox.addEventListener("change", () => { A.link = linkBox.checked; });
@@ -1737,7 +1747,9 @@ function renderTraj() {
   T.bPlay.disabled = !t; T.bPlay.textContent = T.playing ? "⏸ 일시정지" : "▶ 재생";
   const v = VIRT(), pb = ((S.ros || {}).virtual_state || {}).playback || {};
   T.vrow.hidden = !v;
-  T.vplay.disabled = !t || pb.running; T.vstop.disabled = !pb.running;
+  const stale = planStale();
+  T.vplay.disabled = !t || pb.running || stale; T.vstop.disabled = !pb.running;
+  T.vplay.title = stale ? "값이 바뀜 — 계획 다시" : "";
   T.vinfo.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` : pb.reason ? `마지막: ${pb.reason}` : "";
   updateIkView();
 }
@@ -1817,7 +1829,7 @@ function buildGoHome() {
     el("h3", {}, GH.vb, "HOME 자세로 가기"),
     el("p", { class: "help" }, "지금 자세에서 HOME(모든 관절 0, 팔이 책상 옆에 곧게 늘어진 자세)으로 간다. " +
       "계획이 HOME 으로 돌아올 때와 같은 길(책상 위 → 팔꿈치 펴며 어깨 젖힘 → 팔 돌림)을 거꾸로 따라가고, 손가락은 벌린다. " +
-      "책상을 파고드는 길이면 거절한다 (책상 옆 기둥·받침은 검사 안 함)."),
+      "책상 충돌 검사는 꺼져 있다 (책상 없다고 봄)."),
     el("div", { class: "row" }, GH.servo, GH.btn, GH.stop), GH.note);
   $("#gohome").append(GH.card);
 }
@@ -1829,7 +1841,10 @@ function renderGoHome() {
   const why = kind === "ros" ? "ROS 모드에선 아직 없음" : kind === "direct" && !DC() ? "연결 탭 ② 팔 연결 먼저" : pb.running ? "재생 중 — 끝나거나 멈춘 뒤" : "";
   GH.btn.disabled = !!why; GH.btn.title = why;
   GH.stop.disabled = !pb.running;
-  GH.note.textContent = why || (pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1}` : "");
+  GH.note.textContent = pb.running ? `가는 중 ${pb.frame}/${pb.frames - 1}` : pb.reason ? "마지막: " + pb.reason : "";
+  // HOME·재생이 끝난 틱: 슬라이더를 지금 자세로 (옛 값으로 '보내기'를 누르면 팔이 되돌아가던 것)
+  if (GH.wasRun && !pb.running) syncToActual(true);
+  GH.wasRun = !!pb.running;
 }
 // 계획·HOME 시작 서보 값 (sim °): 손목 3개 0, 손가락 = IK env FINGER_OPEN (첫 마디 −0.26 rad, 둘째 0) = pick_plan open_exit
 const SERVO_HOME_DEG = { wrist_pitch: 0, wrist_yaw: 0, hand_roll: 0,

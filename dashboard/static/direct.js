@@ -241,20 +241,22 @@ renderTraj = function () {
   }
   const o = D.play, pb = DS().playback || {};
   o.root.hidden = !DIRECT();
-  o.go.disabled = !T.traj || !DC() || pb.running;
-  o.go.title = !DC() ? "연결 탭 ② 팔 연결 먼저" : !T.traj ? "계획(궤적) 먼저" : "";
+  const stale = planStale();
+  o.go.disabled = !T.traj || !DC() || pb.running || stale;
+  o.go.title = !DC() ? "연결 탭 ② 팔 연결 먼저" : !T.traj ? "계획(궤적) 먼저" : stale ? "값이 바뀜 — 계획 다시" : "";
   o.stop.disabled = !pb.running;
   o.info.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` : pb.reason ? `마지막: ${pb.reason}` : "";
 };
 async function playReal() {
+  const mtime = T.info && T.info.mtime;     // 지금 화면이 보여 주는 계획. 확인창 사이에 계획이 바뀌면 서버가 거절
   if (!confirm("⚠ 실물 팔로 이 궤적을 재생한다.\n\n원점 4개가 잡혀 있어야 하고, 첫 프레임까지 천천히 간 뒤 재생한다. " +
     "AK45 가 명령에서 15° 넘게 0.5초 벌어지면 멈추고 그 자리 홀드.\n\n팔 주변을 비웠나요?")) return;
   if (!confirm("정말 실물로 재생할까요? (멈춤 = ■ STOP / Esc)")) return;
   T.view = "actual";
-  let r = await post("/api/ik/play_real", { force: false }, true);
+  let r = await post("/api/ik/play_real", { force: false, mtime }, true);
   if (!r.ok && r.need_force) {
     if (!confirm("검사에서 문제가 나왔다 (play_trajectory 면 --force 가 필요):\n\n- " + r.problems.join("\n- ") + "\n\n그래도 재생할까요?")) return;
-    r = await post("/api/ik/play_real", { force: true });
+    r = await post("/api/ik/play_real", { force: true, mtime });
   } else if (r.ok && r.msg) toast(r.msg);
 }
 
