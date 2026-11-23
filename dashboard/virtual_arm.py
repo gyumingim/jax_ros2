@@ -493,6 +493,13 @@ class VirtualArm:
                 return {"ok": False, "error": "이미 재생 중"}
             if "arm_control" not in self.nodes:
                 return {"ok": False, "error": "가상 arm_control_node 가 꺼져 있음 (연결 탭에서 arm.launch.py 또는 arm_homed 켜기)"}
+            if self.guard is not None:   # arm_homed: 원점 없는 AK45 명령은 guard 가 버린다 → 서보만 움직이는 재생이 되지 않게 실물처럼 거절
+                hm = self.guard["homing"]
+                not_homed = [n for n in traj["joint_names"] if n in self.joints and self.joints[n].motor == "ak45"
+                             and not hm.m[f"ak45_{self.joints[n].id}"].homed]
+                if not_homed:
+                    return {"ok": False, "error": "(가상) 원점 없는 AK45: " + ", ".join(not_homed) +
+                            " — 각도 제어 탭에서 '전부 원점 잡기' 먼저 (원점 없으면 guard 가 AK45 명령을 막아 서보만 움직인다)"}
             period, slow, peak = P.schedule(traj, max_speed)
             n = len(traj["positions"])
             self._play_stop.clear()
