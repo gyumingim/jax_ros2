@@ -657,6 +657,7 @@ def _go_home(b):
         problems = []
         if not fatal:
             fatal, problems = check_trajectory(traj, arm.cal)
+            problems = direct_api.drop_unverified(problems)
         if fatal:
             return {"ok": False, "error": f"HOME 재생 거절: {fatal}"}
         if problems and not (b or {}).get("force"):   # 실물 궤적 재생(play_real)과 같은 규칙: 화면이 확인창을 띄우고 force 로 다시

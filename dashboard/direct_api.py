@@ -106,6 +106,16 @@ def analytic_fatal(traj):
     return None
 
 
+ALLOW_UNVERIFIED_CAL = True   # 2026-11-23 사용자: "가정값이어도 움직이게" — 보정 미확인(verified false)은 force 확인 없이 재생 (로그에만 남김)
+
+
+def drop_unverified(problems):
+    """check_trajectory 의 'calibration not verified' 경고를 뺀다 (ALLOW_UNVERIFIED_CAL). 다른 경고는 그대로 force 확인."""
+    if not ALLOW_UNVERIFIED_CAL:
+        return problems
+    return [p for p in problems if not str(p).startswith("calibration not verified")]
+
+
 def play_real(trajectory, b):
     if not DIRECT.connected():
         return {"ok": False, "error": "팔 연결 안 됨 (직접 CAN)"}
@@ -120,6 +130,7 @@ def play_real(trajectory, b):
     if fatal:
         return {"ok": False, "error": f"재생 거절: {fatal}"}
     fatal, problems = check_trajectory(traj, arm.cal)
+    problems = drop_unverified(problems)
     if fatal:
         return {"ok": False, "error": f"재생 거절: {fatal}"}
     if problems and not b.get("force"):
