@@ -295,7 +295,7 @@ function pinSelect(c) {
   const direct = S.mode && S.mode.kind === "direct";
   if (!direct) return el("span", {}, String(c.id));
   const sel = el("select", { class: "pin", title: "서보가 꽂힌 STM32 핀. 바꾸면 그 핀을 쓰던 관절과 맞바꾼다 (둘 다 '안 보냄' — 다음 명령은 바로 튐). 저장해야 남는다" },
-    ...Array.from({ length: 16 }, (_, i) => el("option", { value: i }, String(i))));
+    ...Array.from({ length: 10 }, (_, i) => el("option", { value: i }, String(i))));
   sel.value = String(c.id);
   sel.addEventListener("change", async () => {
     const r = await post("/api/direct/calib", { action: "pin", joint: c.joint, value: +sel.value });

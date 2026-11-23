@@ -62,7 +62,7 @@ from arm_control.watch import TrackingWatch   # noqa: E402
 from stm_bridge.protocol import SERVO_STDID, Frame, servo_frame   # noqa: E402
 
 LOCK_PATH = "/tmp/ak45_ctrl.lock"     # ak45_can LOCK_FILE_PATH 와 같은 파일
-SERVO_PIN_MAX = 15           # 서보 핀(STM32 채널) 번호 상한
+SERVO_PIN_MAX = 9            # 서보 핀(STM32 채널) 번호 상한 — 펌웨어 motor_id 0..9 (stm_bridge protocol SERVO_COUNT)
 START_TOL_DEG = 5.0           # 실물 재생: 첫 프레임과 지금 자세가 이만큼(°) 넘게 다르면 거절 (첫 프레임까지는 검사 없는 관절 직선)
 AK45_MODE_BRAKE = 2
 
