@@ -20,8 +20,10 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from services import LOG_DIR
+
 HERE = Path(__file__).resolve().parent
-OUT = HERE / "logs" / "rl"
+OUT = LOG_DIR / "rl"
 RESULT = OUT / "last_run.json"
 EVAL_DIR = OUT / "eval"
 RUN_TIMEOUT, EVAL_TIMEOUT = 120, 900

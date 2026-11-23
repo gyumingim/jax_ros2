@@ -32,6 +32,37 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect   # noqa: E
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse   # noqa: E402
 from fastapi.staticfiles import StaticFiles   # noqa: E402
 
+
+
+def _own_logs():
+    """서버 하나 = logs 폴더 하나. 먼저 뜬 서버가 dashboard/logs 를 쓰고(잠금 logs/.server.lock), 같은 PC 의 다른 서버(시험·가상)는
+    logs/other_<포트> 를 쓴다 — 시험 서버의 계획(pick_dry_traj.json)이 실물 서버의 '지금 계획'이 되지 않게.
+    JAX_DASH_LOGS 를 직접 주면 그대로. procman·services 가 import 될 때 그 변수를 읽으므로 그 전에 부른다(자식 프로세스도 물려받음)."""
+    if os.environ.get("JAX_DASH_LOGS") or not sys.platform.startswith("linux"):
+        return None
+    import fcntl
+    d = HERE / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    f = open(d / ".server.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+    port = os.environ.get("JAX_DASH_PORT") or "8080"
+    for k, v in enumerate(sys.argv):
+        if v == "--port" and k + 1 < len(sys.argv):
+            port = sys.argv[k + 1]
+        elif v.startswith("--port="):
+            port = v[7:]
+    port = re.sub(r"[^0-9A-Za-z_-]", "", port) or "x"
+    os.environ["JAX_DASH_LOGS"] = str(d / f"other_{port}")
+    print(f"다른 대시보드 서버가 {d} 를 쓰는 중 — 이 서버는 {d / ('other_' + port)} 를 쓴다", flush=True)
+    return None
+
+
+_LOGS_LOCK = _own_logs()      # 파일을 열어 둔 동안 잠금 유지 (프로세스가 끝나면 풀림)
+
 from procman import IS_LINUX, LOG_DIR, ProcessManager, tail_file   # noqa: E402
 from ros_bridge import RosBridge   # noqa: E402
 from ros_monitor import HOMING_SRV   # noqa: E402  (rclpy 는 import 하지 않음 — 구독은 자식 프로세스)
@@ -753,7 +784,7 @@ def robot_mesh(name: str):
     return FileResponse(str(p), media_type="text/plain", headers={"Cache-Control": "max-age=3600"})
 
 
-FOLLOW_LOG = HERE / "logs" / "follow.log"
+FOLLOW_LOG = LOG_DIR / "follow.log"
 FOLLOW_LOG_MAX = 4 << 20   # 4 MB 넘으면 follow.log.1 로 돌리고 새로 (하나만 남김)
 _follow_lock = threading.Lock()
 

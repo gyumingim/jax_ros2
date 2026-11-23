@@ -29,6 +29,7 @@ python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 
 | `JAX_DASH_PYTHONPATH` | | 로컬 pick_place(가상 모드·Windows)에서 sys.path 뒤에 붙일 경로(mujoco·gymnasium·scipy 가 따로 있을 때) |
 | `JAX_DASH_SIGINT_WAIT`, `JAX_DASH_SIGTERM_WAIT` | 5, 3 초 | 끄기 단계 사이 대기 |
 | `JAX_DASH_DEMO=1` | | Linux 에서도 가짜 시험 항목을 보인다 |
+| `JAX_DASH_LOGS` | `dashboard/logs` | 로그·계획 궤적(`pick_dry_traj.json`) 폴더. 안 주면 먼저 뜬 서버가 `logs/`(잠금 `logs/.server.lock`), 같은 PC 의 다른 서버는 `logs/other_<포트>` — 시험 서버의 계획이 실물 서버 계획을 덮어쓰지 않게 (2026-11-23) |
 | `JAX_DASH_MAP_PARTS` | CPU 수 ÷ 2 (최대 8) | '집을 수 있는 곳' 지도를 나눠 푸는 프로세스 수 (PC 가 바쁘면 2~3) |
 
 ## 화면: 탭 3개 (+ 강화학습 탭, 아래 따로)
