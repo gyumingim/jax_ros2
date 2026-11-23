@@ -1763,6 +1763,9 @@ const GH = {};
 function buildGoHome() {
   GH.btn = el("button", { class: "btn", onclick: goHome }, "⌂ HOME(원점 자세)으로 가기");
   GH.stop = el("button", { class: "btn line", onclick: stopAll }, "멈춤");
+  GH.servo = el("button", { class: "btn line", onclick: sendServosHome,
+    title: "서보는 위치 피드백이 없어 한 번도 안 보낸 서보는 재생·HOME 이 거절한다. 계획 시작 값(손목 3개 0°, 손가락 벌림 −15°/0°)을 한 번에 보낸다 — 첫 명령이라 램프 없이 바로 튄다" },
+    "서보 한 번에 보내기");
   GH.vb = el("span", { class: "vbadge", hidden: true }, "가상");
   GH.note = el("div", { class: "note" });
   GH.card = el("div", { class: "card", style: "margin-bottom:16px" },
@@ -1770,7 +1773,7 @@ function buildGoHome() {
     el("p", { class: "help" }, "지금 자세에서 HOME(모든 관절 0, 팔이 책상 옆에 곧게 늘어진 자세)으로 간다. " +
       "계획이 HOME 으로 돌아올 때와 같은 길(책상 위 → 팔꿈치 펴며 어깨 젖힘 → 팔 돌림)을 거꾸로 따라가고, 손가락은 벌린다. " +
       "책상을 파고드는 길이면 거절한다 (책상 옆 기둥·받침은 검사 안 함)."),
-    el("div", { class: "row" }, GH.btn, GH.stop), GH.note);
+    el("div", { class: "row" }, GH.servo, GH.btn, GH.stop), GH.note);
   $("#gohome").append(GH.card);
 }
 function renderGoHome() {
@@ -1782,6 +1785,15 @@ function renderGoHome() {
   GH.btn.disabled = !!why; GH.btn.title = why;
   GH.stop.disabled = !pb.running;
   GH.note.textContent = why || (pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1}` : "");
+}
+// 계획·HOME 시작 서보 값 (sim °): 손목 3개 0, 손가락 = IK env FINGER_OPEN (첫 마디 −0.26 rad, 둘째 0) = pick_plan open_exit
+const SERVO_HOME_DEG = { wrist_pitch: 0, wrist_yaw: 0, hand_roll: 0,
+  finger1_joint1: -14.9, finger1_joint2: 0, finger2_joint1: -14.9, finger2_joint2: 0, finger3_joint1: -14.9, finger3_joint2: 0 };
+async function sendServosHome() {
+  if (!confirm((VIRT() ? "(가상) " : "⚠ 실물 서보가 움직인다.\n\n") + "서보 9개(손목 3개 0°, 손가락 벌림)를 한 번에 보낼까요?\n" +
+    "처음 보내는 서보는 램프 없이 그 각으로 바로 튄다 — 손 주변을 비우세요.")) return;
+  const r = await post("/api/joint/send", { joints: SERVO_HOME_DEG });
+  if (r.ok) toast(r.msg || "서보 보냄"); else toast(r.error || "못 보냄", "error");
 }
 async function goHome() {
   const real = !VIRT();
