@@ -723,11 +723,12 @@ class RealArm:
 
     def hold_all(self, why="STOP"):
         """STOP: 모든 AK45 지금 측정 자리 홀드(힘 있는 것만), 서보 램프 멈춤, 재생 멈춤. 팔이 안 떨어진다."""
-        self._play_stop.set()
-        self.stop_gen += 1
+        self._play_stop.set()          # 잠금 밖에서 먼저: 재생 루프를 바로 깨움
         now = time.monotonic()
         held, stale = [], []
         with self.lock:
+            self.stop_gen += 1         # 잠금 안에서 한 번 더: _play_begin 의 clear() 가 이 STOP 을 지우지 못하게
+            self._play_stop.set()
             for m in self.ak.values():
                 if m.target is None:
                     continue
@@ -750,8 +751,9 @@ class RealArm:
     def limp(self, names=None):
         """힘 빼기: AK45 프레임 중단 + 브레이크 0 A. 팔이 떨어진다. 원점 지움."""
         self._play_stop.set()
-        self.stop_gen += 1
         with self.lock:
+            self.stop_gen += 1
+            self._play_stop.set()
             ms = [self.ak[n] for n in (names or list(self.ak))]
             had = [m.name for m in ms if self._limp_motor(m, "힘 뺌(사용자)", brake=False)]
             for m in ms:
@@ -840,6 +842,8 @@ class RealArm:
                 self.calib_dirty = False
             self._log(f"보정 저장: {self.cal.path}")
             return {"ok": True, "msg": f"저장함: {self.cal.path}"}
+        if self.play.get("running") and action != "verify":     # 재생 중 부호·영점·핀을 바꾸면 다음 프레임이 다른 곳으로 간다
+            return {"ok": False, "error": "재생 중 — 멈춘 뒤 보정"}
         j = self.joints.get(joint)
         if j is None:
             return {"ok": False, "error": f"모르는 관절 {joint!r}"}
@@ -986,6 +990,7 @@ class RealArm:
         motors = [(k, self.joints[nm]) for k, nm in enumerate(names) if self.joints[nm].motor == "ak45"]
         tracker = TrackingWatch(max_error)
         self._play_stop.clear()
+        gen0 = self.stop_gen           # 이 재생이 시작할 때의 STOP 번호. 바뀌면 멈춤(아래 step)
         self._play_bad = None
         self.play = {"running": True, "frame": 0, "frames": n, "period": period, "slow": slow,
                      "seconds": hold + (n - 1) * period, "started": time.time(), "reason": None, "real": True}
@@ -1012,10 +1017,11 @@ class RealArm:
             return tracker.check(exp, fb, now)
 
         def step(frame):
-            """멈춤 확인과 보내기를 한 잠금 안에서: hold_all(STOP)은 이벤트를 먼저 켜고 잠금을 잡으므로, STOP 뒤에
-            프레임 하나가 목표를 덮어쓰는 레이스가 없다."""
+            """멈춤 확인과 보내기를 한 잠금 안에서. STOP(hold_all·limp·stop_trajectory)은 잠금 안에서 stop_gen 을 올리고
+            이벤트를 켠다 — 재생 시작(_play_begin, 잠금 안)의 clear() 와 겹쳐도 gen0 과 달라져 STOP 이 사라지지 않고,
+            STOP 뒤에 프레임 하나가 목표를 덮어쓰지도 않는다."""
             with self.lock:
-                if self._play_stop.is_set():
+                if self._play_stop.is_set() or self.stop_gen != gen0:
                     return "stopped"
                 if self._play_bad:
                     return self._play_bad
@@ -1085,7 +1091,9 @@ class RealArm:
 
     def stop_trajectory(self):
         self._play_stop.set()
-        self.stop_gen += 1
+        with self.lock:
+            self.stop_gen += 1
+            self._play_stop.set()
         return {"ok": True, "msg": "재생 멈춤 요청 (팔은 그 자리 홀드)"}
 
     # ------------------------------------------------------------------ 상태 (RosMonitor.snapshot 과 같은 모양)
