@@ -707,6 +707,9 @@ direct_api.install(app, mode_kind, pm, can_state, _trajectory, str(LOG_DIR / "di
 import rl_api   # noqa: E402
 rl_api.install(app, _ik_dir)
 # --- 강화학습 탭 끝 ---
+# 휴대폰 카메라 탭 (사진 → 큐브 자리, ArUco): 전부 phone_api.py / phone_detect.py / static/phone.js. 팔은 거기서 안 움직인다
+import phone_api   # noqa: E402
+phone_api.install(app, LOG_DIR)
 
 _MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")
 
