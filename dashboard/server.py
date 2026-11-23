@@ -134,6 +134,27 @@ def _cmd_range(j):
 
 
 def _calibration():
+    """관절 표. 실물 직접 CAN 이 연결돼 있으면 그 팔이 쓰는 메모리 보정(저장 전 핀·영점·방향 포함)을 덮어쓴다 —
+    화면 각·지금 자세·HOME 계획이 실제로 보내는 변환과 같게 (2026-11-23: 핀을 바꾸고 저장 전이면 화면이 파일 값으로 엉뚱한 각을 보였다)."""
+    d = _calibration_file()
+    try:
+        if mode_kind() == "direct" and direct_api.DIRECT.connected():
+            live = {j.joint: j for j in direct_api.DIRECT.arm.cal.joints}
+            joints = []
+            for row in d.get("joints") or []:
+                j = live.get(row["joint"])
+                if j is not None:
+                    row = dict(row, id=j.id, name=j.name, sign=j.sign, scale=j.scale, zero_deg=j.zero_deg,
+                               verified=j.verified, sim_range_deg=list(j.sim_range_deg))
+                    row["cmd_range_deg"] = _cmd_range(row)
+                joints.append(row)
+            return dict(d, joints=joints, live=True)
+    except Exception:
+        pass
+    return d
+
+
+def _calibration_file():
     """calibration.json 의 관절 표(관절↔모터·ID·verified + 보낼 수 있는 범위). 파일이 바뀌면 다시 읽는다."""
     try:
         m = CALIB_FILE.stat().st_mtime
