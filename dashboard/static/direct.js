@@ -276,6 +276,9 @@ const SZ_JOINTS = [
     { j: `finger${k}_joint2`, t: `손가락 ${k} 끝 마디`, ref: {}, plus: 30,
       zero: "0° = 끝 마디가 첫 마디와 일직선.", dir: "+ = 안쪽으로 굽힘." },
   ]),
+  { j: "finger_rotation", t: "손가락 회전 (엄지)", ref: {}, plus: 0,
+    zero: "0° = 엄지(손가락 3)가 두 손가락(1·2)을 정면으로 마주봄. 계획은 이 자세로 고정 (시뮬에서 안 도는 관절이라 3D 유령은 안 움직임, 각도 제어 슬라이더도 0 고정).",
+    dir: "± 로 실물을 마주보게 맞춘 뒤 '지금이 0°'." },
 ];
 const SZ = {};
 const toR = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v * Math.PI / 180]));
