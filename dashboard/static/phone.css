@@ -1,0 +1,12 @@
+/* 휴대폰 카메라 탭 (phone.js 가 불러온다). 폰에서 한 손으로: 큰 버튼, 한 줄 세로 배치 */
+#page-phone { max-width: 720px; }
+#page-phone .ph-big { width: 100%; min-height: 64px; font-size: 19px; border-radius: 14px; }
+#page-phone .ph-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+#page-phone .ph-row > .btn { flex: 1 1 140px; min-height: 52px; }
+#page-phone .ph-img { display: block; width: 100%; max-height: 60vh; object-fit: contain; border-radius: 12px; background: var(--fill); margin-top: 14px; }
+#page-phone .ph-xy { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#page-phone .result { margin-top: 12px; }
+#page-phone .result small { display: block; font-weight: 500; margin-top: 4px; }
+#page-phone .frow .field { width: 84px; }
+#page-phone .frow .field input { font-size: 16px; }   /* iOS 가 입력 때 화면을 확대하지 않게 */
+#page-phone ol.help { padding-left: 20px; margin: 10px 0 0; line-height: 1.6; }
