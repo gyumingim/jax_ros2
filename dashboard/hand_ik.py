@@ -36,7 +36,7 @@ TIE_DEG = 2.0                 # 해 고르기: 최소 회전에서 이 각 안�
 TILT_PULL = 0.05              # auto: 남는 자유도로 기울기를 0 쪽으로 당기는 세기 (한 반복에 t 의 몇 배)
 TOL_ANALYTIC = 0.0005         # 해석 IK 해의 MuJoCo FK 검증 (손목 중앙 0.5 mm)
 A3 = ("shoulder_roll", "upper_arm_roll", "elbow")   # 해석 IK 가 푸는 관절 (shoulder_yaw 고정, 손목 3 관절 지금 값)
-MAP_PARTS = max(1, min(8, (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸는 프로세스 수 (이 worker + 도우미)
+MAP_PARTS = max(1, min(8, int(os.environ.get("JAX_DASH_MAP_PARTS") or 0) or (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸는 프로세스 수 (이 worker + 도우미). JAX_DASH_MAP_PARTS 로 줄임 (PC 가 바쁠 때)
 # 집는 점(손끝 사이, end_effector)을 큐브 중심보다 이만큼 위에 (2026-11-21 사용자: "1 cm 높게 잡아"). 큐브 5 cm 면 책상 위 3.5 cm.
 # 지도(grasp_eval)·계획(pick_plan: 집기·놓기 — 놓을 때도 큐브 바닥 = 책상)·IK 탭 기본 높이(ref_info → app.js)가 모두 이 값 하나를 쓴다.
 # 패드: 손가락 판 안쪽 면은 집는 점 −16 ~ +34 mm (손 축 따라). 닿는 곳(판 끝, 큐브 면 1 mm 안) −16 ~ +2 mm → 책상 위 19~37 mm, 큐브 면(0~50) 안.
@@ -45,6 +45,10 @@ MAP_TIMEOUT_S = 1500.0        # 지도 계산 시간 상한 (집는 점 +1 cm �
 NO_TABLE = True               # 2026-11-23 사용자: "책상 없다 생각" — 손가락·팔의 책상 충돌 검사 끔 (over_table 항상 False). 큐브 높이 기준(MAP_D)은 그대로
 TABLE_XY_MARGIN = 0.01        # 책상 발자국 둘레 여유 (m): 손가락 상자가 발자국 + 이만큼 안에 걸치면 책상 높이 검사 (2026-11-21)
 ARM_RADIUS = 0.03             # 팔 기준점(팔꿈치·손목) 둘레 링크 반지름 가정 (m) — 책상 발자국 위에서 책상 면 + 이만큼 위여야
+# 책상 높이 d (어깨 축 아래 m, 2026-11-23 사용자: "책상 높이에 따른 동작 변화도 되게, 그렇게 광범위할 필요는 없고"). 기본 = realcoords.MAP_D 0.4775.
+# IK 모델(sim)은 어깨가 고정이라 d 가 다르면 책상 면을 옮긴다: table_z = TABLE_SURFACE_Z + (MAP_D − d). 책상 기준 높이(큐브 중심·집는 점·
+# 옮겨 가는 높이·손가락/큐브 책상 여유·'책상 위 cm')가 모두 이 값을 따른다 (_Solver.set_table_d). 요청마다 "d" 로 받고, 없으면 기본.
+D_RANGE = (0.44, 0.53)        # 받는 범위 (m), 밖은 거절. 2026-11-23 지도 초록 칸(1 cm): 0.43 = 0 (0.42 는 HOME 나가기 경유점도 안 풀림), 0.44 = 20, 0.45 = 45, 0.4775 = 124, 0.50 = 223, 0.53 = 360 — 책상이 높을수록(d 작을수록) 좁다
 GRASP_TILT_TOL = 3.0         # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
 
@@ -84,6 +88,7 @@ class _Solver:
         self.hand_roll = self.arm.index("hand_roll")
         self.finger_geoms = [g for g in range(m.ngeom) if env._is_hand_geom[g] and m.geom_contype[g]]
         self.table_z = float(E.TABLE_SURFACE_Z)
+        self.table_d = float(R.MAP_D)   # 책상 높이 (어깨 축 아래 m). set_table_d 로 바꾼다
         # 책상 발자국 (sim x0, x1, y0, y1) = 앞 끝(로봇 쪽) sim x ≤ TABLE_NEAR_X (0.20 = 기둥 앞면 0.30 − STAND_GAP 0.10, env 장면의
         # table_top 상자 앞 끝과 같음) 인 반평면. 옆·먼 끝은 env 장면에선 도달 맵으로 정한 크기(반폭 WORK_Y_MAX + 0.08, 먼 끝
         # WORK_X_MIN − 0.10)라 실물 책상이 아니다 → 끝없이 (보수적: 손가락이 그쪽에선 늘 책상 면 위여야). 2026-11-21 HOME = 모든 관절 0
@@ -130,6 +135,17 @@ class _Solver:
                     for sz in (-1, 1):
                         low = min(low, float((rs.T @ (c + R @ (h * np.array([sx, sy, sz])) - d.site_xpos[self.site]))[2]))
         self.finger_below_site = low   # 음수 (손 축 따라 site 아래)
+
+    def set_table_d(self, d=None):
+        """책상 높이 d (어깨 축 아래 m, None·빈 값 = 기본 MAP_D). D_RANGE 밖이면 ValueError. 기본이면 table_z 는 env 값 그대로."""
+        R = self.R
+        d = float(R.MAP_D) if d in (None, "") else float(d)
+        if not (math.isfinite(d) and D_RANGE[0] - 1e-9 <= d <= D_RANGE[1] + 1e-9):
+            raise ValueError(d_range_text(d, float(R.MAP_D)))
+        if d != self.table_d:
+            self.table_d = d
+            self.table_z = float(self.E.TABLE_SURFACE_Z) + (float(R.MAP_D) - d)
+        return d
 
     def wrist_pos(self):
         """지금 self.d 의 손목 중앙(세계, sim)."""
@@ -588,13 +604,13 @@ class _Solver:
             current = np.array([math.radians(float(cur[n])) if n in cur else math.radians(float(nd[n])) if n in nd else home[i]
                                 for i, n in enumerate(self.arm)])
         near = np.radians([float(nd[n]) for n in self.arm]) if all(n in nd for n in self.arm) else current
-        z_table = p[2] + R.MAP_D   # 책상 위 높이 (m)
+        z_table = p[2] + self.table_d   # 책상 위 높이 (m)
         base = {"mode": mode, "input": {"x": p[0], "y": p[1], "z": p[2], "yaw_deg": yaw, "z_table_m": z_table},
                 "tilt_deg": float(E.HAND_TILT if mode == "grasp" else 0.0), "tilt_max_deg": tilt_max if mode == "auto" else None,
                 "grasp_dz_m": self.dz(mode)}
         if z_table < 0.0:
             return {**base, "ok": False, "kind": "below_table",
-                    "reason": f"책상 아래 — 점이 책상 면보다 {-z_table * 100:.1f} cm 아래 (책상 = 어깨 아래 {R.MAP_D * 100:.2f} cm)"}
+                    "reason": f"책상 아래 — 점이 책상 면보다 {-z_table * 100:.1f} cm 아래 (책상 = 어깨 아래 {self.table_d * 100:.2f} cm)"}
         point = np.asarray(self.to_sim(p))
         t0 = time.time()
         pref = "wrist" if b.get("ref") == "wrist" else "grip"   # 기준점: 손목 중앙 / 손가락 사이(집는 점)
@@ -693,7 +709,7 @@ class _Solver:
         seed_d = b.get("seed_deg") or {}
         if not all(n in seed_d for n in self.arm):
             return {"ok": False, "fast": True, "kind": "input", "reason": "빠른 풀이에 시작 자세가 없음"}
-        if p[2] + R.MAP_D < 0.0:
+        if p[2] + self.table_d < 0.0:
             return {"ok": False, "fast": True, "kind": "below_table", "reason": "책상 아래"}
         lim = self.set_ranges(ranges)
         flip = bool(b.get("flip"))
@@ -804,7 +820,7 @@ class _Solver:
         fix = {k: float(v) for k, v in (b.get("fix_deg") or {}).items()}
         ranges.update({j: [v, v] for j, v in fix.items()})
         lim = self.set_ranges(ranges)
-        zc = -R.MAP_D + self.grip_above_table()   # 집는 점 높이 (큐브 중심 + GRIP_ABOVE_CENTER, 놓을 때도 같게)
+        zc = -self.table_d + self.grip_above_table()   # 집는 점 높이 (큐브 중심 + GRIP_ABOVE_CENTER, 놓을 때도 같게)
         pc = np.asarray(self.to_sim([float(cube[0]), float(cube[1]), zc]))
         pt = np.asarray(self.to_sim([float(target[0]), float(target[1]), zc]))
         y = R.fold_yaw(yaw + R.SIM_FROM_REAL_YAW)
@@ -923,7 +939,7 @@ class _Solver:
         from analytic_ik import solve3
         np = self.np
         lim, q0, g = S["lim"], S["q0"], S["g"]
-        p = np.asarray(self.to_sim([x, y, self.grasp_z() - self.R.MAP_D]))
+        p = np.asarray(self.to_sim([x, y, self.grasp_z() - self.table_d]))
         if float(np.linalg.norm(p - g[0])) > S["reach"]:
             return 0, None, 0
         idx = [self.arm.index(n) for n in A3]
@@ -945,13 +961,13 @@ class _Solver:
         # 두는 해 + 손가락 책상 여유 + 곧은 수직 내려가기 — 판정은 pick_plan.Planner.point_check 한 곳 (계획과 어긋나지 않게).
         if not check:     # 팔(손목)이 닿나만 (pick_plan.plan 이 집기 판정은 실제 큐브 방향으로 따로)
             return 2, None, len(qs)
-        tipp = np.asarray(self.to_sim([x, y, float(self.E.OBJECT_HALF_SIZE) - self.R.MAP_D]))   # 큐브 중심 (집는 점은 point_check 가 + GRIP_ABOVE_CENTER)
+        tipp = np.asarray(self.to_sim([x, y, float(self.E.OBJECT_HALF_SIZE) - self.table_d]))   # 큐브 중심 (집는 점은 point_check 가 + GRIP_ABOVE_CENTER)
         ok, why, tilt = self._planner(S).point_check(tipp)
         self.last_why = why
         return (2 if ok else 1), tilt, len(qs)
 
     def _planner(self, S):
-        if getattr(self, "_pp", None) is None or self._pp.S is not S:
+        if getattr(self, "_pp", None) is None or self._pp.S is not S or self._pp.table_d != self.table_d:   # 책상 높이가 바뀌면 다시 (z_clear·HOME 나가기)
             import pick_plan
             self._pp = pick_plan.Planner(None, None, solver=self, setup=S)
         return self._pp
@@ -975,7 +991,7 @@ class _Solver:
             for y in ys:
                 rows.append("".join(str(self.grasp_eval(S, x, y, verify=False)[0]) for x in xs))
         n = [sum(r.count(c) for r in rows) for c in "012"]
-        return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(), "grip_above_table_m": self.grip_above_table(),
+        return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(), "grip_above_table_m": self.grip_above_table(), "d": self.table_d,
                 "counts": {"graspable": n[2], "wrist_only": n[1], "no": n[0]}, "tilt_tol_deg": GRASP_TILT_TOL,
                 "meaning": "초록(2) = 대시보드 계획(pick_plan)이 그 자리에서 집기·놓기 가능 (모든 큐브 yaw, 손가락 책상 여유 포함)",
                 "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000), "parts": parts}
@@ -1035,7 +1051,7 @@ class _Solver:
         sy = float(b.get("shoulder_yaw") or 0.0)
         ref = "wrist" if b.get("ref") == "wrist" else "grip"
         zt = float(b["z_table_m"])
-        z = zt - R.MAP_D
+        z = zt - self.table_d
         # 손 패널(POST /api/ik/hand)과 같은 풀이: mode position, 기준점 ref, shoulder_yaw 고정 — 지도 초록 = 패널에 그 x, y, z 를 넣으면 풀림
         rq = {"mode": "position", "ref": ref, "ranges_deg": b.get("ranges_deg") or {}, "fix_deg": {"shoulder_yaw": sy}, "z": z}
         rows = []
@@ -1090,6 +1106,7 @@ def _worker(ik_dir):
         try:
             b = json.loads(line)
             op = b.get("op")
+            s.set_table_d(b.get("d"))   # 요청마다 책상 높이 (없으면 기본 MAP_D) — worker 는 높이를 기억하지 않는다
             r = s.solve(b) if op == "solve" else s.fast(b) if op == "fast" else s.fk_req(b) if op == "fk" else s.pair(b) if op == "pair" else s.graspmap(b) if op == "graspmap" else s.graspcheck(b) if op == "graspcheck" else s.reachxyz(b) if op == "reachxyz" else {"ok": False, "reason": f"모르는 op {op!r}"}
         except Exception as e:
             r = {"ok": False, "reason": f"풀이 중 오류: {type(e).__name__}: {e}", "kind": "error"}
@@ -1172,17 +1189,39 @@ def _map_d(ik_dir):
     return float(m.MAP_D)
 
 
+def d_range_text(d, map_d):
+    return (f"책상 높이 d = {d:g} m 는 못 함 — 어깨 축 아래 {D_RANGE[0]:g} ~ {D_RANGE[1]:g} m 만 (기본 {map_d:g} m)")
+
+
+def table_d(ik_dir, v):
+    """화면·API 가 준 책상 높이(어깨 축 아래 m) → float. None·빈 값 = 기본 MAP_D. 숫자가 아니거나 D_RANGE 밖이면 ValueError(화면에 보일 말)."""
+    md = _map_d(ik_dir)
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return md
+    try:
+        d = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"책상 높이 d 는 숫자 (m, 어깨 축 아래 {D_RANGE[0]:g} ~ {D_RANGE[1]:g}) — {v!r}")
+    if not (math.isfinite(d) and D_RANGE[0] - 1e-9 <= d <= D_RANGE[1] + 1e-9):
+        raise ValueError(d_range_text(d, md))
+    return d
+
+
 def solve(ik_dir, body, ranges_deg, current_deg):
     """POST /api/ik/hand. body: {x, y, z 실좌표 m | z_table_cm, yaw_deg, mode, fix_deg?: {관절: 각}}."""
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음 (JAX_IK_DIR)"}
     b = body if isinstance(body, dict) else {}
     try:
+        d = table_d(ik_dir, b.get("d"))
+    except ValueError as e:
+        return {"ok": False, "fast": bool(b.get("fast")), "kind": "input", "reason": str(e)}
+    try:
         x, y = float(b["x"]), float(b["y"])
         if b.get("z") not in (None, ""):
             z = float(b["z"])
         else:
-            z = float(b["z_table_cm"]) / 100.0 - _map_d(ik_dir)
+            z = float(b["z_table_cm"]) / 100.0 - d
         yaw = float(b.get("yaw_deg") or 0.0)
         fix = b.get("fix_deg") or {}
         if not isinstance(fix, dict) or len(fix) > 7:
@@ -1204,7 +1243,7 @@ def solve(ik_dir, body, ranges_deg, current_deg):
         if not isinstance(seed, dict):
             return {"ok": False, "fast": True, "reason": "seed_deg 없음"}
         try:
-            return SOLVER.call(ik_dir, {"op": "fast", "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "fix_deg": fix,
+            return SOLVER.call(ik_dir, {"op": "fast", "d": d, "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "fix_deg": fix,
                                         "ranges_deg": ranges_deg, "seed_deg": {str(k): float(v) for k, v in seed.items()},
                                         "flip": bool(b.get("flip")), "hand_turn": float(b.get("hand_turn") or 0.0),
                                         "tilt_max_deg": tilt_max, "ref": b.get("ref")}, timeout=10.0)
@@ -1216,7 +1255,7 @@ def solve(ik_dir, body, ranges_deg, current_deg):
     except (TypeError, ValueError):
         near = {}
     try:
-        return SOLVER.call(ik_dir, {"op": "solve", "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "tilt_max_deg": tilt_max,
+        return SOLVER.call(ik_dir, {"op": "solve", "d": d, "x": x, "y": y, "z": z, "yaw_deg": yaw, "mode": mode, "tilt_max_deg": tilt_max,
                                     "ranges_deg": ranges_deg, "current_deg": current_deg, "fix_deg": fix, "near_deg": near,
                                     "ref": b.get("ref")})
     except Exception as e:
@@ -1238,7 +1277,11 @@ def pair(ik_dir, body, ranges_deg):
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "reason": "cube [x, y, yaw], target [x, y] (m, °)"}
     try:
-        return SOLVER.call(ik_dir, {"op": "pair", "cube": cube, "target": target, "fix_deg": fix, "tilt_max_deg": tm,
+        d = table_d(ik_dir, b.get("d"))
+    except ValueError as e:
+        return {"ok": False, "reason": str(e)}
+    try:
+        return SOLVER.call(ik_dir, {"op": "pair", "d": d, "cube": cube, "target": target, "fix_deg": fix, "tilt_max_deg": tm,
                                     "ranges_deg": ranges_deg}, timeout=30.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
@@ -1247,33 +1290,33 @@ def pair(ik_dir, body, ranges_deg):
 MAP_BOX = (-0.28, 0.38, -0.45, 0.20)   # 지도 격자 x0, x1, y0, y1 (실좌표 m). y 위쪽은 예전 0.075 에서 초록이 잘려 늘림 (2026-11-21)
 
 
-def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=MAP_BOX, step=0.01):
-    """책상 위 집을 수 있는 곳 지도 (해석 IK, 서버가 메모리에 캐시)."""
+def graspmap(ik_dir, ranges_deg, shoulder_yaw=0.0, box=MAP_BOX, step=0.01, d=None):
+    """책상 위 집을 수 있는 곳 지도 (해석 IK, 서버가 메모리에 캐시). d = 책상 높이 (어깨 축 아래 m, None = 기본)."""
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
     try:
-        return MAP_SOLVER.call(ik_dir, {"op": "graspmap", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
+        return MAP_SOLVER.call(ik_dir, {"op": "graspmap", "d": d, "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step,
                                     "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=MAP_TIMEOUT_S + 60.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
 
 
-def reachxyz(ik_dir, ranges_deg, z_table_m, ref="grip", shoulder_yaw=0.0, box=MAP_BOX, step=0.02):
+def reachxyz(ik_dir, ranges_deg, z_table_m, ref="grip", shoulder_yaw=0.0, box=MAP_BOX, step=0.02, d=None):
     """높이 z 에서 위치 역기구학이 풀리는 곳 (집기 조건 없음). 손 IK 와 따로 지도 worker 로."""
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
     try:
-        return MAP_SOLVER.call(ik_dir, {"op": "reachxyz", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step, "ref": ref,
+        return MAP_SOLVER.call(ik_dir, {"op": "reachxyz", "d": d, "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "step": step, "ref": ref,
                                     "z_table_m": z_table_m, "x0": box[0], "x1": box[1], "y0": box[2], "y1": box[3]}, timeout=300.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
 
 
-def graspcheck(ik_dir, ranges_deg, x, y, shoulder_yaw=0.0):
+def graspcheck(ik_dir, ranges_deg, x, y, shoulder_yaw=0.0, d=None):
     if ik_dir is None:
         return {"ok": False, "reason": "team-jax/IK 를 못 찾음"}
     try:
-        return SOLVER.call(ik_dir, {"op": "graspcheck", "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "x": x, "y": y}, timeout=20.0)
+        return SOLVER.call(ik_dir, {"op": "graspcheck", "d": d, "ranges_deg": ranges_deg, "shoulder_yaw": shoulder_yaw, "x": x, "y": y}, timeout=20.0)
     except Exception as e:
         return {"ok": False, "reason": str(e)}
 

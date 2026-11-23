@@ -268,7 +268,7 @@ SERVICES = [
                     Param("target_x", "target x", "0.05", "m"),
                     Param("target_y", "target y", "-0.27", "m"),
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
-                    Param("d", "d (선택)", "", "어깨 축~책상 m, 비우면 IK 기본"),
+                    Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.53"),
                     Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),
                     Param("team_sim", "팀 시뮬 계획 (물리)", "", "1 이면 팀 계획 (pick_place, MuJoCo 물리), 비우면 대시보드 해석 IK 계획")]),
     Service("vcan_test", "vcan 시험 (launch_vcan.sh)", _vcan, kind="once", group="시험",

@@ -537,7 +537,16 @@ async def api_ik_pair(req: Request):
 
 
 _GRASP_LOCK = threading.Lock()
-_GRASP_CACHE = {}   # (관절 범위, shoulder_yaw) -> 집을 수 있는 곳 지도 (메모리만, 저장 안 함)
+_GRASP_CACHE = {}   # (관절 범위, shoulder_yaw, 책상 높이 d) -> 집을 수 있는 곳 지도 (메모리만, 저장 안 함). 높이 몇 개를 오가도 다시 안 풀게 3 개까지
+
+
+def _table_d(v):
+    """화면의 책상 높이 칸(어깨 축 아래 m, 빈 값 = 기본) → float. 범위 밖·숫자 아님은 ValueError (hand_ik.table_d 의 말 그대로)."""
+    import hand_ik
+    ik = _ik_dir()
+    if ik is None:
+        return None
+    return hand_ik.table_d(ik, v)
 
 
 def _grasp_warm():
@@ -562,18 +571,24 @@ def _sy(v):
 
 
 @app.get("/api/ik/graspmap")
-def api_ik_graspmap(shoulder_yaw: float = 0.0):
+def api_ik_graspmap(shoulder_yaw: float = 0.0, d: str = ""):
     """책상 위 1 cm 격자마다 큐브를 집을 수 있나 (해석 IK, 정의는 hand_ik._Solver.grasp_eval). 처음 한 번 몇 초, 이후 캐시."""
     import hand_ik
     ranges, sy = _cal_ranges(), _sy(shoulder_yaw)
-    key = (json.dumps(ranges, sort_keys=True), round(sy, 3))
+    try:
+        td = _table_d(d)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
+    key = (json.dumps(ranges, sort_keys=True), round(sy, 3), None if td is None else round(td, 4))
     with _GRASP_LOCK:   # 미리 계산 중이면 기다렸다가 그 결과를 쓴다 (두 번 계산 안 함)
         r = _GRASP_CACHE.get(key)
         cached = r is not None
         if not cached:
-            r = hand_ik.graspmap(_ik_dir(), ranges, sy)
+            r = hand_ik.graspmap(_ik_dir(), ranges, sy, d=td)
             if r.get("ok"):
-                _GRASP_CACHE.clear(); _GRASP_CACHE[key] = r
+                for k in [k for k in _GRASP_CACHE if k[:2] != key[:2]] or (list(_GRASP_CACHE)[:1] if len(_GRASP_CACHE) >= 3 else []):
+                    _GRASP_CACHE.pop(k, None)   # 관절 범위·어깨 옆이 다른 지도는 버리고, 같은 조건의 다른 책상 높이는 3 개까지
+                _GRASP_CACHE[key] = r
     return JSONResponse({**r, "cached": cached})
 
 
@@ -581,17 +596,21 @@ _REACH_CACHE = {}
 
 
 @app.get("/api/ik/reachxyz")
-def api_ik_reachxyz(z_cm: float = 3.5, ref: str = "grip", shoulder_yaw: float = 0.0, step_cm: float = 2.0):
+def api_ik_reachxyz(z_cm: float = 3.5, ref: str = "grip", shoulder_yaw: float = 0.0, step_cm: float = 2.0, d: str = ""):
     """'갈 수 있는 곳' (2026-11-21): 높이 z_cm(기준점의 책상 위 cm)에서 격자마다 위치 역기구학이 풀리나 (집기 조건 없음). 높이마다 캐시."""
     import hand_ik
     if not (math.isfinite(z_cm) and -10 <= z_cm <= 80) or not (0.5 <= step_cm <= 5):
         return JSONResponse({"ok": False, "reason": "z_cm −10~80, step_cm 0.5~5"}, status_code=400)
     ranges, sy = _cal_ranges(), _sy(shoulder_yaw)
     ref = "wrist" if ref == "wrist" else "grip"
-    key = (json.dumps(ranges, sort_keys=True), round(sy, 3), ref, round(z_cm, 1), round(step_cm, 2))
+    try:
+        td = _table_d(d)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
+    key = (json.dumps(ranges, sort_keys=True), round(sy, 3), ref, round(z_cm, 1), round(step_cm, 2), None if td is None else round(td, 4))
     r = _REACH_CACHE.get(key)
     if r is None:
-        r = hand_ik.reachxyz(_ik_dir(), ranges, round(z_cm, 1) / 100.0, ref, sy, step=step_cm / 100.0)
+        r = hand_ik.reachxyz(_ik_dir(), ranges, round(z_cm, 1) / 100.0, ref, sy, step=step_cm / 100.0, d=td)
         if r.get("ok"):
             if len(_REACH_CACHE) > 60:
                 _REACH_CACHE.clear()
@@ -611,7 +630,11 @@ async def api_ik_graspable(req: Request):
             raise ValueError
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "reason": "x, y 숫자 (m, |x|,|y| ≤ 2)"}, status_code=400)
-    return JSONResponse(await asyncio.to_thread(hand_ik.graspcheck, _ik_dir(), _cal_ranges(), x, y, _sy(b.get("shoulder_yaw"))))
+    try:
+        td = _table_d(b.get("d"))
+    except ValueError as e:
+        return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(hand_ik.graspcheck, _ik_dir(), _cal_ranges(), x, y, _sy(b.get("shoulder_yaw")), td))
 
 
 @app.post("/api/ik/fk")
@@ -662,9 +685,13 @@ def _go_home(b):
     if not math.isfinite(speed):
         speed = 30.0
     speed = min(max(speed, 1.0), 90.0)    # 0·음수면 프레임이 경유점만 남아 검사가 빈다, 아주 작으면 프레임 수가 폭발
+    try:   # 책상 높이: 화면 칸 값(body d), 없으면 마지막 계획에 쓴 칸 값, 그것도 비었으면 기본
+        td = _table_d(b["d"] if isinstance(b, dict) and "d" in b else _trajectory()["params"].get("d"))
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     try:
         import pick_plan
-        traj = pick_plan.plan_home(now, ik=os.environ.get("JAX_IK_DIR") or None, max_speed=speed)
+        traj = pick_plan.plan_home(now, ik=os.environ.get("JAX_IK_DIR") or None, max_speed=speed, d=td)
     except Exception as e:
         return {"ok": False, "error": f"HOME 길 계획 실패: {type(e).__name__}: {e}"}
     if traj["status"] == "already":
