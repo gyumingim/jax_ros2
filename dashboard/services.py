@@ -262,11 +262,11 @@ SERVICES = [
                  "sim 에서 배달을 계획(planner.py, team-jax/IK motion1). 둘 다 검사(play.check_trajectory)만 한다. "
                  "--dry-run 고정: 모터에 아무것도 안 보낸다. 종료코드 0 통과, 1 거절, 3 팔이 못 닿음. "
                  "계획한 궤적은 --save 로 logs/pick_dry_traj.json 에 써서 오른쪽 3D 뷰에서 재생한다.",
-            params=[Param("cube_x", "cube x", "0.10", "m, +x = 로봇 왼쪽"),
-                    Param("cube_y", "cube y", "-0.30", "m, 앞 = -y"),
+            params=[Param("cube_x", "cube x", "-0.05", "m, +x = 로봇 왼쪽"),
+                    Param("cube_y", "cube y", "-0.33", "m, 앞 = -y"),
                     Param("cube_yaw", "cube yaw", "20", "°, 위에서 반시계"),
-                    Param("target_x", "target x", "0.05", "m"),
-                    Param("target_y", "target y", "-0.27", "m"),
+                    Param("target_x", "target x", "0.0", "m"),
+                    Param("target_y", "target y", "-0.33", "m"),
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
                     Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.53"),
                     Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),
