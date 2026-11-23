@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore", message=".*reachmap.*")   # team env 가 impor
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path[:0] = [str(HERE), str(REPO / "arm_control"), str(REPO / "stm_bridge")]   # pick_place 로컬 실행과 같게
-from hand_ik import GRIP_ABOVE_CENTER   # noqa: E402  집는 점 = 큐브 중심 + 이것 (지도·계획·IK 탭 한 값)
+from hand_ik import GRIP_ABOVE_CENTER, D_RANGE, d_range_text   # noqa: E402  집는 점 = 큐브 중심 + 이것 (지도·계획·IK 탭 한 값), 책상 높이 범위
 
 ABOVE_CM = (9.0, 7.0, 5.0, 3.0)   # 큐브·놓을 자리 위 경유점: 집는 점을 이만큼 (3.25 cm 미만이면 벌린 손가락 끝이 큐브 윗면보다 낮다:
                                   # 그때는 손가락이 큐브 양옆으로 곧게 내려가야 한다 — 손가락↔큐브 검사가 본다)
@@ -150,12 +150,16 @@ def _find_ik(path):
 
 
 class Planner:
-    def __init__(self, ik_dir, ranges, solver=None, setup=None):
-        """solver/setup: 지도(hand_ik worker)가 자기 _Solver 와 grasp_setup 결과로 이 계획기의 집기 조건(point_check)을 쓴다."""
+    def __init__(self, ik_dir, ranges, solver=None, setup=None, d=None):
+        """solver/setup: 지도(hand_ik worker)가 자기 _Solver 와 grasp_setup 결과로 이 계획기의 집기 조건(point_check)을 쓴다.
+        d: 책상 높이 (어깨 축 아래 m, None = 기본 MAP_D; hand_ik.D_RANGE 밖이면 ValueError). solver 를 받으면 그 solver 의 지금 높이.
+        책상 기준 높이(z_clear, HOME 나가기 경유점)를 여기서 정하므로 계획기 하나 = 책상 높이 하나 (self.table_d)."""
         if solver is None:
             import hand_ik
             solver = hand_ik._Solver(str(ik_dir))
+            solver.set_table_d(d)
         self.s = s = solver
+        self.table_d = float(s.table_d)
         self.np = np = s.np
         self.S = setup if setup is not None else s.grasp_setup(ranges, 0.0)   # 지도와 같은 한계 (shoulder_yaw 0 고정)
         self.lim = self.S["lim"]
@@ -765,13 +769,17 @@ class Planner:
 def plan(a):
     t0 = time.time()
     cal_file = a.calibration or (REPO / "arm_control" / "calibration.json")
-    P = Planner(_find_ik(a.ik), _cmd_ranges(cal_file))
+    ik_dir = _find_ik(a.ik)
+    if a.d is not None and not (math.isfinite(a.d) and D_RANGE[0] - 1e-9 <= a.d <= D_RANGE[1] + 1e-9):   # 모델을 읽기 전에 거절
+        import hand_ik
+        return {"planner": "analytic", "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": float(a.d)},
+                "status": "unreachable", "reason": d_range_text(a.d, hand_ik._map_d(ik_dir))}
+    P = Planner(ik_dir, _cmd_ranges(cal_file), d=a.d)
     s, np = P.s, P.np
     R = s.R
+    D = P.table_d   # 책상 높이 (어깨 축 아래 m): 기본 MAP_D, --d 로 바꿈
     out = {"planner": "analytic",
-           "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": float(R.MAP_D if a.d is None else a.d)}}
-    if a.d is not None and abs(a.d - R.MAP_D) > R.D_TOLERANCE:
-        return {**out, "status": "unreachable", "reason": f"책상 높이 d = {a.d} m 는 계획 못 함 (IK 모델은 {R.MAP_D} m)"}
+           "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": D}}
     cx, cy, cyaw = a.cube
     tx, ty = a.target
     tyaw = cyaw if a.target_yaw is None else a.target_yaw
@@ -782,11 +790,11 @@ def plan(a):
         code, _, _ = s.grasp_eval(P.S, x, y, verify=True, check=False)   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로)
         if code == 0:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {REASON[code]}"}
-        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - R.MAP_D])),
+        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - D])),
                                    yaws=[(cyaw if what == "큐브" else tyaw) + R.SIM_FROM_REAL_YAW])
         if not ok:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {why}"}
-    zc = float(s.E.OBJECT_HALF_SIZE) - R.MAP_D   # 큐브 중심 높이 (실좌표, 어깨 축 기준). 놓을 때도 큐브 바닥 = 책상
+    zc = float(s.E.OBJECT_HALF_SIZE) - D   # 큐브 중심 높이 (실좌표, 어깨 축 기준). 놓을 때도 큐브 바닥 = 책상
     pc = np.asarray(s.to_sim([cx, cy, zc]))      # 큐브 중심 (sim) — 손가락↔큐브 검사·들고 가는 큐브
     pt = np.asarray(s.to_sim([tx, ty, zc]))
     gc, gt = P.grip_target(pc), P.grip_target(pt)   # 집는 점 목표 = 큐브 중심 + GRIP_ABOVE_CENTER (집기·놓기)
@@ -1029,21 +1037,23 @@ _HOME_PLANNER = {}
 _HOME_LOCK = threading.Lock()   # 캐시한 Planner 하나가 MuJoCo MjData 를 같이 쓴다 → 동시에 두 계획이면 서로의 검사(qpos)를 덮어씀
 
 
-def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
-    """_plan_home 을 한 번에 하나씩 (폰·PC 가 거의 같이 HOME 을 눌러도 검사가 섞이지 않게)."""
+def plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
+    """_plan_home 을 한 번에 하나씩 (폰·PC 가 거의 같이 HOME 을 눌러도 검사가 섞이지 않게). d = 책상 높이 (None = 기본)."""
     with _HOME_LOCK:
-        return _plan_home(now_deg, ik, cal_file, max_speed)
+        return _plan_home(now_deg, ik, cal_file, max_speed, d)
 
 
-def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0):
+def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
     """지금 자세 → HOME(모든 관절 0) 궤적 (2026-11-21 '원점 자세로 가기' 버튼). now_deg = {관절: sim °}.
     계획(pick_plan)이 HOME 으로 돌아오는 길과 같게: (shoulder_yaw 만 0) → 손목 길(transit)로 HOME 나가기 경유점의 책상 위 자리
     → 나가기 경유점을 거꾸로 → HOME. 손가락은 첫 구간 동안 벌림. 곧장 관절 직선으로 HOME 에 가면 앞팔이 책상 모서리를 파고들어서
     (_home_exit 설명) 쓰지 않는다 — 길을 못 찾으면 거절. 결과는 pick_plan 궤적과 같은 모양 (재생·검사 코드를 그대로 씀)."""
     cal_file = cal_file or (REPO / "arm_control" / "calibration.json")
-    key = (str(ik), str(cal_file))
+    key = (str(ik), str(cal_file), None if d is None else round(float(d), 4))   # 계획기 하나 = 책상 높이 하나
     if key not in _HOME_PLANNER:
-        _HOME_PLANNER[key] = Planner(_find_ik(ik), _cmd_ranges(cal_file))
+        if len(_HOME_PLANNER) >= 3:   # 계획기마다 MuJoCo 모델 하나 — 높이를 여러 번 바꿔도 쌓이지 않게
+            _HOME_PLANNER.clear()
+        _HOME_PLANNER[key] = Planner(_find_ik(ik), _cmd_ranges(cal_file), d=d)
     P = _HOME_PLANNER[key]
     s, np = P.s, P.np
     names = list(s.arm) + list(s.fingers)
@@ -1142,7 +1152,8 @@ def main(argv=None):
     ap.add_argument("--cube", type=float, nargs=3, required=True, metavar=("X", "Y", "YAW"))
     ap.add_argument("--target", type=float, nargs=2, required=True, metavar=("X", "Y"))
     ap.add_argument("--target-yaw", type=float, default=None, help="놓을 때 큐브 yaw (°, 실좌표). 비우면 집을 때와 같게")
-    ap.add_argument("--d", type=float, default=None)
+    ap.add_argument("--d", type=float, default=None,
+                    help=f"책상 높이 = 어깨 축에서 책상 면까지 아래로 (m). 비우면 IK 기본 0.4775, {D_RANGE[0]:g} ~ {D_RANGE[1]:g} 만")
     ap.add_argument("--ik", default=None)
     ap.add_argument("--save", default=None)
     add_run_args(ap)

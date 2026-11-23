@@ -29,6 +29,7 @@ python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 
 | `JAX_DASH_PYTHONPATH` | | 로컬 pick_place(가상 모드·Windows)에서 sys.path 뒤에 붙일 경로(mujoco·gymnasium·scipy 가 따로 있을 때) |
 | `JAX_DASH_SIGINT_WAIT`, `JAX_DASH_SIGTERM_WAIT` | 5, 3 초 | 끄기 단계 사이 대기 |
 | `JAX_DASH_DEMO=1` | | Linux 에서도 가짜 시험 항목을 보인다 |
+| `JAX_DASH_MAP_PARTS` | CPU 수 ÷ 2 (최대 8) | '집을 수 있는 곳' 지도를 나눠 푸는 프로세스 수 (PC 가 바쁘면 2~3) |
 
 ## 화면: 탭 3개
 
@@ -82,6 +83,7 @@ python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 
   (env 장면 책상의 옆·먼 끝 — 실좌표 x −0.228~+0.332, y −0.42 — 은 도달 맵으로 정한 크기라 실물이 아니어서 안 쓴다, 보수적).
   손가락 충돌 상자가 발자국 + 1 cm(`hand_ik.TABLE_XY_MARGIN`) 에 걸치면 그 상자의 가장 낮은 점이 책상 면 + `TABLE_MARGIN` 위여야 하고(`lowest_finger_z`), 팔 기준점(팔꿈치·손목, 반지름 3 cm 가정 `ARM_RADIUS`)도 발자국 위에선 책상 면 위(`arm_low_z`, 계획 검사).
   **책상 앞 끝 자리(어깨 축 앞 14 cm)는 장면 값 = 가정, MAP_D 처럼 실물 셋업에서 재야 한다.** 책상 옆(발자국 밖)의 기둥·받침은 아직 검사하지 않는다.
+- **책상 높이** (2026-11-23): ① 카드의 '책상 높이 — 어깨 축 아래 m' 칸 (pick_dry 의 `d`, 비우면 기본 `realcoords.MAP_D` 0.4775). `hand_ik.D_RANGE` **0.44 ~ 0.53 m** 만 받고 밖은 거절한다. IK 모델은 어깨가 고정이라 d 가 다르면 책상 면을 옮긴다 (`_Solver.set_table_d`: `table_z = TABLE_SURFACE_Z + (MAP_D − d)`): 큐브 중심·집는 점·옮겨 가는 높이(`z_clear`)·HOME 나가기 경유점·들고 가는 큐브 검사·손 위치의 '책상 위 cm' 가 모두 따라간다. 쓰는 곳: 계획(`pick_plan.py --d`), 집을 수 있는 곳 지도(`/api/ik/graspmap?d=`, 캐시 키에 d — 높이 3 개까지 기억), 한 점 판정·IK 판정·갈 수 있는 곳·손 위치(`d`), HOME 으로 가기(`/api/arm/go_home {d}`, 계획기 캐시 키에 d). 요청에 d 가 없으면 기본. 지도 초록 칸(1 cm): 0.44 = 20, 0.45 = 45, 0.4775 = 124, 0.50 = 223, 0.53 = 360 — 책상이 높을수록 좁다 (0.43 은 0 칸). 회귀: `tools/plan_check.py --make-map gm.json --d 0.45 [--parts 3]` → `plan_check.py gm.json 10 1` (지도 파일의 d 로 계획). 팀 시뮬 계획(pick_place)·옛 도달 맵은 예전처럼 MAP_D ± 5 mm 만.
   큐브·놓을 자리는 발자국 안쪽 반 변 + 1 cm(`pick_plan.CUBE_EDGE_IN`, env CUBE_X_MAX 와 같은 규칙) 안이어야 한다 = 실좌표 y ≤ −0.175 (지도·계획 모두, 예전 지도는 책상 앞 끝 너머 칸도 초록).
   `_tip_step`(곧게 내려가기 한 걸음)은 8 번 안에 집는 점이 5 mm 안으로 안 오면 버린다 (예전엔 오차를 안 봐서 '큐브 위 9 cm' 가 19 cm 옆인 길도 받았다).
   HOME 에서 나가기 (`pick_plan.Planner._home_exit`): 곧게 늘어진 팔(팔꿈치 0 특이점)은 손목을 곧게 올리면 shoulder_roll 한계로 20 cm 쯤만 오르고(손가락은 아직 책상 면 아래), 계획 가지(upper_arm_roll ≈ 180°, elbow < 0)의 책상 위 손목 자리로 관절 직선으로 가면 손가락이 책상 모서리를 파고든다(−80 mm) → 경유점 1 개를 거친다.

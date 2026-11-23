@@ -467,7 +467,7 @@ function buildPick(s) {
   const P0 = Object.fromEntries(s.params.map((p) => [p.key, p]));
   const fld = (k, lab, unit, w) => {
     const p = P0[k] || { value: "", hint: "", label: k };
-    const inp = el("input", { value: p.value, placeholder: k === "d" || k === "ik" ? "비우면 기본" : "", inputmode: k === "ik" ? null : "decimal" });
+    const inp = el("input", { value: p.value, placeholder: k === "d" ? "0.4775" : k === "ik" ? "비우면 기본" : "", inputmode: k === "ik" ? null : "decimal" });
     c.fields[k] = inp;
     return el("label", { class: "field", title: `${p.label}${p.hint ? " (" + p.hint + ")" : ""}`, style: w ? `width:${w}` : null },
       el("span", {}, lab, unit ? el("small", {}, " " + unit) : null), inp);
@@ -500,8 +500,13 @@ function buildPick(s) {
         el("div", { class: "frow" }, el("b", {}, "놓을 자리"), fld("target_x", "x", "m"), fld("target_y", "y", "m")),
         el("div", { class: "help", style: "margin:8px 0 0" }, "로봇 좌표: 원점 = 어깨, +x = 로봇 왼쪽, 앞 = −y, yaw = 위에서 반시계")),
       el("div", { id: "objpose" }),
+      // 책상 높이 (2026-11-23): 어깨 축에서 책상 면까지 아래로 몇 m. 비우면 기본 0.4775. 지도·계획·HOME·손 위치('책상 위 cm')가 이 높이를 쓴다
+      el("div", { class: "frow", title: "어깨 축(shoulder_roll)에서 책상 윗면까지 아래로 잰 거리. 비우면 기본 0.4775 m. 0.44 ~ 0.53 m 만 (책상이 높을수록 = 값이 작을수록 집을 수 있는 곳이 좁다). " +
+        "바꾸면 집을 수 있는 곳 지도를 다시 계산하고(약 1분), 계획·HOME 으로 가기·손 위치의 '책상 위 cm' 가 이 높이를 쓴다" },
+        el("b", {}, "책상 높이"), fld("d", "어깨 축 아래", "m"),
+        el("span", { class: "help", style: "padding-bottom:10px" }, "비우면 0.4775 · 0.44~0.53")),
       el("details", { class: "log" }, el("summary", {}, "고급"),
-        el("div", { class: "frow" }, fld("max_speed", "max_speed", "°/s"), fld("d", "d 어깨~책상", "m")),
+        el("div", { class: "frow" }, fld("max_speed", "max_speed", "°/s")),
         fld("ik", "IK 경로 (team-jax/IK)", ""),
         el("p", { class: "help", style: "margin-top:8px" }, `[${s.group}] ${s.help}`), c.cmd)),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "계획 돌려 보기"),
@@ -511,6 +516,8 @@ function buildPick(s) {
       el("div", { class: "help", style: "margin:8px 0 0" }, "계획·검사만 한다 — 모터는 안 움직인다. 기본 계획은 지도와 같은 IK (물리·쥐기 시뮬 없음)."),
       c.result, c.status, c.note, c.logbox));
   for (const k of ["cube_x", "cube_y", "cube_yaw", "target_x", "target_y", "d"]) c.fields[k].addEventListener("input", () => mapUpdate());
+  // 책상 높이를 바꾸면 지도·비전 큐브 판정·손 위치를 그 높이로 다시 (치는 중엔 기다렸다가)
+  c.fields.d.addEventListener("input", () => { clearTimeout(c.tD); c.tD = setTimeout(() => { G.visKey = null; graspLoad(); if (RX.on) reachLoad(); }, 700); });
   setTimeout(() => mapUpdate(), 0);
   c.updateExtra = (sv) => {
     c.bStop.hidden = !sv.alive;
@@ -587,6 +594,10 @@ function sv(tag, attrs = {}, ...kids) {
 const foldYaw = (d) => ((((d + 45) % 90) + 90) % 90) - 45;
 const cm = (m) => { const v = Math.round(m * 1000) / 10; return (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(1); };
 const degS = (d) => `${d > 0 ? "+" : d < 0 ? "−" : ""}${Math.abs(Math.round(d))}°`;
+// 책상 높이 칸 (어깨 축 아래 m): tableD() = 서버에 보낼 글자 그대로 (빈 값 = 기본, 범위 검사는 서버 hand_ik.table_d),
+// tableDNum() = 화면 계산용 숫자 (비었거나 숫자가 아니면 기본 0.4775)
+function tableD() { const f = M.c && M.c.fields.d; return f ? f.value.trim() : ""; }
+function tableDNum() { const v = parseFloat(tableD()); return Number.isFinite(v) ? v : 0.4775; }
 function mapVals() {
   const c = M.c; if (!c) return {};
   const n = (k) => { const v = parseFloat(c.fields[k] && c.fields[k].value); return Number.isFinite(v) ? v : null; };
@@ -792,11 +803,11 @@ async function graspLoad() {
   const my = ++G.seq, sy = graspSy();
   if (G.note) G.note.textContent = "집을 수 있는 곳 계산 중… (처음 한 번 약 1분)";
   try {
-    const d = await (await fetch(`/api/ik/graspmap?shoulder_yaw=${encodeURIComponent(sy)}`)).json();
+    const d = await (await fetch(`/api/ik/graspmap?shoulder_yaw=${encodeURIComponent(sy)}&d=${encodeURIComponent(tableD())}`)).json();
     if (my !== G.seq) return;
     if (!d.ok) { G.data = null; if (G.note) G.note.textContent = "⚠ 집을 수 있는 곳 계산 실패: " + (d.reason || "?"); graspPaint(); return; }
     G.data = d;
-    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손끝(집는 점)을 큐브 중심 +1 cm(책상 위 ${d.grip_above_table_m != null ? +(d.grip_above_table_m * 100).toFixed(1) : 3.5} cm)에 · 어깨 옆 ${d.shoulder_yaw}°`;
+    if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · 손끝(집는 점)을 큐브 중심 +1 cm(책상 위 ${d.grip_above_table_m != null ? +(d.grip_above_table_m * 100).toFixed(1) : 3.5} cm)에 · 어깨 옆 ${d.shoulder_yaw}°` + (d.d != null && Math.abs(d.d - 0.4775) > 1e-6 ? ` · 책상 높이 ${d.d} m` : "");
     graspPaint();
   } catch (e) { if (my === G.seq && G.note) G.note.textContent = "⚠ 집을 수 있는 곳을 못 받음 (서버)"; }
 }
@@ -832,12 +843,12 @@ function graspHover(p) {
 }
 async function graspVision(o) {   // 비전 큐브 자리 그대로 판정 (격자 칸 아님). 1 mm·어깨 옆 값이 바뀌면 다시.
   if (!o) { G.vis = null; G.visKey = null; return; }
-  const key = `${o.x.toFixed(3)},${o.y.toFixed(3)},${graspSy()}`;
+  const key = `${o.x.toFixed(3)},${o.y.toFixed(3)},${graspSy()},${tableD()}`;
   if (key === G.visKey || G.visBusy) return;
   G.visBusy = true;
   try {
     const r = await (await fetch("/api/ik/graspable", { method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ x: o.x, y: o.y, shoulder_yaw: graspSy() }) })).json();
+      body: JSON.stringify({ x: o.x, y: o.y, shoulder_yaw: graspSy(), d: tableD() }) })).json();
     G.visKey = key; G.vis = r.ok ? r : null;
   } catch (e) { G.vis = null; }
   G.visBusy = false;
@@ -915,7 +926,7 @@ async function mapCheckIk(v) {
   try {
     r = await (await fetch("/api/ik/pair", { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ cube: [v.cube.x, v.cube.y, v.cube.yaw], target: [v.target.x, v.target.y],
-        fix_deg: hv ? hv.fix_deg : {}, tilt_max_deg: hv ? hv.tilt_max_deg : 60 }) })).json();
+        fix_deg: hv ? hv.fix_deg : {}, tilt_max_deg: hv ? hv.tilt_max_deg : 60, d: tableD() }) })).json();
   } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
   if (my !== M.chkSeq) return;
   const ms = Math.round(performance.now() - t0);
@@ -993,7 +1004,7 @@ function hkVals() {
   const n = (e) => { const v = parseFloat(e.value); return Number.isFinite(v) ? v : null; };
   const x = n(HK.f.x.num), y = n(HK.f.y.num), zc = n(HK.f.z.num), yaw = n(HK.f.yaw.num), fv = n(HK.f.fixv), tm = n(HK.f.tmax);
   if (x == null || y == null || zc == null) return null;
-  return { x, y, z_table_cm: zc, z: zc / 100 - HK.mapD, yaw_deg: yaw ?? 0, mode: HK.f.mode.value, tilt_max_deg: tm ?? 60, ref: HK.f.ref.value,
+  return { x, y, z_table_cm: zc, z: zc / 100 - tableDNum(), d: tableD(), yaw_deg: yaw ?? 0, mode: HK.f.mode.value, tilt_max_deg: tm ?? 60, ref: HK.f.ref.value,
     fix_deg: HK.f.fix.checked ? { shoulder_yaw: fv ?? 0 } : {} };
 }
 function hkSetXY(x, y, live) {
@@ -1231,7 +1242,7 @@ function hkRender() {
   if (HK.check) {
     const c = HK.check;
     const w = c.wref && c.wrist_real, pt = w ? c.wrist_real : c.grip_real;
-    HK.chk.textContent = c.ok ? `지금 ${w ? "손목 중앙" : "손이 쥐는 점"} (FK): x ${cm(pt[0])} · y ${cm(pt[1])} cm · 책상 위 ${((pt[2] + HK.mapD) * 100).toFixed(1)} cm` +
+    HK.chk.textContent = c.ok ? `지금 ${w ? "손목 중앙" : "손이 쥐는 점"} (FK): x ${cm(pt[0])} · y ${cm(pt[1])} cm · 책상 위 ${((pt[2] + tableDNum()) * 100).toFixed(1)} cm` +
       (c.diff_mm != null ? ` → 목표와 ${c.diff_mm.toFixed(1)} mm 차이` : "") + ` · 손 축 기울기 ${c.axis_tilt_deg}°` : "FK 못 함: " + (c.reason || "?");
   } else HK.chk.textContent = "";
 }
@@ -1834,10 +1845,10 @@ async function goHome() {
   if (!confirm((real ? "⚠ 실물 팔이 움직인다.\n\n" : "(가상) ") + "지금 자세에서 HOME(모든 관절 0)으로 갈까요?\n\n" +
     "책상 위로 손을 들고 → 어깨를 젖히며 팔꿈치를 펴고 → 팔을 돌려 내린다. 멈춤 = ■ STOP / Esc" + (real ? "\n\n팔 주변을 비웠나요?" : ""))) return;
   T.view = "actual";
-  let r = await post("/api/arm/go_home", { force: false }, true);
+  let r = await post("/api/arm/go_home", { force: false, d: tableD() }, true);
   if (!r.ok && r.need_force) {
     if (!confirm("검사에서 문제가 나왔다:\n\n- " + r.problems.join("\n- ") + "\n\n그래도 HOME 으로 갈까요?")) return;
-    r = await post("/api/arm/go_home", { force: true }, true);
+    r = await post("/api/arm/go_home", { force: true, d: tableD() }, true);
   }
   if (r.ok) toast(r.msg || "HOME 으로");
 }
@@ -1854,7 +1865,7 @@ async function reachLoad() {
   const my = ++RX.seq;
   RX.note.textContent = `계산 중… (높이 ${k.z_cm} cm, ${k.ref === "wrist" ? "손목 중앙" : "손끝 사이"} · 높이마다 몇 초, 한 번 한 높이는 바로)`;
   try {
-    const d = await (await fetch(`/api/ik/reachxyz?z_cm=${encodeURIComponent(k.z_cm)}&ref=${k.ref}&shoulder_yaw=${encodeURIComponent(k.shoulder_yaw)}`)).json();
+    const d = await (await fetch(`/api/ik/reachxyz?z_cm=${encodeURIComponent(k.z_cm)}&ref=${k.ref}&shoulder_yaw=${encodeURIComponent(k.shoulder_yaw)}&d=${encodeURIComponent(tableD())}`)).json();
     if (my !== RX.seq) return;
     if (!d.ok) { RX.data = null; RX.note.textContent = "⚠ 계산 실패: " + (d.reason || "?"); reachPaint(); return; }
     RX.data = d;

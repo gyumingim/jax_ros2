@@ -2,6 +2,7 @@
 
     python dashboard/tools/plan_check.py gm.json 30 1          # gm.json = GET /api/ik/graspmap 저장본, N, seed
     python dashboard/tools/plan_check.py --make-map gm.json    # 지도를 이 프로세스에서 계산해 저장 (서버 없이)
+    python dashboard/tools/plan_check.py --make-map gm_045.json --d 0.45   # 다른 책상 높이 (어깨 축 아래 m) — 계획도 그 지도의 d 로
 
 한 줄씩 JSON (큐브, yaw, 놓을 자리, 상태, 이유, 시간, 주요 검사값), 끝에 상태별 개수. 결과는 gm.json 옆 plan_check_<seed>.json.
 yaw 는 (0, 20, 45, -30, 70) 중 무작위 (큐브는 90° 마다 같아 이것으로 0~90 을 고루 본다).
@@ -21,12 +22,13 @@ sys.path.insert(0, str(HERE.parent))
 import pick_plan   # noqa: E402
 
 
-def make_map(path):
+def make_map(path, d=None, parts=None):
     import hand_ik
     s = hand_ik._Solver(str(pick_plan._find_ik(None)))
+    s.set_table_d(d)
     ranges = pick_plan._cmd_ranges(pick_plan.REPO / "arm_control" / "calibration.json")
     x0, x1, y0, y1 = hand_ik.MAP_BOX
-    r = s.graspmap({"ranges_deg": ranges, "shoulder_yaw": 0.0, "step": 0.01, "x0": x0, "x1": x1, "y0": y0, "y1": y1})
+    r = s.graspmap({"ranges_deg": ranges, "shoulder_yaw": 0.0, "step": 0.01, "d": d, "parts": parts, "x0": x0, "x1": x1, "y0": y0, "y1": y1})
     Path(path).write_text(json.dumps(r), encoding="utf-8")
     print(f"map: {r['counts']} {r['ms']} ms -> {path}")
 
@@ -41,16 +43,19 @@ def main():
     ap.add_argument("n", nargs="?", type=int, default=30)
     ap.add_argument("seed", nargs="?", type=int, default=1)
     ap.add_argument("--make-map", action="store_true")
+    ap.add_argument("--d", type=float, default=None, help="책상 높이 (어깨 축 아래 m). 비우면 지도 파일의 d, 그것도 없으면 기본 0.4775")
+    ap.add_argument("--parts", type=int, default=None, help="--make-map: 지도를 나눠 푸는 프로세스 수 (기본 hand_ik.MAP_PARTS)")
     a = ap.parse_args()
     if a.make_map:
-        return make_map(a.gm)
+        return make_map(a.gm, a.d, a.parts)
     gm = json.loads(Path(a.gm).read_text(encoding="utf-8"))
+    d = a.d if a.d is not None else (gm.get("d") if abs((gm.get("d") or 0.4775) - 0.4775) > 1e-9 else None)   # 기본 높이면 None (예전과 같은 호출)
     green = [(x, y) for y, r in zip(gm["ys"], gm["rows"]) for x, c in zip(gm["xs"], r) if c == "2"]
     random.seed(a.seed)
     out = []
     for _ in range(a.n):
         c = random.choice(green); t = random.choice(green); yaw = random.choice([0, 20, 45, -30, 70])
-        ns = argparse.Namespace(cube=[c[0], c[1], yaw], target=list(t), target_yaw=None, d=None, ik=None, calibration=None, max_speed=30.0)
+        ns = argparse.Namespace(cube=[c[0], c[1], yaw], target=list(t), target_yaw=None, d=d, ik=None, calibration=None, max_speed=30.0)
         t0 = time.time()
         try:
             r = pick_plan.plan(ns)
