@@ -176,6 +176,19 @@ export class Viewer {
     const ly = textSprite("y 뒤", "#16a34a"); ly.position.set(0, 0.16, 0); scene.add(ly);
     const lz = textSprite("z 위", "#2563eb"); lz.position.set(0, 0, 0.17); scene.add(lz);
     const lf = textSprite("앞 (-y)", "#64748b"); this.frontLabel = lf; scene.add(lf);
+    // 책상 (team-jax/IK env 장면 table_top·table_leg_a..d 를 로봇 틀로: 윗면 x −0.228..0.332, y −0.42..−0.14, 두께 5 cm,
+    // 다리 2 cm 각 4 개 길이 71 cm). 윗면 = 어깨 축 아래 d (setTableD). 계획의 책상 검사는 앞 끝(y −0.14)부터 뒤로 끝없이로 본다.
+    this.table = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0xd6b98c, metalness: 0.0, roughness: 0.85, transparent: true, opacity: 0.85 });
+    const top = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.28, 0.05), wood);
+    top.position.set(0.052, -0.28, -0.025 - 0.0006);
+    this.table.add(top);
+    for (const [x, y] of [[0.052 - 0.25, -0.17], [0.052 + 0.25, -0.17], [0.052 - 0.25, -0.39], [0.052 + 0.25, -0.39]]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.71), wood);
+      leg.position.set(x, y, -0.025 - 0.355);
+      this.table.add(leg);
+    }
+    scene.add(this.table);
     this.setTableD(this.d);
     // 큐브·놓을 자리
     this.cube = new THREE.Mesh(new THREE.BoxGeometry(CUBE, CUBE, CUBE), new THREE.MeshStandardMaterial({ color: 0xf97316 }));
@@ -195,6 +208,7 @@ export class Viewer {
     if (!Number.isFinite(d) || (d === this.d && this._dset)) return;
     this.d = d; this._dset = true;
     this.grid.position.set(0, -0.25, -d);
+    if (this.table) this.table.position.z = -d;
     if (this.grasp) this.grasp.position.z = -d + 0.001;
     this.frontLabel.position.set(0, -0.62, -d + 0.02);
     this.dirty();
