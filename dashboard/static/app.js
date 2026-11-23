@@ -316,6 +316,21 @@ function renderMotors() {
   box.append(el("div", { class: "card mtable" }, el("table", {},
     el("thead", {}, el("tr", {}, ...["모터", "상태", "위치", "온도", "힘", ""].map((h) => el("th", {}, h)))),
     el("tbody", {}, ...rows)), bus || ""));
+  // 서보: 위치 피드백이 없어 '마지막으로 보낸 값' (sim ° = 관절 각, 모터 ° = 서보에 보낸 0~180)
+  const sv = r.servos || {}, cal = ((S.calibration || {}).joints || r.calibration || []).filter((c) => c.motor === "servo");
+  if (cal.length) {
+    const srow = cal.map((c) => {
+      const s = sv[c.name], sim = s ? (s.deg - c.zero_deg) / ((c.sign || 1) * (c.scale || 1)) : null;
+      return el("tr", {},
+        el("td", {}, el("b", {}, c.joint)), el("td", { class: "muted" }, c.name),
+        el("td", { class: "num" }, s ? `${sim.toFixed(1)}°` : "—"),
+        el("td", { class: "num muted" }, s ? `${s.deg.toFixed(1)}°` : ""),
+        el("td", { class: "note" }, s ? `${s.age < 60 ? s.age.toFixed(0) + "초" : (s.age / 60).toFixed(0) + "분"} 전 보냄` : "안 보냄 (첫 명령은 바로 튐)"));
+    });
+    box.append(el("div", { class: "card mtable" }, el("h3", {}, "서보 (마지막으로 보낸 값 — 피드백 없음)"), el("table", {},
+      el("thead", {}, el("tr", {}, ...["관절", "서보", "각", "서보 각", ""].map((h) => el("th", {}, h)))),
+      el("tbody", {}, ...srow))));
+  }
 }
 
 // ---------- AK45 진단 (예전 카드, 안 씀) ----------
