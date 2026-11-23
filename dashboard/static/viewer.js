@@ -235,6 +235,13 @@ export class Viewer {
       this.status.textContent = "3D 모델을 못 읽음: " + e.message;
     }
   }
+  focus(t, dist) {   // 카메라를 점 t(로봇 틀 [x,y,z])에 맞추고 거리 dist(m)로 (서보 원점 맞추기: 손 가까이)
+    const c = this.controls, cam = this.camera;
+    const dir = cam.position.clone().sub(c.target).normalize();
+    c.target.set(t[0], t[1], t[2]);
+    cam.position.copy(c.target.clone().add(dir.multiplyScalar(dist)));
+    c.update(); this.dirty();
+  }
   setActual(q) { if (this.actual) { this.actual.setPose(q || {}); this.dirty(); } }
   setGhost(q) {
     if (!this.ghost) return;

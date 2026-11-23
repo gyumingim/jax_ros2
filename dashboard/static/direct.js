@@ -257,3 +257,109 @@ async function playReal() {
     r = await post("/api/ik/play_real", { force: true });
   } else if (r.ok && r.msg) toast(r.msg);
 }
+
+
+// ---------- 서보 원점 맞추기 (3D 로 0° 모양과 + 방향을 보고 실물을 따라 맞춤 → /api/direct/calib) ----------
+// 모양 설명은 IK 모델(arm.xml)에서 잰 것 (2026-11-23): 로봇 틀 x = 왼쪽, y = 뒤, z = 위. HOME(모든 관절 0)에서 손가락은 곧게 아래.
+const SZ_JOINTS = [
+  { j: "wrist_yaw", t: "손목 굽힘", ref: {}, plus: 30,
+    zero: "0° = 손이 아래팔과 일직선 (팔을 곧게 늘어뜨리면 손가락도 곧게 아래).", dir: "+ = 손이 앞(책상 쪽)으로 굽음." },
+  { j: "wrist_pitch", t: "손목 비틀기", ref: { wrist_yaw: 30 }, plus: 30,
+    zero: "0° = 손목을 + 로 굽혔을 때(참고 자세: 손목 굽힘 +30°) 손이 정확히 앞쪽으로 굽음. 먼저 손목 굽힘을 맞춘 뒤.",
+    dir: "+ = 위에서 볼 때 반시계로 비틂." },
+  { j: "hand_roll", t: "손 비틀기", ref: {}, plus: 30,
+    zero: "0° = 위에서 볼 때 엄지(손가락 3)가 왼쪽(3D 의 'x 왼쪽' 쪽) 약간 뒤, 두 손가락(1·2)이 오른쪽. 손목 굽힘·비틀기를 먼저 맞춘 뒤.",
+    dir: "+ = 위에서 볼 때 반시계." },
+  ...[1, 2, 3].flatMap((k) => [
+    { j: `finger${k}_joint1`, t: `손가락 ${k} 첫 마디`, ref: {}, plus: 30,
+      zero: "0° = 첫 마디가 손 축과 나란히 곧게 (HOME 에서 곧게 아래).", dir: "+ = 안쪽(가운데)으로 오므림." },
+    { j: `finger${k}_joint2`, t: `손가락 ${k} 끝 마디`, ref: {}, plus: 30,
+      zero: "0° = 끝 마디가 첫 마디와 일직선.", dir: "+ = 안쪽으로 굽힘." },
+  ]),
+];
+const SZ = {};
+const toR = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v * Math.PI / 180]));
+function buildServoZero() {
+  SZ.sel = el("select", {}, ...SZ_JOINTS.map((x, i) => el("option", { value: i }, `${x.t} (${x.j})`)));
+  SZ.sel.addEventListener("change", () => { SZ.shown = null; updateServoZero(); });
+  SZ.desc = el("div", {});
+  SZ.now = el("div", { class: "kv" });
+  SZ.v3 = el("div", { class: "v3d", style: "height:360px;min-height:0" });
+  const mv = (d) => el("button", { class: "btn line", onclick: () => szMove(d) }, (d > 0 ? "+" : "−") + Math.abs(d) + "°");
+  SZ.dirty = el("div", { class: "note" });
+  SZ.root = el("div", { class: "card wide", id: "servo-zero" },
+    el("h3", {}, "서보 원점 맞추기"),
+    el("p", { class: "help" }, "① 서보를 고른다 → ② 3D 의 진한 팔(0° 모양)과 실물이 같아질 때까지 ± 로 움직인다 → ③ '지금이 0°' → " +
+      "④ +5° 를 눌러 실물이 3D 의 파란 유령(+ 방향) 쪽으로 가는지 본다 (반대면 '방향 뒤집기') → ⑤ 확인됨 → 저장. 순서: 손목 굽힘 → 손목 비틀기 → 손 비틀기 → 손가락."),
+    el("div", { class: "row" }, el("label", { class: "field", style: "margin:0" }, "서보", SZ.sel),
+      el("button", { class: "btn line", onclick: szSendRef, title: "다른 서보를 이 서보의 참고 자세(예: 손목 비틀기면 손목 굽힘 +30°)로, 나머지는 0° 로 보낸다" }, "참고 자세 보내기")),
+    SZ.desc,
+    el("div", { class: "grid", style: "grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start" },
+      el("div", {}, SZ.v3, el("div", { class: "note" }, "진한 팔 = 맞춰야 할 0° 모양 · 파란 유령 = + 방향")),
+      el("div", {}, SZ.now,
+        el("div", { class: "row" }, mv(-10), mv(-5), mv(-1), mv(1), mv(5), mv(10)),
+        el("div", { class: "row" },
+          el("button", { class: "btn", onclick: () => szCal("zero", "지금 보낸 서보 각을 이 관절의 0° 로 삼을까요?") }, "지금이 0°"),
+          el("button", { class: "btn line", onclick: () => szCal("flip", "이 관절의 + 방향을 뒤집을까요?") }, "방향 뒤집기"),
+          el("button", { class: "btn line", onclick: () => szCal("verify", null, true) }, "확인됨")),
+        el("div", { class: "row" }, el("button", { class: "btn", onclick: () => post("/api/direct/calib", { action: "save" }) }, "calibration.json 저장")),
+        SZ.dirty)));
+  $("#motors").after(SZ.root);
+}
+async function szMove(d) {
+  const x = SZ_JOINTS[+SZ.sel.value];
+  if (!SZ.ok && !confirm("⚠ 서보가 움직인다. 한 번도 안 보낸 서보는 첫 명령에 바로 그 각으로 튄다.\n손 주변을 비웠나요?")) return;
+  SZ.ok = true;
+  const r = await post("/api/direct/calib", { action: "move", joint: x.j, value: d });
+  if (r && r.ok === false) toast(r.error || "못 움직임", "error");
+}
+async function szCal(action, ask, value) {
+  const x = SZ_JOINTS[+SZ.sel.value];
+  if (ask && !confirm(`${x.t} (${x.j}): ${ask}`)) return;
+  const r = await post("/api/direct/calib", { action, joint: x.j, value });
+  if (r && r.ok) toast(r.msg || "됨"); else toast((r && r.error) || "실패", "error");
+}
+async function szSendRef() {
+  const x = SZ_JOINTS[+SZ.sel.value];
+  const joints = {};
+  for (const y of SZ_JOINTS) if (y.j !== x.j) joints[y.j] = 0;
+  Object.assign(joints, x.ref);
+  if (!confirm("다른 서보를 보낼까요?\n" + Object.entries(joints).map(([k, v]) => `${k} ${v}°`).join(", ") +
+    "\n\n처음 보내는 서보는 바로 튄다. 손 주변을 비우세요.")) return;
+  const r = await post("/api/joint/send", { joints });
+  if (r && r.ok) toast(r.msg || "보냄"); else toast((r && r.error) || "못 보냄", "error");
+}
+function updateServoZero() {
+  const d = DIRECT();
+  if (!SZ.root) { if (!d) return; buildServoZero(); }
+  SZ.root.hidden = !d;
+  if (!d) return;
+  const x = SZ_JOINTS[+SZ.sel.value];
+  const rows = DS().calibration || (S.calibration || {}).joints || [];
+  const c = rows.find((r) => r.joint === x.j) || {};
+  const sent = ((S.ros || {}).servos || {})[c.name];
+  const sim = sent ? (sent.deg - c.zero_deg) / ((c.sign || 1) * (c.scale || 1)) : null;
+  if (SZ.shown !== x.j) {
+    SZ.desc.replaceChildren(el("p", {}, el("b", {}, x.zero), " ", x.dir));
+  }
+  SZ.now.replaceChildren(...[
+    ["서보", `${c.name || "?"} (id ${c.id ?? "?"})`],
+    ["지금 보낸 각", sent ? `${sim.toFixed(1)}° (서보 ${sent.deg.toFixed(1)}°)` : "안 보냄 — ± 를 누르면 첫 명령은 0° 자리(서보 " + (c.zero_deg ?? "?") + "°)에서 시작"],
+    ["0° 자리 (zero_deg)", `서보 ${c.zero_deg ?? "?"}°`], ["방향 (sign)", c.sign > 0 ? "+1" : "−1"],
+    ["확인됨", c.verified ? "예" : "아니오"],
+  ].flatMap(([k, v]) => [el("span", { class: "k" }, k), el("span", {}, v)]));
+  const dirty = DS().calib_dirty;
+  SZ.dirty.textContent = dirty ? "⚠ 바꾼 보정이 아직 저장 안 됨 (저장 전엔 재생·HOME 이 거절된다)" : "";
+  if (window.JaxViewer && !SZ.vw && !SZ.root.hidden && SZ.v3.clientWidth) {
+    SZ.vw = window.JaxViewer.create(SZ.v3, { ghost: true });
+    SZ.vw.load(S.robot.mesh_ok).then(() => { SZ.shown = null; updateServoZero(); });
+  }
+  if (SZ.vw && SZ.vw.ready && SZ.shown !== x.j) {
+    SZ.vw.setActual(toR(x.ref));
+    SZ.vw.setGhost(toR(Object.assign({}, x.ref, { [x.j]: (x.ref[x.j] || 0) + x.plus })));
+    if (SZ.vw.focus) SZ.vw.focus([-0.05, -0.03, -0.6], 0.45);
+    SZ.shown = x.j;
+  }
+}
+const _renderCalibSZ = renderCalib;
+renderCalib = function () { _renderCalibSZ(); try { updateServoZero(); } catch (e) { console.error(e); } };
