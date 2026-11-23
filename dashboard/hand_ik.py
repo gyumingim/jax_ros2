@@ -914,7 +914,7 @@ class _Solver:
         q[self.arm.index("wrist_pitch")], q[self.arm.index("wrist_yaw")] = self._down_q56
         return q
 
-    def grasp_eval(self, S, x, y, verify):
+    def grasp_eval(self, S, x, y, verify, check=True):
         """(x, y) 실좌표 -> (코드, 최소 기울기 °, 해 수). 코드 2 = 집을 수 있음, 1 = 손목은 닿지만 손을 수직으로 못 내림, 0 = 안 닿음."""
         import itertools
         from analytic_ik import solve3
@@ -940,6 +940,8 @@ class _Solver:
             return 0, None, 0
         # 2026-11-21: 초록 = '대시보드 계획(pick_plan)이 여기서 집을 수 있음'. 집는 점(손끝 사이)을 큐브 중심 + GRIP_ABOVE_CENTER(책상 위 3.5 cm)에
         # 두는 해 + 손가락 책상 여유 + 곧은 수직 내려가기 — 판정은 pick_plan.Planner.point_check 한 곳 (계획과 어긋나지 않게).
+        if not check:     # 팔(손목)이 닿나만 (pick_plan.plan 이 집기 판정은 실제 큐브 방향으로 따로)
+            return 2, None, len(qs)
         tipp = np.asarray(self.to_sim([x, y, float(self.E.OBJECT_HALF_SIZE) - self.R.MAP_D]))   # 큐브 중심 (집는 점은 point_check 가 + GRIP_ABOVE_CENTER)
         ok, why, tilt = self._planner(S).point_check(tipp)
         self.last_why = why

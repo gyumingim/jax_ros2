@@ -68,25 +68,27 @@ YAW_SAMPLES = tuple(range(0, 90, 15))   # 지도 판정에서 볼 큐브 yaw (si
 VERT_TILT = 90.0            # ° 지도: 잡는 자세 손이 이보다 기울면 '못 집음' — 2026-11-21 집는 점 +1 cm 부터 사실상 끔 (손가락 책상 여유
                             # _roll_best 가 판정). 예전(집는 점 = 큐브 중심) 0.5: 수직이어도 쥔 손가락 8.5 mm 라 1° 만 기울어도 8 mm 를 못 지켰다.
                             # +1 cm 면 수직 18.5 mm 위라 8~15° 기운 칸도 통과 (plan_check 로 확인, README)
-ELBOW_BRANCH = -1           # 계획·지도가 쓰는 팔꿈치 가지 (elbow 부호) = 예전 HOME(elbow −0.92 rad)의 가지. HOME 이 0 이 된 뒤에도 (2026-11-21)
+ELBOW_BRANCH = 1            # 계획·지도가 쓰는 팔꿈치 가지 (elbow 부호). 2026-11-23 사용자: 위팔 비틀기 ±90 (calibration upper_arm_roll [-90, 90])
+                            # → 위팔 0 근처 + elbow > 0. 예전(−1) 은 위팔 ≈180 가지라 HOME 에서 매번 곧은 팔로 0→180 먼저 돌렸다
 # HOME = 모든 관절 0 (팔꿈치가 이 각 안 = 팔이 곧게 늘어짐) 이면 HOME 에서 나가고 들어오는 관절 경유점 (Planner._home_exit, 2026-11-21).
 # 값은 경유점 격자 검색으로 고름 (shoulder_roll −45..0, elbow −90..−135, wrist ±45·90 중 관절 이동 합이 작고 손가락이 책상 발자국 위에서
 # 책상 면 + 41.6 mm 이상): elbow −120 이면 이동이 10° 짧지만 여유 21~25 mm 라 이것. elbow −130 은 한계 ±135 에 5° 남음 (실물 끝 간섭 미확인, calibration note).
 CUBE_EDGE_IN = 0.01          # 큐브(놓을 자리 포함)는 책상 발자국 안쪽으로 반 변 + 이만큼 (env CUBE_X_MAX 와 같은 1 cm, 2026-11-21)
 HOME_STRAIGHT_DEG = 5.0
-HOME_EXIT_MID_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 180.0, "elbow": -120.0, "wrist_pitch": 60.0, "wrist_yaw": 85.0, "hand_roll": 0.0}
+HOME_EXIT_MID_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 0.0, "elbow": 120.0, "wrist_pitch": 60.0, "wrist_yaw": -85.0, "hand_roll": 0.0}
+# ↑ 2026-11-23: 위팔 ±90 가지(ELBOW_BRANCH +1) 로 아래 값을 거울로 (위팔 −180, elbow·wrist_yaw 부호) — 격자 검색에서 책상 여유 47.4 mm, 기둥 52.3 mm. 아래 설명은 예전 −1 가지
 # ↑ 2026-11-21: 위팔을 곧은 팔로 먼저 180° 돌린 뒤(HOME_EXIT_TURN_FIRST) 어깨 젖히고 팔꿈치 접기. 기둥 검사(COLUMN_BOXES)를 넣고 격자 검색
 #   (shoulder_roll −40..40, elbow −130..−60, wrist ±85; 관절 한계에서 5° 이상) — 책상 여유 46.3 mm, 기둥 여유 52.3 mm (HOME 자세 그대로), HOME→책상 위 19.6 s.
 #   위팔을 안 먼저 돌리는 길(팔꿈치를 굽힌 채 위팔 0→180)은 앞팔이 기둥 쪽으로 휩쓸어 전부 기둥을 판다 (잠깐 쓴 elbow −40·wrist −30/−30 은 서보가 기둥 40 mm 안,
 #   그 전 값 elbow −130·wrist −45/90 은 손가락이 기둥 6 mm 안).
-HOME_EXIT_TURN_FIRST = True    # 먼저 upper_arm_roll 만 180 (곧은 팔 제자리 돌림) 경유점
+HOME_EXIT_TURN_FIRST = False   # True: 먼저 upper_arm_roll 만 180 (곧은 팔 제자리 돌림) 경유점 — 위팔 ±90 가지(2026-11-23)에선 필요 없음
 # 기둥 (IK arm.xml 의 column 메시를 상자로, sim 월드 m): 세로 기둥과 위 가로대, 기둥에 붙은 Holder. 바닥 받침(높이 8 cm)은 팔이 못 닿아 뺌.
 COLUMN_BOXES = (((0.30, -0.19, 0.0), (0.38, -0.11, 1.13)),
                 ((0.30, -0.29, 1.13), (0.38, 0.0, 1.17)),
                 ((0.194, -0.198, 1.027), (0.30, -0.10, 1.292)))
 COLUMN_MARGIN = 0.02           # 팔·손 메시 꼭짓점이 기둥 상자에서 이만큼(m) 떨어져야 (HOME 자세가 52 mm)
 COLUMN_VOXEL = 0.008           # 기둥 검사 꼭짓점을 이 격자(m)로 솎음 (한 자세 12 ms → 약 1 ms)
-HOME_EXIT_SEED_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 180.0, "elbow": -130.0, "wrist_pitch": -45.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+HOME_EXIT_SEED_DEG = {"shoulder_roll": -40.0, "upper_arm_roll": 0.0, "elbow": 130.0, "wrist_pitch": -45.0, "wrist_yaw": -90.0, "hand_roll": 0.0}
 # ↑ 책상 위 손목 자리 해를 고를 때 가까운 쪽 기준 (예전 경유점 값 그대로 → 그 자리 해 = 10.4/0/180/−133/0/90/0 이 예전과 같다)
 HOME_EXIT_WRIST_X = 0.18     # 그다음 경유점: 손목 중앙 sim x (책상 앞 끝 0.20 에서 2 cm 안, 책상 위), y = HOME 손목 y, 높이 z_clear
 HOME_EXIT_LIFT = 0.04        # 그 경유점 손목 높이 = z_clear + 이만큼. 0 이면 책상 앞 끝 가까이(실좌표 y −0.18) 놓은 큐브를 빠질 때 ③→② 에서
@@ -259,7 +261,7 @@ class Planner:
         return out
 
     # ---- 지도(집을 수 있는 곳)의 판정 = 이 계획기가 그 자리에서 집을 수 있나 (2026-11-21, 두 판정이 어긋나지 않게 여기 한 곳)
-    def point_check(self, pc):
+    def point_check(self, pc, yaws=None):
         """큐브 중심 pc (sim) 에서 이 계획기의 집기(=놓기·빠지기) 조건을 싸게: (됨?, 이유, 잡는 자세 손 기울기 °).
         1) 집는 점 = 큐브 중심 + GRIP_ABOVE_CENTER 인 해 (analytic_tip, 모든 가지 → HOME 팔꿈치 가지 우선 = family).
         2) 그 해에서 집는 점을 곧게 위로 min(ABOVE_CM) 까지 (descent 와 같은 한 걸음 _tip_step, 손 최대한 아래, 같은 가지),
@@ -267,7 +269,9 @@ class Planner:
         3) 큐브 yaw 를 YAW_SAMPLES 로 돌려 가며 모두: hand_roll(±88°, 큐브는 90° 마다 같으니 roll 후보 1~2 개)을 맞춘 그 길에서
            잡는 자세 손가락(벌림·쥠) 책상 위 TABLE_MARGIN 이상, 벌린 손가락이 길 내내 책상 여유 위·큐브에 안 닿음.
            hand_roll 만 바꾸고 다시 풀지 않는다 (손 축 둘레라 집는 점이 3 mm 안으로만 움직임 — 계획은 다시 풀어 정확히 검사).
-        큐브는 손이 수직이면 손 축 둘레 대칭이라 yaw 와 상관없고, 기울면 yaw 에 따라 아래쪽 손가락이 달라 모든 yaw 를 본다."""
+        큐브는 손이 수직이면 손 축 둘레 대칭이라 yaw 와 상관없고, 기울면 yaw 에 따라 아래쪽 손가락이 달라 모든 yaw 를 본다.
+        yaws: 볼 큐브 yaw (sim °) — 계획은 실제 큐브·놓을 방향 하나만 (2026-11-23), 지도는 None = YAW_SAMPLES 전부."""
+        samples = tuple(sorted({round(float(y) % 90.0, 3) for y in yaws})) if yaws is not None else tuple(YAW_SAMPLES)
         np, s, lim = self.np, self.s, self.lim
         if not self.on_table(pc):
             return False, self.off_table_why(), None
@@ -283,7 +287,7 @@ class Planner:
             if t > VERT_TILT or self._roll_best(q) < TABLE_MARGIN + MAP_SLACK:   # 손이 기울면 손가락이 여유 아래 (아래 참고)
                 why = why or f"손이 {t:.0f}° 기울어 손가락이 책상 위 {TABLE_MARGIN * 1000:.0f} mm 를 못 지킴"
                 continue
-            need = set(YAW_SAMPLES)
+            need = set(samples)
             for v in self._dirs():
                 path, w = self._rise(pg, q, v)
                 if path is None:
@@ -304,7 +308,7 @@ class Planner:
                 need -= got
                 if not need:
                     return True, "집을 수 있음", min(tilts)
-            if need != set(YAW_SAMPLES):
+            if need != set(samples):
                 why = ("큐브 yaw " + ", ".join(f"{y - s.R.SIM_FROM_REAL_YAW:+.0f}°" for y in sorted(need))
                        + " (실좌표) 에선 곧게 내려가는 길에서 손가락이 큐브·책상 여유에 걸림")
         return False, why or "곧게 내려가는 길 없음", min(tilts)
@@ -731,9 +735,13 @@ def plan(a):
     for what, x, y in (("큐브", cx, cy), ("놓을 자리", tx, ty)):
         if not P.on_table(s.to_sim([x, y, 0.0])):
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {P.off_table_why()}"}
-        code, _, _ = s.grasp_eval(P.S, x, y, verify=True)
-        if code != 2:
+        code, _, _ = s.grasp_eval(P.S, x, y, verify=True, check=False)   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로)
+        if code == 0:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {REASON[code]}"}
+        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - R.MAP_D])),
+                                   yaws=[(cyaw if what == "큐브" else tyaw) + R.SIM_FROM_REAL_YAW])
+        if not ok:
+            return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {why}"}
     zc = float(s.E.OBJECT_HALF_SIZE) - R.MAP_D   # 큐브 중심 높이 (실좌표, 어깨 축 기준). 놓을 때도 큐브 바닥 = 책상
     pc = np.asarray(s.to_sim([cx, cy, zc]))      # 큐브 중심 (sim) — 손가락↔큐브 검사·들고 가는 큐브
     pt = np.asarray(s.to_sim([tx, ty, zc]))
