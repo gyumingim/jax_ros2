@@ -333,7 +333,8 @@ function renderMotors() {
     el("thead", {}, el("tr", {}, ...["모터", "상태", "위치", "온도", "힘", ""].map((h) => el("th", {}, h)))),
     el("tbody", {}, ...rows)), bus || ""));
   // 서보: 위치 피드백이 없어 '마지막으로 보낸 값' (sim ° = 관절 각, 모터 ° = 서보에 보낸 0~180)
-  const live = r.calibration && r.calibration.length ? r.calibration : null;   // 직접 CAN: 메모리 보정(핀 바꾼 것 포함, 저장 전도)
+  const dcal = (r.direct_state || {}).calibration || r.calibration;
+  const live = dcal && dcal.length ? dcal : null;   // 직접 CAN: 메모리 보정(핀 바꾼 것 포함, 저장 전도)
   const sv = r.servos || {}, cal = (live || (S.calibration || {}).joints || []).filter((c) => c.motor === "servo");
   if (cal.length) {
     const srow = cal.map((c) => {
