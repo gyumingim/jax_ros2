@@ -67,7 +67,8 @@ START_TOL_DEG = 5.0           # 실물 재생: 첫 프레임과 지금 자세가
 AK45_MODE_BRAKE = 2
 
 DEFAULTS = {
-    "max_speed": 30.0,        # °/s  AK45 램프 속도 상한 (서보 램프도 같은 값)
+    "max_speed": 30.0,        # °/s  AK45 램프 속도 상한
+    "servo_speed_x": 2.0,     # 서보 램프 속도 = max_speed × 이것 (2026-11-23 사용자: 서보 2배)
     "max_acc": 90.0,          # °/s² 사다리꼴 가속 (robot_arm AK_ACC)
     "max_step": 3.0,          # °    한 제어 스텝 최대 이동 (robot_arm)
     "carrot": 30.0,           # °    명령을 측정 위치 ± 이 안으로 (robot_arm 45 → 보수적으로 30)
@@ -183,7 +184,7 @@ class RealArm:
         self.ak_by_id = {m.id: m for m in self.ak.values()}
         self.homing = Homing({n: m.joint for n, m in self.ak.items()}, self.home_poses,
                              gap_s=self.p["gap_keep_s"], jump_deg=self.p["jump_deg"], max_age_s=0.5)
-        self.servo_mover = Mover(self.p["max_speed"], self.p["ctrl_hz"])
+        self.servo_mover = Mover(self.p["max_speed"] * self.p["servo_speed_x"], self.p["ctrl_hz"])
         self.servo_sent = {}        # 서보 이름 -> (모터 °, monotonic)
         self.servo_resend_t = 0.0
         self.lock = threading.RLock()
