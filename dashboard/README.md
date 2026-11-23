@@ -30,7 +30,7 @@ python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 
 | `JAX_DASH_SIGINT_WAIT`, `JAX_DASH_SIGTERM_WAIT` | 5, 3 초 | 끄기 단계 사이 대기 |
 | `JAX_DASH_DEMO=1` | | Linux 에서도 가짜 시험 항목을 보인다 |
 
-## 화면: 탭 3개
+## 화면: 탭 3개 (+ 강화학습 탭, 아래 따로)
 
 위 띠(모든 탭 공통): 연결·팔 연결·can0·실행 수 칩, **모드 스위치 실물 / 가상**, 큰 **■ STOP**(Esc, 직접 CAN = 지금 자리 홀드; 가상·ROS = 전부 정지), 경고 띠. 고른 탭은 주소 해시(`#conn` `#angle` `#ik`, 예전 `#ak` 등도 옮겨 감)와 localStorage 에 기억.
 
@@ -94,6 +94,17 @@ python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 
   - **집는 점 +1 cm (2026-11-21 사용자 결정)**: `GRIP_ABOVE_CENTER = 0.010` (hand_ik, 지도·계획·IK 탭이 같이 씀) → 수직 손에서 쥔 손가락이 책상 위 18.5 mm. 손 기울기 문(`VERT_TILT` 0.5°, 여유 대신이던 것)은 끔 — 손가락 여유 검사가 판정. 초록 **99 → 432 칸**(기울기 문을 그대로 두면 50 칸). 지도 계산은 약 35 → **약 400 초**(이 PC, 지나는 칸이 많아 느려짐 — 서버 켤 때 미리 계산, 시간 상한 `MAP_TIMEOUT_S` 1500 s; 예전 120 s 상한이면 지도가 시간 초과로 안 나옴). plan_check N=30: seed 1 **29/30**, seed 2 **29/30** playable(잡을 때 손 기울기 최대 15°). 실패 2: 옮겨 가는 길 손가락 7.9 mm(여유 8 바로 아래), 놓고 빠질 때 손가락↔큐브. 기록 `dashboard/logs/grip35_20261121/`(git 밖).
   - 패드: 손가락 끝 판 안쪽 면(MuJoCo 메시)은 집는 점 기준 손 축으로 −16 ~ +34 mm, 그중 큐브 면 1 mm 안에 드는(먼저 닿는) 곳은 판 끝 −16 ~ +2 mm. 집는 점 3.5 cm 면 닿는 곳 = 책상 위 19~37 mm 로 큐브 옆면(0~50) 안. 판 전체(50 mm)는 2.5 cm 때도 윗면 위로 9 mm 나와 있었고 3.5 cm 면 19 mm — 판이 큐브 높이만큼 길어 '판 전체가 면 안' 은 어떤 높이로도 안 됨(책상 여유 8 mm 때문). 손이 기울 때 패드가 면에 붙는지·실제로 쥐어지는지는 물리 시뮬이 없어 모름.
 - 궤적: `pick_place` 의 기존 `--save` 옵션으로 `logs/pick_dry_traj.json`(joint_names, dt, positions rad, real/sim 좌표, status)을 쓰게 하고 `GET /api/ik/trajectory` 로 읽는다(arm_control 코드는 안 고침). 팔이 못 닿으면(종료코드 3) 계획이 없어 파일을 안 쓰므로 큐브·놓을 자리만 보인다(실행마다 옛 파일은 지움).
+
+## 강화학습 탭 (`rl_api.py`, `rl_runner.py`, `static/rl.js`) — 팀원 정책 돌려보기 (2026-11-23)
+
+팀원(정우 님)이 학습한 집기 정책 `grasp_lift_23025` 을 team-jax/IK `sim2sim/`(handroll-limit 브랜치, MuJoCo 체인: 늘어뜨린 팔 → 들어올리기 → 밀어 넣기 → 정책으로 쥐고 들기 → ㄴ자 복귀 → 완료 판정)으로 돌려 본다. **시뮬만 돈다. 실물 팔·가상 팔에는 아무것도 보내지 않는다.**
+
+- 카드 하나: 미리 정한 자리(run_eval 의 27곳) 또는 x·y(cm)·각도(°) → **▶ 실행** → 결과 한 줄(성공/실패 이유, 큐브가 들린 높이, 닫기 → 복귀 → 완료 시각). x·y 는 정우 님 기준 자리(월드 (−0.285, 0.26) m)에서 벗어난 양: x − = 책상 안쪽, y + = 로봇 오른쪽. 입력 아래에 놓는 범위(`reach_mask_v65`) 안/밖을 보인다(밖이어도 돌릴 수 있음).
+- 오른쪽 3D: 관절 궤적과 큐브를 재생 버튼·슬라이더로 다시 본다(30 Hz, 지금 단계 이름·큐브 높이 표시).
+- '더보기' 안: **평가 (27곳)** = `run_eval.py --cond base`, 1분쯤. 결과는 `dashboard/logs/rl/` 에만 쓴다(IK 레포는 안 건드림).
+- 서버는 자식 프로세스(`rl_runner.py`)로 돌린다. 한 번에 하나, 서버 프로세스에는 mujoco 를 안 올린다. 파이썬은 서버와 같은 것(`JAX_RL_PYTHON` 으로 바꿈) — mujoco·numpy 필요. `JAX_IK_DIR` 에 `sim2sim/` 이 없으면 탭에 이유가 뜬다.
+- **관절 대응**: sim2sim 장면(deploy `robot_v3` URDF, V2 부호)과 3D 모델(`motion2/arm/arm.xml`)은 관절 이름만 다르고 각도·부호가 같다(`rl_runner.JOINT_MAP`: `shoulder_pitch_to_shoulder_roll` → `shoulder_roll`, `shoulder_roll_to_shoulder_yaw` → `shoulder_yaw`, `shoulder_yaw_to_upper_arm` → `upper_arm_roll`, `upper_arm_to_under_arm` → `elbow`, `under_arm_to_wrist_pitch` → `wrist_pitch`, `wrist_pitch_to_wrist_yaw` → `wrist_yaw`, `wrist_yaw_to_hand_base` → `hand_roll`, 손가락 6개). 확인: 무작위 자세 20개에서 두 모델의 몸체 14개 원점이 0.00 mm 로 같고, 두 관절 부호를 뒤집으면 14~73 cm 어긋남. deploy README 5.1 의 '부호 반대'는 실물 V3 원본 URDF 와의 차이이고 arm.xml 은 이미 V2 부호다. 엄지 받침(`hand_base_to_rotation_base`, 체인은 −170°)은 arm.xml 에 관절이 없어(−180° 고정) 화면이 그 몸체를 직접 돌린다. 큐브·책상은 장면의 `Shoulder_Pitch` 틀 + x 0.052 m 로 3D 틀에 옮긴다.
+- 확인: 가상 모드 8095 에서 (−8, −18) cm −35° 실행 → 성공(18.8 cm), 헤드리스 Chrome 화면과 `render.py --frame 11.0` 그림의 팔·큐브 자세가 같음. 실물 재생은 없다(검토 뒤 다음 단계).
 
 ## 실물(직접 CAN) 모드 (`real_arm.py`, `direct_api.py`) — 기본
 

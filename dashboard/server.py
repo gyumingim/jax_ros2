@@ -703,6 +703,11 @@ async def api_go_home(req: Request):
 
 direct_api.install(app, mode_kind, pm, can_state, _trajectory, str(LOG_DIR / "direct.log"))
 
+# --- 강화학습 탭 (rl_api.py: 팀원 정책을 MuJoCo 로 돌려보기 — 시뮬만, 팔에는 아무것도 안 보냄) ---
+import rl_api   # noqa: E402
+rl_api.install(app, _ik_dir)
+# --- 강화학습 탭 끝 ---
+
 _MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")
 
 

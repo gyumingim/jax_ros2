@@ -84,11 +84,26 @@
       </div>
     </div>
   </section>
+  <!-- 강화학습 탭 (rl.js + rl_api.py). 탭 버튼은 rl.js 가 단다 -->
+  <section class="page" id="page-rl" data-tab="rl" hidden>
+    <div class="split">
+      <div class="split-l" id="rl-left"></div>
+      <div class="split-r">
+        <div class="card v3d-card">
+          <h3>3D 다시 보기 <span class="legend"><span style="color:#ea580c;font-weight:700">주황</span> 큐브 · 시뮬(MuJoCo) 결과</span></h3>
+          <div class="v3d" id="v3d-rl"></div>
+          <div id="rl-ctl"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- 강화학습 탭 끝 -->
   <details class="foot"><summary>정보</summary><div id="foot"></div></details>
 </main>
 <div class="toasts" id="toasts"></div>
 <script src="/static/app.js"></script>
 <script src="/static/direct.js"></script>
 <script type="module" src="/static/viewer.js"></script>
+<script src="/static/rl.js"></script><!-- 강화학습 탭 -->
 </body>
 </html>
