@@ -76,7 +76,9 @@ ELBOW_BRANCH = 1            # 계획·지도가 쓰는 팔꿈치 가지 (elbow �
 # 책상 면 + 41.6 mm 이상): elbow −120 이면 이동이 10° 짧지만 여유 21~25 mm 라 이것. elbow −130 은 한계 ±135 에 5° 남음 (실물 끝 간섭 미확인, calibration note).
 CUBE_EDGE_IN = 0.01          # 큐브(놓을 자리 포함)는 책상 발자국 안쪽으로 반 변 + 이만큼 (env CUBE_X_MAX 와 같은 1 cm, 2026-11-21)
 HOME_STRAIGHT_DEG = 5.0
-HOME_EXIT_MID_DEG = {"shoulder_roll": -45.0, "upper_arm_roll": 0.0, "elbow": 90.0, "wrist_pitch": 0.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+HOME_EXIT_MID_DEG = {"shoulder_roll": 0.0, "upper_arm_roll": 0.0, "elbow": 90.0, "wrist_pitch": 0.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+# ↑ 2026-11-23 사용자: 어깨만 먼저 젖히지 말고 위팔 비틀기로 — ① HOME_EXIT_PRE_DEG 위팔 +90·팔꿈치 90·어깨 −30 을 한꺼번에 (팔꿈치가 옆으로 접혀
+#   손이 책상 위를 안 지남, 어깨 부담 작음) → ② 여기: 위팔 0 으로 되돌려 손을 책상 위 172 mm 에서 앞으로 → ③ 책상 위 손목 자리 (79 mm). 기둥 52 mm
 # ↑ 2026-11-23 사용자 자세 (팔꿈치 ±100): 어깨 뒤로 −45 + 팔꿈치 90 + 손목 굽힘 90 = 손이 책상 위 224 mm·모서리 바깥. 그 전에 곧은 팔로 어깨만 −45 (HOME_EXIT_PRE_DEG)
 #   — 한꺼번에 가면 손이 책상 높이 아래일 때 팔꿈치가 접혀 아래팔이 책상 밑으로 (−201 mm). 검색: 책상 여유 34.5 mm, 기둥 52 mm
 # ↑ 2026-11-23 팔꿈치 ±100 (사용자, JAX 초기값 CAD V3): 2026-11-21 ±100 격자 검색 값(−30/180/−95/85/85)을 위팔 ±90 가지로 거울
@@ -85,7 +87,7 @@ HOME_EXIT_MID_DEG = {"shoulder_roll": -45.0, "upper_arm_roll": 0.0, "elbow": 90.
 #   (shoulder_roll −40..40, elbow −130..−60, wrist ±85; 관절 한계에서 5° 이상) — 책상 여유 46.3 mm, 기둥 여유 52.3 mm (HOME 자세 그대로), HOME→책상 위 19.6 s.
 #   위팔을 안 먼저 돌리는 길(팔꿈치를 굽힌 채 위팔 0→180)은 앞팔이 기둥 쪽으로 휩쓸어 전부 기둥을 판다 (잠깐 쓴 elbow −40·wrist −30/−30 은 서보가 기둥 40 mm 안,
 #   그 전 값 elbow −130·wrist −45/90 은 손가락이 기둥 6 mm 안).
-HOME_EXIT_PRE_DEG = {"shoulder_roll": -45.0}   # 첫 경유점: HOME 에서 이 관절들만 먼저 (곧은 팔로 어깨만 뒤로 → 손이 책상에서 멀어짐)
+HOME_EXIT_PRE_DEG = {"upper_arm_roll": 90.0, "elbow": 90.0, "shoulder_roll": -30.0}   # 첫 경유점 (HOME 에서 이 관절들을 한꺼번에)
 HOME_EXIT_TURN_FIRST = False   # True: 먼저 upper_arm_roll 만 180 (곧은 팔 제자리 돌림) 경유점 — 위팔 ±90 가지(2026-11-23)에선 필요 없음
 # 기둥 (IK arm.xml 의 column 메시를 상자로, sim 월드 m): 세로 기둥과 위 가로대, 기둥에 붙은 Holder. 바닥 받침(높이 8 cm)은 팔이 못 닿아 뺌.
 COLUMN_BOXES = (((0.30, -0.19, 0.0), (0.38, -0.11, 1.13)),
@@ -93,7 +95,7 @@ COLUMN_BOXES = (((0.30, -0.19, 0.0), (0.38, -0.11, 1.13)),
                 ((0.194, -0.198, 1.027), (0.30, -0.10, 1.292)))
 COLUMN_MARGIN = 0.02           # 팔·손 메시 꼭짓점이 기둥 상자에서 이만큼(m) 떨어져야 (HOME 자세가 52 mm)
 COLUMN_VOXEL = 0.008           # 기둥 검사 꼭짓점을 이 격자(m)로 솎음 (한 자세 12 ms → 약 1 ms)
-HOME_EXIT_SEED_DEG = {"shoulder_roll": -45.0, "upper_arm_roll": 0.0, "elbow": 60.0, "wrist_pitch": 0.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+HOME_EXIT_SEED_DEG = {"shoulder_roll": -45.0, "upper_arm_roll": 0.0, "elbow": 60.0, "wrist_pitch": 0.0, "wrist_yaw": 90.0, "hand_roll": 0.0}   # 책상 위 손목 자리 해 고르기 기준
 # ↑ 책상 위 손목 자리 해를 고를 때 가까운 쪽 기준 (예전 경유점 값 그대로 → 그 자리 해 = 10.4/0/180/−133/0/90/0 이 예전과 같다)
 HOME_EXIT_WRIST_X = 0.0      # 그다음 경유점: 손목 중앙 sim x (책상 위), 높이 z_clear + HOME_EXIT_LIFT (2026-11-23 검색 값)
 HOME_EXIT_WRIST_DY = -0.05   # 그 경유점 sim y = HOME 손목 y + 이만큼
