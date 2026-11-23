@@ -42,6 +42,7 @@ MAP_PARTS = max(1, min(8, (os.cpu_count() or 2) // 2))   # 지도를 나눠 푸�
 # 패드: 손가락 판 안쪽 면은 집는 점 −16 ~ +34 mm (손 축 따라). 닿는 곳(판 끝, 큐브 면 1 mm 안) −16 ~ +2 mm → 책상 위 19~37 mm, 큐브 면(0~50) 안.
 GRIP_ABOVE_CENTER = 0.010
 MAP_TIMEOUT_S = 1500.0        # 지도 계산 시간 상한 (집는 점 +1 cm 뒤 이 PC 약 400 초 — 지나는 칸이 많아 판정이 길어짐. 예전 120 s 면 시간 초과)
+NO_TABLE = True               # 2026-11-23 사용자: "책상 없다 생각" — 손가락·팔의 책상 충돌 검사 끔 (over_table 항상 False). 큐브 높이 기준(MAP_D)은 그대로
 TABLE_XY_MARGIN = 0.01        # 책상 발자국 둘레 여유 (m): 손가락 상자가 발자국 + 이만큼 안에 걸치면 책상 높이 검사 (2026-11-21)
 ARM_RADIUS = 0.03             # 팔 기준점(팔꿈치·손목) 둘레 링크 반지름 가정 (m) — 책상 발자국 위에서 책상 면 + 이만큼 위여야
 GRASP_TILT_TOL = 3.0         # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
@@ -263,6 +264,8 @@ class _Solver:
 
     def over_table(self, xy_lo, xy_hi, margin=None):
         """xy 상자 [xy_lo, xy_hi] (sim) 가 책상 발자국 + margin(기본 TABLE_XY_MARGIN) 과 겹치나."""
+        if NO_TABLE:
+            return False
         x0, x1, y0, y1 = self.table_xy
         e = TABLE_XY_MARGIN if margin is None else margin
         return bool(xy_hi[0] >= x0 - e and xy_lo[0] <= x1 + e and xy_hi[1] >= y0 - e and xy_lo[1] <= y1 + e)

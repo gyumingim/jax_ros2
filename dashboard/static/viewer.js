@@ -188,6 +188,7 @@ export class Viewer {
       leg.position.set(x, y, -0.025 - 0.355);
       this.table.add(leg);
     }
+    this.table.visible = false;   // 2026-11-23 사용자: 책상 없다고 보고 계획 (hand_ik.NO_TABLE) → 안 그림
     scene.add(this.table);
     this.setTableD(this.d);
     // 큐브·놓을 자리
