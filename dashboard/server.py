@@ -439,6 +439,17 @@ def api_state():
     return state()
 
 
+@app.middleware("http")
+async def _same_origin_post(request, call_next):
+    # 다른 사이트(브라우저에 열린 아무 웹 페이지)가 이 서버로 POST 해 팔을 움직이지 못하게: 브라우저가 붙이는 Origin 이
+    # 이 서버 주소(Host)와 다르면 거절. Origin 없는 요청(curl·시험 스크립트)은 그대로. 폰·PC 화면은 같은 주소라 영향 없음.
+    if request.method == "POST":
+        origin = request.headers.get("origin")
+        if origin is not None and origin.split("://", 1)[-1].lower() != (request.headers.get("host") or "").lower():
+            return JSONResponse({"ok": False, "error": "다른 사이트에서 온 요청 — 거절"}, status_code=403)
+    return await call_next(request)
+
+
 async def _body(req):
     try:
         return await req.json()
