@@ -64,6 +64,7 @@ except Exception:   # real_arm 을 못 읽는 곳(팀 PC 등)에선 보수적으
 TABLE_MARGIN = 0.008         # 손가락 충돌 상자·들고 가는 큐브 바닥이 책상 면보다 이만큼(m) 위여야 (실물 책상 높이 MAP_D 0.4775 는 가정 —
                              # 실측 전엔 오차가 이 여유를 먹는다. README). 집는 점 = 큐브 중심이던 때는 수직 손에서 쥔 손가락 8.5 mm 위라
                              # 손이 조금만 기울어도 못 지켰다 → 2026-11-21 집는 점 +1 cm (GRIP_ABOVE_CENTER, 수직이면 18.5 mm 위)
+FINGER_OPEN_J1_DEG = -60.0  # 벌린 손가락 첫 마디 각 (°). None = env FINGER_OPEN (−15°, 쥠 −11° 와 4° 차이). 2026-11-23 사용자: 손이 뒤집힌 채 내려가 손가락이 걸리면 더 벌림 → plan_check 25·27/30 (−15° 는 24·23, −30·−45 는 25·24). 실물 손가락이 −60° 까지 가는지 미확인
 YAW_SAMPLES = tuple(range(0, 90, 15))   # 지도 판정에서 볼 큐브 yaw (sim °, 90° 마다 같음)
 VERT_TILT = 90.0            # ° 지도: 잡는 자세 손이 이보다 기울면 '못 집음' — 2026-11-21 집는 점 +1 cm 부터 사실상 끔 (손가락 책상 여유
                             # _roll_best 가 판정). 예전(집는 점 = 큐브 중심) 0.5: 수직이어도 쥔 손가락 8.5 mm 라 1° 만 기울어도 8 mm 를 못 지켰다.
@@ -153,6 +154,8 @@ class Planner:
         self.lim = self.S["lim"]
         self.hr = s.arm.index("hand_roll")
         self.open = np.asarray(s.env.finger_targets(0.0), dtype=float)
+        if FINGER_OPEN_J1_DEG is not None:   # 내려가고 빠질 때 손가락을 더 벌림 (첫 마디 = 각 손가락 joint1, 6 개 중 0·2·4)
+            self.open[[0, 2, 4]] = math.radians(FINGER_OPEN_J1_DEG)
         self.closed = np.asarray(s.env.finger_targets(1.0), dtype=float)   # 팀 계획이 들고 갈 때 쓰는 값 (grip 1.0)
         self.home = np.asarray(s.E.HOME_ARM_QPOS, dtype=float)
         self.home0 = self.home.copy()
