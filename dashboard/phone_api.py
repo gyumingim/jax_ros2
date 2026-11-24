@@ -49,6 +49,7 @@ SHEET = HERE / "phone_markers" / "phone_markers.pdf"
 CALIB_DEFAULT = "calib_phone_pair.json"
 CALIB_BY_MODEL = {"SM-S921N": "calib_phone_pair_s24.json"}     # Galaxy S24 — 2026-09-22 보드 캘리 (SteroDepthSeg 96fad02 에서 꺼냄)
 CALIB_MODELS = {"SM-S931N": CALIB_DEFAULT, **CALIB_BY_MODEL}   # 큐브 마커 재기 (초점거리) 에 보정값을 믿는 모델 — 그 밖이면 보정 없음 (intrinsics None)
+MODEL_TRUST_S = 600.0       # 한 번 읽은 모델을 adb 에 다시 묻지 않고 믿는 시간
 MODEL_KEEP_S = 60.0         # adb 가 잠깐 안 되면 이만큼 마지막 모델을 그대로
 _MODEL = {"t": 0.0, "v": None, "ok_t": 0.0, "last": None}
 LIMITS = {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "rot_deg": (-180.0, 180.0), "cube_h": (0.0, 0.3)}
@@ -56,8 +57,14 @@ LIMITS = {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "rot_deg": (-180.0, 180.0), "cube_
 
 def phone_model():
     """USB 로 붙은 폰의 모델 (adb getprop ro.product.model), 없거나 adb 가 안 되면 None. 5초 캐시."""
-    if time.monotonic() - _MODEL["t"] < 5.0:
+    now0 = time.monotonic()
+    if now0 - _MODEL["t"] < 5.0:
         return _MODEL["v"]
+    # 한 번 읽은 모델은 10분 그대로 (adb shell 을 안 부름) — 영상이 흐르는 중에 5초마다 adb shell getprop 을 끼워 넣으면
+    # S24 의 adb 가 몇 분 뒤 멈춰 케이블을 다시 꽂아야 했다 (2026-11-24 실기). 폰 프로그램 감시는 따로 캐시 없이 묻는다.
+    if _MODEL["last"] is not None and now0 - _MODEL["ok_t"] < MODEL_TRUST_S:
+        _MODEL.update(t=now0, v=_MODEL["last"])
+        return _MODEL["last"]
     v = None
     try:
         r = subprocess.run(["adb", "shell", "getprop", "ro.product.model"], capture_output=True, text=True, timeout=3)
