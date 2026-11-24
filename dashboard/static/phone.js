@@ -17,13 +17,19 @@ const PH = { cube: null, grasp: null, busy: false, going: false, mode: lsGet("ph
   tabBtns.phone = b;
   $("#tabs").append(b);
 
-  const pick = (capture) => {
+  const pick = (capture, fn = phDetect) => {
     const inp = el("input", { type: "file", accept: "image/*", hidden: true });
     if (capture) inp.setAttribute("capture", "environment");
-    inp.addEventListener("change", () => { if (inp.files[0]) phDetect(inp.files[0]); inp.value = ""; });
+    inp.addEventListener("change", () => { if (inp.files[0]) fn(inp.files[0]); inp.value = ""; });
     return inp;
   };
-  const cam = pick(true), gal = pick(false);
+  const cam = pick(true), gal = pick(false), thCam = pick(true, phTable), thGal = pick(false, phTable);
+  PH.bTh = el("button", { class: "btn line", onclick: () => (PH.mode === "depth" ? phTable(null) : thCam.click()) }, "책상 높이 재기");
+  PH.bThFill = el("button", { class: "btn", disabled: true, onclick: phTableFill }, "역기구학 탭에 넣기");
+  PH.thImg = el("img", { class: "ph-img", hidden: true, alt: "책상 높이를 잰 사진" });
+  PH.thRes = el("div", { class: "result", hidden: true });
+  PH.thHelp = el("span", {});
+  PH.thGal = el("a", { href: "#", onclick: (e) => { e.preventDefault(); thGal.click(); } }, "찍어 둔 사진 고르기");
   PH.bShot = el("button", { class: "btn ph-big", onclick: () => cam.click() }, "사진 찍기");
   PH.img = el("img", { class: "ph-img", hidden: true, alt: "찾은 마커" });
   PH.res = el("div", { class: "result", hidden: true });
@@ -57,6 +63,12 @@ const PH = { cube: null, grasp: null, busy: false, going: false, mode: lsGet("ph
       el("div", { class: "ph-row" }, PH.bStop, el("a", { class: "btn line", href: "#ik" }, "역기구학 탭에서 보기")),
       PH.goNote, PH.target,
       el("div", { class: "help", style: "margin:6px 0 0" }, "계획(역기구학 탭과 같은 것)을 돌린 뒤, 지금 모드의 팔로 재생할지 확인창이 묻는다.")),
+    el("h2", { class: "sec" }, "책상 높이"),
+    el("div", { class: "card" },
+      el("div", { class: "ph-row", style: "margin-top:0" }, PH.bTh, PH.bThFill), thCam, thGal,
+      PH.thImg, PH.thRes,
+      el("div", { class: "help", style: "margin:10px 0 0" }, "폰을 로봇 거치대에 끼운 채로 잰다 (보정 없이 CAD 거치 자리를 믿는다). ", PH.thHelp, " ", PH.thGal,
+        el("br"), "렌즈 자리·초점거리 때문에 1~3 cm 틀릴 수 있다 — 처음 한 번은 줄자로 잰 값(어깨 축 ~ 책상 윗면)과 맞춰 보기.")),
     PH.depthAdv = el("details", { class: "adv", hidden: true }, el("summary", {}, "준비 — 폰 거치 자세 · 큐브 각"),
       el("div", { class: "card" },
         el("div", { class: "frow" }, el("b", {}, "거치 자세"), dfld("c0", "tx", "m"), dfld("c1", "ty", "m"), dfld("c2", "tz", "m"), dfld("c3", "roll", "°"), dfld("c4", "pitch", "°"), dfld("c5", "yaw", "°")),
@@ -64,6 +76,8 @@ const PH = { cube: null, grasp: null, busy: false, going: false, mode: lsGet("ph
           "큐브를 아는 자리 3곳 이상에 놓고 결과 줄의 '카메라 좌표' 를 적어 dashboard/tools/solve_phone_mount.py 로 푼다 (README)."),
         el("div", { class: "frow" }, el("b", {}, "큐브 각"), dfld("yaw", "직접 넣기", "° (비우면 추정)")),
         el("div", { class: "help", style: "margin:8px 0 0" }, "추정한 각은 보이는 면의 방향에서 구한 근삿값이다 (작은 큐브에서는 10° 안팎 틀릴 수 있다). 큐브는 90° 마다 같아서 −45~45° 로만 나온다. 틀려 보이면 각을 직접 넣는다."),
+        el("label", { class: "help", style: "display:flex;gap:8px;align-items:center;margin:10px 0 0" }, PH.df.save_rgbd = el("input", { type: "checkbox" }),
+          "뎁스 맵 저장 (책상 높이 재기용 — 저장한 뒤 폰 프로그램을 껐다 켜기)"),
         el("div", { class: "frow" }, dfld("repo_dir", "폰 스테레오 저장소", "폴더", true), dfld("run_dir", "결과 폴더", "(비우면 저장소/phone_stereo/runs/dash)", true)),
         el("div", { class: "ph-row" }, el("button", { class: "btn line", onclick: phSaveDepthCfg }, "폰 뎁스 설정 저장")),
         el("div", { class: "help", style: "margin:10px 0 0" }, "터미널에서 직접 켤 때:"), PH.cmd)),
@@ -138,6 +152,46 @@ async function phGrasp(cube, hint) {
   else phShow(PH.grasp_el, g.ok ? "여기는 못 집음" : "집을 수 있는지 확인 못 함", g.ok ? "bad" : "warn", (g.reason || "") + (g.ok ? hint : ""));
 }
 
+// ---- 책상 높이 재기 (phone_table.py): 거치대의 폰 사진 한 장(ArUco) 또는 폰 뎁스 맵 → d. 넣는 것은 사람이 버튼으로 ----
+async function phTable(file) {
+  if (PH.thBusy) return;
+  PH.thBusy = true; PH.th = null; PH.bTh.disabled = PH.bThFill.disabled = true;
+  phShow(PH.thRes, "책상 높이 재는 중…", "run");
+  let r;
+  try {
+    r = await (await fetch("/api/phone/table_height", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: file ? await phShrink(file) : new Blob([]) })).json();
+  } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
+  PH.thBusy = false; PH.bTh.disabled = false;
+  PH.thImg.hidden = !r.image;
+  if (r.image) PH.thImg.src = r.image;
+  const warn = (r.warn || []).join(" · ");
+  if (!r.ok) { phShow(PH.thRes, "책상 높이를 못 잼", "bad", (r.reason || "") + (warn ? " · " + warn : "")); return; }
+  let text = r.text;
+  const a = r.aruco && r.aruco.ok ? r.aruco : null, p = r.depth && r.depth.ok ? r.depth : null;
+  if (a) PH.thA = { d: a.d, t: Date.now() };
+  else if (PH.thA && Date.now() - PH.thA.t < 600000)    // 이번엔 뎁스만: 10분 안에 사진으로 잰 값이 있으면 같이
+    text += ` · ArUco ${PH.thA.d.toFixed(3)} m (${Math.round((Date.now() - PH.thA.t) / 60000)}분 전) · 차이 ${Math.round(Math.abs(PH.thA.d - r.d) * 1000)} mm`;
+  const m = a || p, now = tableDNum();
+  const note = [`기울기 ${m.tilt_deg.toFixed(1)}° (CAD 와 차이, 0 이어야)`, `카메라가 책상 위 ${m.cam_above_table.toFixed(3)} m`,
+    a ? `마커 ${a.refs.length}개 · 초점거리 추정 흔들림 ± ${a.d_pm_mm.toFixed(0)} mm` : `평면 점 ${Math.round(p.inlier * 100)} % · 잔차 ${p.rms_mm} mm`,
+    `지금 칸 ${now.toFixed(4)} m 와 ${Math.round((r.d - now) * 1000)} mm 차이`];
+  if (!r.in_range) note.unshift(r.reason);
+  if (warn) note.push(warn);
+  PH.th = r;
+  phShow(PH.thRes, el("span", { class: "ph-xy" }, text), !r.in_range ? "bad" : warn ? "warn" : "ok", note.join(" · "));
+  PH.bThFill.disabled = !r.in_range;
+}
+
+function phTableFill() {
+  const f = M.c && M.c.fields.d;
+  if (!f || !PH.th || !PH.th.in_range) return;
+  f.value = PH.th.d.toFixed(3);
+  f.dispatchEvent(new Event("input", { bubbles: true }));   // 지도·집을 수 있는 곳이 새 높이로 다시 그려진다 (app.js 의 칸 처리 그대로)
+  PH.bThFill.disabled = true;
+  toast(`역기구학 탭 책상 높이 = ${f.value} m (어깨 축 아래)`);
+  if (PH.cube) phGrasp(PH.cube, "");
+}
+
 // ---- 세그먼트(폰 뎁스) 모드 ----
 function phMode(m) {
   PH.mode = m; lsSet("ph_mode", m);
@@ -148,6 +202,8 @@ function phMode(m) {
   PH.depth.hidden = PH.depthAdv.hidden = !d;
   PH.cube = null; PH.grasp = null; PH.block = ""; PH.dp = null; PH.imgT = null;
   PH.res.hidden = PH.grasp_el.hidden = PH.img.hidden = PH.goNote.hidden = true;
+  PH.thHelp.textContent = d ? "폰 프로그램이 켜져 있고 준비의 '뎁스 맵 저장' 이 켜져 있어야 한다 (책상이 화면에 크게)." : "기준 종이를 책상에 평평하게 두고 6개 마커가 다 나오게 한 장 (종이 자리는 아무 데나).";
+  PH.thGal.hidden = d;
   if (d) phDepthPoll();
 }
 
@@ -156,7 +212,7 @@ async function phLoadDepthCfg() {
     const d = await (await fetch("/api/phone/depth/config")).json();
     d.cfg.camera_to_robot.forEach((v, i) => { PH.df["c" + i].value = v; });
     PH.df.yaw.value = d.cfg.yaw_manual_deg ?? "";
-    PH.df.repo_dir.value = d.cfg.repo_dir; PH.df.run_dir.value = d.cfg.run_dir;
+    PH.df.repo_dir.value = d.cfg.repo_dir; PH.df.run_dir.value = d.cfg.run_dir; PH.df.save_rgbd.checked = !!d.cfg.save_rgbd;
     PH.cmd.textContent = `cd ${d.cfg.repo_dir} && ${d.command}`;
     PH.missing = d.missing || [];
   } catch (e) { /* 다음에 다시 */ }
@@ -165,7 +221,7 @@ async function phLoadDepthCfg() {
 async function phSaveDepthCfg() {
   const c2r = [0, 1, 2, 3, 4, 5].map((i) => parseFloat(PH.df["c" + i].value));
   const yaw = PH.df.yaw.value.trim();
-  const r = await post("/api/phone/depth/config", { camera_to_robot: c2r, yaw_manual_deg: yaw === "" ? null : parseFloat(yaw), repo_dir: PH.df.repo_dir.value, run_dir: PH.df.run_dir.value });
+  const r = await post("/api/phone/depth/config", { camera_to_robot: c2r, yaw_manual_deg: yaw === "" ? null : parseFloat(yaw), repo_dir: PH.df.repo_dir.value, run_dir: PH.df.run_dir.value, save_rgbd: PH.df.save_rgbd.checked });
   if (r.ok) { await phLoadDepthCfg(); phDepthPoll(); }
 }
 

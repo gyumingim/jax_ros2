@@ -13,6 +13,10 @@ server.py 는 install(app, log_dir) 한 줄만 가진다. 계획·재생은 화�
     GET  /api/phone/depth/image           그 프로그램이 저장한 inference.png
     GET  /api/phone/depth/config, POST    {repo_dir, run_dir, camera_to_robot[6], yaw_manual_deg, …} (logs/phone_depth.json)
     POST /api/phone/depth/start, /stop    폰 스테레오 프로그램 켜기·끄기 (venv_ffs, --headless; 끌 때 Ctrl+C 와 같은 SIGINT)
+
+'책상 높이 재기' (phone_table.py: 거치대의 폰이 CAD 자리에 있다고 보고 책상 높이 d 를 잰다 — 보정 없음):
+    POST /api/phone/table_height          본문 = 사진 바이트 (기준 종이가 보이게; 비우면 뎁스만) → {ok, d, source, text, in_range, tilt_deg,
+                                          aruco{…}, depth{…}, diff_mm, warn, image}. 뎁스 = <결과 폴더>/rgbd/rgbd.npz 가 새것일 때만
 """
 import asyncio
 import base64
@@ -30,6 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import phone_depth as DP
 import phone_detect as PD
+import phone_table as PT
 
 HERE = Path(__file__).resolve().parent
 SHEET = HERE / "phone_markers" / "phone_markers.pdf"
@@ -47,9 +52,9 @@ def _load(path):
     return cfg
 
 
-def _run(data, cfg):
+def _jpeg(r):
+    """결과 dict 의 annotated (BGR 그림) 를 image (data URL) 로 바꾼다."""
     import cv2
-    r = PD.detect(data, cfg)
     vis = r.pop("annotated", None)
     if vis is not None:
         k = 1280 / max(vis.shape[:2])
@@ -58,6 +63,27 @@ def _run(data, cfg):
         ok, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
             r["image"] = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
+    return r
+
+
+def _run(data, cfg):
+    return _jpeg(PD.detect(data, cfg))
+
+
+def _table_height(data, depth_cfg):
+    """사진이 있으면 ArUco 로, 폰 뎁스 맵이 새것이면 그것으로도 재서 한 줄로 (phone_table.combine)."""
+    try:
+        import hand_ik
+        PT.D_RANGE = tuple(hand_ik.D_RANGE)     # 계획이 받는 범위 한 곳
+    except Exception:
+        pass
+    aruco = _jpeg(PT.measure_aruco(data)) if data else None
+    depth = PT.measure_depth(DP.run_dir(depth_cfg), time.time())
+    if aruco is not None and not depth["ok"] and (depth.get("missing") or depth.get("stale")):
+        depth = None                            # 사진으로 재는 중이고 폰 뎁스는 안 켜져 있음 — 말할 것 없음
+    r = PT.combine(aruco, depth)
+    if aruco is not None and "image" in aruco:
+        r["image"] = aruco.pop("image")
     return r
 
 
@@ -97,7 +123,7 @@ class Pipeline:
     def command(self, cfg):
         repo = Path(cfg["repo_dir"])
         return [str(repo / "venv_ffs" / "bin" / "python"), "z_phone_stereo.py", "--physical", "2", "5", "--calib-stereo", "calib_phone_pair.json",
-                "--yolo", "seg", "--headless", "--out", DP.run_dir(cfg)]
+                "--yolo", "seg", "--headless", "--out", DP.run_dir(cfg)] + (["--rgbd-viewer"] if cfg.get("save_rgbd") else [])
 
     def missing(self, cfg):
         repo = Path(cfg["repo_dir"])
@@ -189,6 +215,16 @@ def install(app, log_dir):
         cfg_file.parent.mkdir(parents=True, exist_ok=True)
         cfg_file.write_text(json.dumps(cfg))
         return JSONResponse({"ok": True, "cfg": cfg, "msg": "기준 종이 자리 저장"})
+
+    @app.post("/api/phone/table_height")
+    async def _table(req: Request):
+        data = await req.body()
+        if len(data) > MAX_BYTES:
+            return JSONResponse({"ok": False, "reason": "사진이 너무 큼 (25 MB 까지)"}, status_code=400)
+        try:
+            return JSONResponse(await asyncio.to_thread(_table_height, data, DP.load_cfg(Path(log_dir) / "phone_depth.json")))
+        except Exception as e:
+            return JSONResponse({"ok": False, "reason": f"재는 중 오류: {type(e).__name__}: {e}"})
 
     @app.get("/api/phone/sheet")
     def _sheet():

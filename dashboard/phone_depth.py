@@ -18,6 +18,9 @@ import os
 from math import atan2, cos, degrees, dist, hypot, isfinite, radians, sin, sqrt, tan
 
 DEFAULT_C2R = [0.174, -0.1177, -0.012, 135.129, 0.988, 0.992]   # camera.yaml: [tx, ty, tz (m), roll, pitch, yaw (deg)] — 미검증 CAD 값
+# 정우 CAMERA.md (JaxIsaacLab deploy_2026-11-05, CAD 2026-11-12) 와 맞춰 봄 (phone_table.py, test_phone_table.py): 위치 3개는 같은 점
+# (프로파일 중심선 앞 117.7 mm, 어깨 피치축 − 7 mm = roll 축 − 12 mm), 회전은 CAMERA.md 의 '앞을 보고 45° 아래' × 광축 둘레 180°
+# (폰이 뒤집혀 끼워짐) 에서 1.4° 다르다 (IMU 로 잰 값이라). 책상 높이 재기는 phone_table 의 CAD 값을 쓴다.
 DEFAULT_LABELS = ("blob", "kite")     # blob = 책상 평면 위로 튀어나온 덩어리 (lib_blobs), kite = COCO(YOLO)가 큐브를 부른 이름
 DEFAULT_CFG = {
     "repo_dir": os.environ.get("JAX_DEPTH_REPO") or os.path.expanduser("~/Documents/SteroDepthSeg"),
@@ -29,6 +32,7 @@ DEFAULT_CFG = {
     "cube_labels": list(DEFAULT_LABELS),
     "work_x_m": None, "work_y_m": None, "work_z_m": None,   # [min, max] 로봇 좌표, 밖의 후보는 버림
     "yaw_manual_deg": None,           # 숫자면 추정 대신 이 각을 쓴다
+    "save_rgbd": False,               # 폰 프로그램을 --rgbd-viewer 로 켠다 → rgbd/rgbd.npz (5초마다) — 책상 높이 재기(phone_table)가 읽는다
 }
 CUBE_SIDE = 0.05
 Z_TOL = (-0.02, 0.03)   # 큐브 중심 높이가 책상 위 0 ~ 큐브 한 변 (보이는 면의 가운데라 중심~윗면) 에서 이만큼 벗어나면 경고
@@ -279,6 +283,10 @@ def clean_cfg(d):
             if d[k] not in (None, []) and (v is None or v[0] > v[1]):
                 raise ValueError(f"{k}: 비우거나 [min, max]")
             out[k] = list(v) if v else None
+    if "save_rgbd" in d:
+        if not isinstance(d["save_rgbd"], bool):
+            raise ValueError("save_rgbd: true / false")
+        out["save_rgbd"] = d["save_rgbd"]
     if "yaw_manual_deg" in d:
         v = d["yaw_manual_deg"]
         if v in (None, ""):

@@ -28,11 +28,12 @@ def look_at(cam, target):
     return R, -R @ cam
 
 
-def render(cfg, cube, cam, f, cubes=None):
+def render(cfg, cube, cam, f, cubes=None, target=None):
     """cube = (x, y, yaw°) 실좌표. cam = 카메라 자리 (x, y, 책상 위 높이 m).
-    cubes (탑 쌓기 시험): [(마커 ID, x, y, yaw°, 층)] — 주면 cube 대신 이것들을 그린다 (층 0 = 책상 위, 윗면 높이 = (층 + 1) × cube_h)."""
+    cubes (탑 쌓기 시험): [(마커 ID, x, y, yaw°, 층)] — 주면 cube 대신 이것들을 그린다 (층 0 = 책상 위, 윗면 높이 = (층 + 1) × cube_h).
+    target = 카메라가 보는 점 (기본 = 종이 가운데). test_phone_table.py 가 CAD 거치 자세로 그릴 때 쓴다."""
     K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1.0]])
-    R, t = look_at(np.array(cam, float), [cfg["x"], cfg["y"], 0])
+    R, t = look_at(np.array(cam, float), [cfg["x"], cfg["y"], 0] if target is None else target)
     proj = lambda p: (lambda q: q[:2] / q[2])(K @ (R @ np.array(p, float) + t))   # noqa: E731
     img = np.full((H, W, 3), (150, 170, 185), np.uint8)   # 책상 색
     sheet = cv2.cvtColor(np.array(MK.sheet_image(150)), cv2.COLOR_GRAY2BGR)
