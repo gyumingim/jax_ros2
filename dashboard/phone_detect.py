@@ -26,6 +26,8 @@ CUBE_IDS = tuple(range(10, 16))   # 탑 쌓기: 큐브마다 다른 마커 (ID 1
 MAX_LEVELS = 5                    # detect_cubes 가 보는 층 수 (윗면 높이 = 층 × cube_h)
 DEFAULT_CFG = {"x": -0.05, "y": -0.32, "rot_deg": 0.0, "cube_h": 0.05}   # 종이 가운데 (실좌표 m), 종이 돌아간 각, 큐브 높이
 MAX_SIDE = 2000   # 이보다 큰 사진은 줄여서 찾는다
+CAD_LEVEL_FRAC = 0.25   # 기준 종이 없을 때: 큐브 층이 두 층 사이 이 비율 (0 = 딱, 0.5 = 한가운데) 넘게 어중간하면 층 의심 (level_unsure)
+CAD_SIDE_TOL = 0.04     # 기준 종이 없을 때: 마커 한 변이 40 mm 에서 이 비율 넘게 다르면 unsure (종이 있을 때 0.06 보다 좁게)
 
 
 def as_image(image):
@@ -171,9 +173,9 @@ def detect(image_bytes, cfg=None):
 
 
 def _cad(cv2, np, cfg, found, w, h, ids):
-    """기준 종이 없을 때의 카메라 (phone_table.cad_camera) — cfg 에 intr·td 가 없으면 None."""
+    """기준 종이 없을 때의 카메라 (phone_table.cad_camera) — cfg 에 intr·td 가 없으면 None. image_rot_q = 사진 회전 설정 (phone_table.rot_from_c2r)."""
     import phone_table as PT
-    return PT.cad_camera(cv2, np, found, cfg.get("intr"), w, h, cfg.get("td"), ids)
+    return PT.cad_camera(cv2, np, found, cfg.get("intr"), w, h, cfg.get("td"), ids, cfg.get("image_rot_q"))
 
 
 def _finish_one(cv2, out, vis, lw, top, side, cpix):
@@ -243,20 +245,24 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
         cad = _cad(cv2, np, cfg, found, w, h, ids)
         if cad is None:
             return {**out, "reason": "기준 종이가 안 보이고 폰 보정값·책상 높이도 없어 자리를 못 구함"}
+        if "cam" not in cad:
+            return {**out, "reason": "기준 종이가 안 보임 · " + cad["why"]}
         cams, src = [cad["cam"]], "cad"
+        out["image_rot_deg"], out["image_rot_src"] = cad["q"] * 90, cad["rot_src"]
         found = {**found, **cad["und"]}       # 왜곡 푼 꼭짓점으로 쏜다 (그림은 원래 꼭짓점)
     ch = float(cfg["cube_h"])
 
-    def fit(cam):   # 큐브마다 한 변이 가장 잘 맞는 층 → (점수, [(id, 층, 윗면 4x2, 한 변 mm)])
+    def fit(cam):   # 큐브마다 한 변이 가장 잘 맞는 층 → (점수, [(id, 층, 윗면 4x2, 한 변 mm, 층 경계까지 비율)])
         rows, cost = [], 0.0
         for i in seen:
-            best = None
+            es = []
             for lv in range(MAX_LEVELS):
                 top, side = _top(np, cam, found[i], (lv + 1) * ch)
-                e = abs(side - CUBE_MARKER_MM) / CUBE_MARKER_MM
-                if best is None or e < best[0] - 1e-9:
-                    best = (e, lv, top, side)
-            rows.append((i, best[1], best[2], best[3]))
+                es.append((abs(side - CUBE_MARKER_MM) / CUBE_MARKER_MM, lv, top, side))
+            best = min(es, key=lambda r: (r[0], r[1]))
+            e2 = min((r[0] for r in es if abs(r[1] - best[1]) == 1), default=None)
+            frac = best[0] / (best[0] + e2) if e2 is not None and best[0] + e2 > 0 else 0.0   # 0 = 그 층 딱, 0.5 = 두 층 사이
+            rows.append((i, best[1], best[2], best[3], frac))
             cost += best[0] + 0.004 * best[1]   # 거의 같으면 낮은 층
         return cost, rows
     lo = min(c[3] for c in cams)
@@ -268,8 +274,15 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     if alt:
         out["warn"].append("사진이 거의 바로 위에서 찍혀 큐브 높이(층)가 확실하지 않음 — 비스듬히(30° 이상 기울여) 다시 찍기")
         out["level_unsure"] = True
+    # CAD 모드 (기준 종이 없음) 는 초점거리 후보가 하나라 위 판정이 늘 꺼진다 (2026-11-24 검토) → 큐브마다 두 층 사이 어중간함으로 본다:
+    # 마커 한 변이 가장 맞는 층과 이웃 층 사이 CAD_LEVEL_FRAC 넘게 와 있으면 층 의심 (2층 맨 위가 1층으로 읽히면 든 큐브가 기존 큐브를 누른다)
+    if src == "cad":
+        amb = [r[0] for r in rows if r[4] > CAD_LEVEL_FRAC]
+        if amb:
+            out["warn"].append("큐브 " + ", ".join(map(str, amb)) + " 의 층이 확실하지 않음 (기준 종이 없이 두 층 사이로 재짐) — 기준 종이를 같이 보이게 하거나 큐브를 폰 가까이")
+            out["level_unsure"] = True
     out["camera"] = {"src": src, "pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "reproj_px": round(cam[3], 2)}
-    for i, lv, top, side in rows:
+    for i, lv, top, side, frac in rows:
         cx, cy = top.mean(axis=0)
         ex = (top[1] - top[0]) + (top[2] - top[3])
         yaw = (math.degrees(math.atan2(ex[1], ex[0])) + 45.0) % 90.0 - 45.0
@@ -278,7 +291,7 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
         t = _tilt(cv2, np, cam, found[i])
         if t is not None:
             c["tilt_deg"] = round(t, 1)
-        if abs(side - CUBE_MARKER_MM) > 0.06 * CUBE_MARKER_MM:
+        if abs(side - CUBE_MARKER_MM) > (CAD_SIDE_TOL if src == "cad" else 0.06) * CUBE_MARKER_MM or (src == "cad" and frac > CAD_LEVEL_FRAC):
             c["unsure"] = True
             out["warn"].append(f"큐브 {i}: 마커 한 변이 {side:.1f} mm 로 재짐 (원래 {CUBE_MARKER_MM:.0f}) — 높이·자리가 틀릴 수 있다")
         out["cubes"].append(c)

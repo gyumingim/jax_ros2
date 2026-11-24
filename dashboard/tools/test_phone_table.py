@@ -89,6 +89,66 @@ r = PT.measure_aruco(np.full((600, 800, 3), 128, np.uint8))
 check("마커 없는 사진 → 이유", not r["ok"] and "마커" in r["reason"])
 
 
+# ---- 2b. 큐브 윗면 마커 (기준 종이 없이) — 2026-11-24 검토: 사진 회전 0°/180° 거울, 가장 낮은 마커 = 1층 가정, 보정 비율 ----
+def cube_photo(d, cubes, f=1250, rot180=False):
+    """높이 d 인 책상 위 큐브 [(ID, 시선이 책상과 만나는 점에서 옆 m, 앞뒤 m, yaw°, 층)] 만 (종이는 화면 밖) 그린 CAD 자세 사진."""
+    h = d + PT.CAM_POS[2]
+    cam = (PT.CAM_POS[0], PT.CAM_POS[1], h)
+    hit = (cam[0], cam[1] - h, 0.0)
+    cfg = {**PD.DEFAULT_CFG, "x": 5.0, "y": 5.0}
+    img = TD.render(cfg, None, cam, f, cubes=[(i, hit[0] + dx, hit[1] + dy, yaw, lv) for i, dx, dy, yaw, lv in cubes], target=hit)
+    if rot180:
+        img = cv2.rotate(img, cv2.ROTATE_180)
+    return cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1], cv2.IMREAD_COLOR), hit
+
+
+INTR = {"K": [[1250.0, 0, TD.W / 2], [0, 1250.0, TD.H / 2], [0, 0, 1]], "dist": [], "size": [TD.W, TD.H], "file": "test"}
+SPREAD = [(10, -0.12, 0.06, 10.0, 0), (11, 0.10, 0.05, -20.0, 0), (12, 0.0, -0.08, 5.0, 0)]
+check("사진 회전 설정: 기본 camera_to_robot (폰 뒤집힘) → 180°", PT.rot_from_c2r(DP.DEFAULT_C2R) == 2 and PT.rot_from_c2r([0, 0, 0, 0, 0, 0]) is None)
+for rot in (False, True):
+    PT.rot_reset()
+    img, _ = cube_photo(0.4775, SPREAD, rot180=rot)
+    r = PT.measure_cubes(img, INTR, q_cfg=2 if rot else 0)
+    c = PT.combine(None, None, r, 0.4775) if r["ok"] else {}
+    check(f"큐브 마커 3개 퍼짐 (사진 {'180°' if rot else '0°'}, 설정 맞음) → d 5 mm 안, 넣기 됨", r["ok"] and abs(r["d"] - 0.4775) <= 0.005 and c.get("fill_ok"),
+          f"d {r.get('d')} 사진 회전 {r.get('image_rot_deg')} ({r.get('image_rot_src')}) · {r.get('reason') or ''}")
+    r = PT.measure_cubes(img, INTR)
+    check("…설정·잠금 없음 → 틀린 값 안 줌", (not r["ok"] and "180" in r["reason"]) or (r["ok"] and abs(r["d"] - 0.4775) <= 0.005), r.get("reason") or f"d {r.get('d')}")
+PT.rot_reset()
+img, _ = cube_photo(0.4775, [(10, 0.0, 0.0, 0.0, 0)])
+r = PT.measure_cubes(img, INTR)
+check("화면 가운데 마커 하나, 사진 회전 안 잠김 → 틀린 값 안 줌 (못 가리면 거절)", (not r["ok"] and "180" in r["reason"]) or (r["ok"] and abs(r["d"] - 0.4775) <= 0.006),
+      r.get("reason") or f"d {r.get('d')}")
+PT.measure_aruco(photo(0.4775))                 # 기준 종이로 한 번 잼 → 사진 회전 잠김
+lk = PT.rot_locked()
+r = PT.measure_cubes(img, INTR)
+check("기준 종이로 잠근 뒤 → 가운데 마커 하나도 잼 (잠긴 회전)", lk is not None and lk[1] == "paper" and r["ok"] and abs(r["d"] - 0.4775) <= 0.006 and r["image_rot_src"] == "lock",
+      f"잠금 {lk} · d {r.get('d')} · {r.get('reason') or ''}")
+img, _ = cube_photo(0.4775, [(10, -0.10, 0.04, 0.0, 1), (11, -0.10, 0.04, 0.0, 0)])   # 2층 탑만 (아래 큐브는 가려짐)
+r = PT.measure_cubes(img, INTR)
+c = PT.combine(None, None, r, 0.4775)
+check("탑만 보임 (2층) → −5 cm 라 넣기 막음", r["ok"] and not c["fill_ok"], f"d {r.get('d')} · {c.get('reason')}")
+img, _ = cube_photo(0.4775, [(10, -0.10, 0.04, 0.0, -1), (11, 0.08, 0.03, 0.0, -1)])   # 큐브 없이 마커만 책상에 누움 → +5 cm
+r = PT.measure_cubes(img, INTR)
+c = PT.combine(None, None, r, 0.4775)
+check("책상에 누운 마커 → 값 +5 cm 라 d 칸과 2 cm 넘게 달라 넣기 막음", r["ok"] and abs(r["d"] - 0.5275) < 0.008 and c["in_range"] and not c["fill_ok"] and "1층" in c["reason"],
+      f"d {r.get('d')} · {c.get('reason')}")
+c = PT.combine(None, {"ok": True, "d": r["d"] + 0.005, "tilt_deg": 0.0, "warn": []}, r, 0.4775)
+check("…뎁스가 큐브 마커 값과 2 cm 안이면 넣기 됨", c["fill_ok"] and c["source"] == "cubes", c.get("reason"))
+c = PT.combine(None, None, {**r, "d_normal": r["d"] + 0.03}, r["d"])
+check("마커 법선 값과 3 cm 다름 → 넣기 막음", not c["fill_ok"] and "법선" in c["reason"], c.get("reason"))
+r = PT.measure_cubes(cube_photo(0.4775, SPREAD)[0], {**INTR, "size": [TD.W, TD.W]})
+check("보정 image_size 비율이 프레임과 다름 → 보정값 안 씀 (거절)", not r["ok"] and "가로세로" in r["reason"], r.get("reason"))
+for td, want_unsure in ((0.4775, False), (0.4775 + 0.025, True)):
+    img, hit = cube_photo(0.4775, [(10, -0.10, 0.04, 0.0, 0), (11, -0.10, 0.04, 0.0, 1), (12, 0.08, 0.0, 0.0, 0)])
+    m = PD.detect_cubes(img, {**PD.DEFAULT_CFG, "x": 5.0, "y": 5.0, "intr": INTR, "td": td, "image_rot_q": 0})
+    lv = {c["id"]: c["level"] for c in m.get("cubes", [])}
+    good = m["ok"] and m["camera"]["src"] == "cad" and bool(m.get("level_unsure")) == want_unsure and (want_unsure or lv == {11: 1, 12: 0})
+    check(f"종이 없음 (CAD) 2층 탑, 책상 높이 칸 {'맞음' if not want_unsure else '+2.5 cm (반 층) 틀림'} → 층 의심 {want_unsure}", good,
+          f"층 {lv} · level_unsure {m.get('level_unsure')} · unsure {[c['id'] for c in m.get('cubes', []) if c.get('unsure')]} · {m.get('reason') or ''}")
+PT.rot_reset()
+
+
 # ---- 3. 뎁스 ----
 def cloud(d, pitch=45.0, W=320, H=240, f=250.0, noise=0.0015, flip=True, seed=1):
     """CAD 자세의 카메라가 본 책상 (z = −d) + 5 cm 큐브 2개 + 잡음 → (H, W, 3) 광학 좌표 점, valid. flip = 폰이 뒤집혀 끼워짐 (광축 둘레 180°)."""

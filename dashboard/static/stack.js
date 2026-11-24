@@ -239,7 +239,7 @@
     let r;
     try {
       r = await (await fetch("/api/stack/steps", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cubes: ST.det.cubes, base: ch.base, order: ch.order }) })).json();
+        body: JSON.stringify({ cubes: ST.det.cubes, base: ch.base, order: ch.order, level_unsure: !!(ST.all && ST.all.level_unsure) }) })).json();
     } catch (e) { r = { ok: false, text: "서버 연결 실패" }; }
     if (seq !== planSeq) return;
     ST.rows = r.ok ? r.steps : null;
@@ -254,6 +254,10 @@
     if (pb.running) return `재생 중 ${pb.frame}/${pb.frames - 1}`;
     if (ST.going) return "계획 중…";
     if (!LQ.r || LQ.r.stale) return "영상 없음";
+    if (LQ.r.td_mismatch) return "책상 높이가 이 화면 d 칸과 다르게 계산된 결과 — 다시 계산 중";
+    if (LQ.r.level_unsure) return "큐브 층이 확실하지 않음 (기준 종이를 같이 보이게 하거나 큐브를 폰 가까이)";
+    const us = LQ.cubes().filter((c) => c.unsure);   // 집을 큐브·탑·피할 큐브 중 하나라도 층·자리가 확실하지 않으면 (지금 프레임)
+    if (us.length) return `큐브 ${us.map((c) => c.id).join(", ")} 의 층·자리가 확실하지 않음 (마커 한 변이 안 맞음)`;
     const p = S.pose || {};
     if (!AK4.every((n) => p[n]) || ARM7.some((n) => p[n] && Math.abs(p[n].deg) >= 5)) return "팔이 HOME 이 아님 (AK45 4개 피드백 + 보낸 서보 값이 0° ±5°)";   // 서보는 보낸 값만 안다 (아직 안 보냈으면 없음)
     if (LQ.r.mode !== "virtual" && (LQ.r.t_frame || 0) <= ST.endT + 0.3) return "재생이 끝난 뒤의 새 프레임을 기다림";

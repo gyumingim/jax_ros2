@@ -73,6 +73,14 @@ def camera(tmp):
     check("휴대폰 탭 pick = ArUco 10", bool(p.get("ok")) and p.get("used") == "aruco" and abs(p["cube"]["x"] - 0.02) < 0.01, p.get("text") or p.get("reason"))
     p12 = L.cubes(None, 12)["pick"]
     check("pick=12 (2층) → 막음 '쌓인 큐브'", bool(p12.get("ok")) and p12.get("blocked"), p12.get("block"))
+    r = L.cubes(0.4775, None)
+    check("응답 table.d = 계산에 쓴 d", r["table"]["d"] == 0.4775 and not r.get("td_mismatch"), str(r["table"]))
+    L.LIVE.td_done = L.LIVE.td   # 스레드가 다시 계산하기 전 (프레임이 안 바뀌면 다음 _step 에서 다시) — 그 사이 다른 d 로 부름
+    with L.LIVE.lock:
+        L.LIVE.res = dict(L.LIVE.res, td=0.50)
+    r = L.cubes(0.4775, 10)
+    check("다른 d (0.50) 로 계산된 결과 → 이 화면 (0.4775) 에는 안 줌 (큐브·pick 없음)", not r["ok"] and r.get("td_mismatch") and not r["cubes"] and not r["pick"]["ok"]
+          and r["table"]["d"] == 0.50, r.get("reason"))
 
     t0, n0 = time.time(), L.LIVE.n
     while time.time() - t0 < 2.0:
@@ -146,6 +154,12 @@ def scene(tmp):
     check("steps: 순서의 10 이 없고 12 만 보임 → '2층: 보이는 큐브 12번'", st(r) == ["done", "next"] and r["steps"][1]["text"] == "2층: 보이는 큐브 12번 옮기기", r["text"])
     r = SA.steps(one, base, [])
     check("steps: 순서 비움 → 보이는 큐브 아무거나, 3층까지", st(r) == ["done", "next", "wait"] and r["steps"][1]["text"] == "2층: 보이는 큐브 12번 옮기기", r["text"])
+    r = SA.steps(cubes[:2] + [dict(cubes[2], unsure=True)], base, order)
+    check("steps: 집을 큐브가 unsure → 3층 막음", st(r) == ["done", "done", "blocked"] and "확실하지" in r["text"], r["text"])
+    r = SA.steps([cubes[0], dict(cubes[1], unsure=True), cubes[2]], base, order)
+    check("steps: 탑 맨 위가 unsure → 막음", "next" not in st(r) and "확실하지" in r["text"], r["text"])
+    r = SA.steps(cubes, base, order, None, True)
+    check("steps: level_unsure 프레임 → 막음", "next" not in st(r) and "층이 확실하지" in r["text"], r["text"])
     r = SA.steps([cubes[1]], base, order, {"0": 11})
     check("steps: 탑만 보이고 책상 위 큐브 없음 → 3층 막음 (이유), 1층 번호는 기록에서", st(r) == ["done", "done", "blocked"] and r["steps"][0]["id"] == 11, r["text"])
 

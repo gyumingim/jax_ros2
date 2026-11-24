@@ -193,7 +193,8 @@ async function phTable() {
   phShow(PH.thRes, "책상 높이 재는 중…", "run");
   let r;
   try {
-    r = await (await fetch("/api/phone/table_height", { method: "POST" })).json();
+    r = await (await fetch("/api/phone/table_height", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ d: tableDNum() }) })).json();   // 지금 d 칸 — 큐브 마커 값은 이것·종이·뎁스 중 하나와 2 cm 안이어야 넣는다
   } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
   PH.thBusy = false; PH.bTh.disabled = false;
   PH.thImg.hidden = !r.image;
@@ -211,16 +212,16 @@ async function phTable() {
       : cb ? `큐브 마커 ${cb.n}개 (${cb.ids.join(", ")}) · 한 변 ${cb.marker_px} px · 흔들림 ± ${cb.d_pm_mm.toFixed(0)} mm · 마커 법선으로 ${cb.d_normal.toFixed(3)} m`
       : `평면 점 ${Math.round(p.inlier * 100)} % · 잔차 ${p.rms_mm} mm`,
     `지금 칸 ${now.toFixed(4)} m 와 ${Math.round((r.d - now) * 1000)} mm 차이`];
-  if (!r.in_range) note.unshift(r.reason);
+  if (!r.fill_ok && r.reason) note.unshift(r.reason);
   if (warn) note.push(warn);
   PH.th = r;
-  phShow(PH.thRes, el("span", { class: "ph-xy" }, text), !r.in_range ? "bad" : warn ? "warn" : "ok", note.join(" · "));
-  PH.bThFill.disabled = !r.in_range;
+  phShow(PH.thRes, el("span", { class: "ph-xy" }, text), !r.fill_ok ? "bad" : warn ? "warn" : "ok", note.join(" · "));
+  PH.bThFill.disabled = !r.fill_ok;   // 범위 밖 · 확인 안 된 큐브 마커 값이면 서버가 fill_ok false
 }
 
 function phTableFill() {
   const f = M.c && M.c.fields.d;
-  if (!f || !PH.th || !PH.th.in_range) return;
+  if (!f || !PH.th || !PH.th.fill_ok) return;
   f.value = PH.th.d.toFixed(3);
   f.dispatchEvent(new Event("input", { bubbles: true }));   // 지도·집을 수 있는 곳이 새 높이로 다시 그려진다 (app.js 의 칸 처리 그대로)
   PH.bThFill.disabled = true;

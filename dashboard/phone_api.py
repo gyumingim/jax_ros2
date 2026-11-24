@@ -18,9 +18,9 @@ server.py 는 install(app, log_dir) 한 줄만 가진다. 계획·재생은 화�
                                           → config 의 calib {file, model, note}
 
 '책상 높이 재기' (phone_table.py: 거치대의 폰이 CAD 자리에 있다고 보고 책상 높이 d 를 잰다 — 보정 없음):
-    POST /api/phone/table_height          본문 없음. 지금 프레임의 큐브 윗면 마커 (폰 보정값 + CAD 자세), 기준 종이 (있으면 — 이것을 먼저 쓴다),
+    POST /api/phone/table_height          본문 {d: 지금 d 칸} (없어도 됨). 지금 프레임의 큐브 윗면 마커 (폰 보정값 + CAD 자세), 기준 종이 (있으면 — 이것을 먼저 쓴다),
                                           뎁스 맵 (<결과 폴더>/rgbd/rgbd.npz 가 새것일 때) 으로
-                                          → {ok, d, source 'aruco'|'cubes'|'depth', text, in_range, tilt_deg, aruco{…}, cubes{…}, depth{…}, diffs, warn, image}
+                                          → {ok, d, source 'aruco'|'cubes'|'depth', text, in_range, fill_ok ('넣기' 버튼), tilt_deg, aruco{…}, cubes{…}, depth{…}, diffs, warn, image}
 """
 import asyncio
 import base64
@@ -48,7 +48,9 @@ SHEET = HERE / "phone_markers" / "phone_markers.pdf"
 # 다른 폰의 보정으로 켜면 그 프로그램이 'Phone rectification failed' 로 멈춘다 (dy 20 px 넘음).
 CALIB_DEFAULT = "calib_phone_pair.json"
 CALIB_BY_MODEL = {"SM-S921N": "calib_phone_pair_s24.json"}     # Galaxy S24 — 2026-09-22 보드 캘리 (SteroDepthSeg 96fad02 에서 꺼냄)
-_MODEL = {"t": 0.0, "v": None}
+CALIB_MODELS = {"SM-S931N": CALIB_DEFAULT, **CALIB_BY_MODEL}   # 큐브 마커 재기 (초점거리) 에 보정값을 믿는 모델 — 그 밖이면 보정 없음 (intrinsics None)
+MODEL_KEEP_S = 60.0         # adb 가 잠깐 안 되면 이만큼 마지막 모델을 그대로
+_MODEL = {"t": 0.0, "v": None, "ok_t": 0.0, "last": None}
 LIMITS = {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "rot_deg": (-180.0, 180.0), "cube_h": (0.0, 0.3)}
 
 
@@ -63,7 +65,12 @@ def phone_model():
             v = r.stdout.strip().splitlines()[-1].strip()
     except (OSError, subprocess.SubprocessError):
         pass
-    _MODEL.update(t=time.monotonic(), v=v)
+    now = time.monotonic()
+    if v is not None:
+        _MODEL.update(ok_t=now, last=v)
+    elif _MODEL["last"] is not None and now - _MODEL["ok_t"] < MODEL_KEEP_S:
+        v = _MODEL["last"]
+    _MODEL.update(t=now, v=v)
     return v
 
 
@@ -84,17 +91,26 @@ _INTR = {"t": 0.0, "key": None, "v": None}
 
 
 def intrinsics(dcfg):
-    """붙은 폰의 왼쪽 렌즈 보정값 {K, dist, size, file} (calib_choice 로 고른 파일) 또는 None. 30초 캐시 (실시간 인식이 프레임마다 부른다)."""
+    """붙은 폰의 왼쪽 렌즈 보정값 {K, dist, size, file} (calib_choice 로 고른 파일) 또는 None. 30초 캐시 (실시간 인식이 프레임마다 부른다).
+    2026-11-24 검토: 모르는 폰 (CALIB_MODELS 에 없음 · adb 로 안 보임) 이나 그 모델 파일이 없어 기본으로 떨어진 경우는 None
+    — 다른 폰의 초점거리로 큐브 마커 거리를 조용히 틀리게 재지 않게 (큐브 마커 재기·종이 없는 큐브 자리 = '보정 없음'). 프레임 비율 검사는 phone_table.scaled_K."""
     key = dcfg.get("repo_dir")
     if _INTR["key"] == key and time.monotonic() - _INTR["t"] < 30.0:
         return _INTR["v"]
     v = None
     try:
-        v = PT.load_intrinsics(str(Path(dcfg["repo_dir"]) / calib_choice(dcfg)["file"]))
+        ch = calib_choice(dcfg)
+        if ch["model"] in CALIB_MODELS and ch["file"] == CALIB_MODELS[ch["model"]]:
+            v = PT.load_intrinsics(str(Path(dcfg["repo_dir"]) / ch["file"]))
     except Exception:
         pass
     _INTR.update(t=time.monotonic(), key=key, v=v)
     return v
+
+
+def image_rot_q(dcfg):
+    """큐브 마커의 사진 회전 설정 (phone_table.choose_rot) = 폰 뎁스 설정 camera_to_robot 회전에 가까운 q (거치 고정, 기본 뒤집힘 180°) 또는 None."""
+    return PT.rot_from_c2r(dcfg.get("camera_to_robot") or [])
 
 
 def _load(path):
@@ -121,7 +137,7 @@ def _jpeg(r):
     return r
 
 
-def _table_height(image, depth_cfg, cam_cfg=None):
+def _table_height(image, depth_cfg, cam_cfg=None, d_now=None):
     """프레임 (BGR 배열 | None) 의 큐브 윗면 마커·기준 종이로, 폰 뎁스 맵이 새것이면 그것으로도 재서 한 줄로 (phone_table.combine).
     기준 종이는 없어도 된다 (2026-11-24 사용자: 큐브 윗면 마커로 책상 높이도)."""
     try:
@@ -132,7 +148,7 @@ def _table_height(image, depth_cfg, cam_cfg=None):
     cam_cfg = cam_cfg or dict(PD.DEFAULT_CFG)
     intr = intrinsics(depth_cfg)
     aruco = _jpeg(PT.measure_aruco(image, intr)) if image is not None else None
-    cubes = _jpeg(PT.measure_cubes(image, intr, cam_cfg.get("cube_h"))) if image is not None else None
+    cubes = _jpeg(PT.measure_cubes(image, intr, cam_cfg.get("cube_h"), image_rot_q(depth_cfg))) if image is not None else None
     depth = PT.measure_depth(DP.run_dir(depth_cfg), time.time())
     if image is None and depth.get("missing"):
         return {"ok": False, "warn": [], "reason": "폰 프로그램의 새 프레임이 없음 — 폰 프로그램을 켜고 (거치한 폰이 책상 위 큐브를 보게) 다시"}
@@ -141,7 +157,7 @@ def _table_height(image, depth_cfg, cam_cfg=None):
         depth = None                            # 프레임으로 쟀고 뎁스 맵은 안 켜져 있음 — 말할 것 없음
     if aruco is not None and not aruco["ok"] and not aruco.get("refs"):
         aruco = None                            # 기준 종이가 아예 없음 — 없어도 된다, 말하지 않는다
-    r = PT.combine(aruco, depth, cubes)
+    r = PT.combine(aruco, depth, cubes, d_now)
     main = {"aruco": aruco, "cubes": cubes}.get(r.get("source"))
     pic = next((x["image"] for x in (main, cubes, aruco) if x and "image" in x), None)     # 쓴 것의 그림 먼저
     for x in (aruco, cubes):
@@ -285,15 +301,20 @@ def install(app, log_dir, mode=lambda: "direct"):
         return JSONResponse({"ok": True, "cfg": cfg, "msg": "기준 종이 자리 저장"})
 
     @app.post("/api/phone/table_height")
-    async def _table():
+    async def _table(req: Request):
+        try:     # 본문 {d: 화면의 지금 d 칸} (없어도 됨 — 큐브 마커 값 확인에 쓴다)
+            b = await req.json()
+            d_now = float(b.get("d")) if isinstance(b, dict) and b.get("d") is not None else None
+        except Exception:
+            d_now = None
         if mode() == "virtual":
             return JSONResponse({"ok": False, "reason": "가상 모드에서는 카메라를 안 쓴다 — 책상 높이는 역기구학 탭 칸 그대로"})
         try:
             dcfg = DP.load_cfg(Path(log_dir) / "phone_depth.json")
             frame = DP.read_frame(dcfg, time.time())[0]
-            r = await asyncio.to_thread(_table_height, frame, dcfg, _load(cfg_file))
+            r = await asyncio.to_thread(_table_height, frame, dcfg, _load(cfg_file), d_now)
             if r.get("ok"):
-                LAST_TABLE["r"] = {"d": r.get("d"), "source": r.get("source"), "in_range": r.get("in_range"), "t": time.time()}
+                LAST_TABLE["r"] = {"d": r.get("d"), "source": r.get("source"), "in_range": r.get("in_range"), "fill_ok": r.get("fill_ok"), "t": time.time()}
             return JSONResponse(r)
         except Exception as e:
             return JSONResponse({"ok": False, "reason": f"재는 중 오류: {type(e).__name__}: {e}"})

@@ -5,7 +5,7 @@
 server.py 는 install(app, log_dir) 한 줄만 가진다.
 
     GET  /api/stack/last     마지막 detect_frame 결과 {ok, cubes: [{id, x, y, yaw_deg, level, top_cm}], refs, warn, image, t}. 없으면 {ok: false, none: true}
-    POST /api/stack/steps    {cubes, base: {x, y, yaw_deg}, order: [id…]} → 걸음 목록 + 다음 걸음 (아래 steps, 상태 없음)
+    POST /api/stack/steps    {cubes, base: {x, y, yaw_deg}, order: [id…], level_unsure} → 걸음 목록 + 다음 걸음 (아래 steps, 상태 없음)
     GET/POST /api/stack/plan {order, base} — 화면의 순서·탑 자리 (logs/stack_plan.json, 페이지·서버를 다시 켜도 남음)
     POST /api/stack/placed   {level, id} — 이 화면이 놓은 기록 (힌트만, steps 의 placed)
     POST /api/stack/spot     {x, y, yaw_deg, levels, d} → 그 자리에 levels 층까지 놓을 수 있나 (계획기 point_check, 손 수직) {ok, text, levels: [{level, ok, why}]}
@@ -132,7 +132,7 @@ def _check_cube(c, ref, tol, what):
     return None
 
 
-def steps(cubes, base, order, placed=None):
+def steps(cubes, base, order, placed=None, level_unsure=False):
     """지금 인식 (cubes) + 탑 자리 (base) + 순서 (order, 비어도 됨) → 층마다 한 걸음. 상태를 안 가진다 (2026-11-24):
     누를 때마다 지금 보이는 것만으로 판단하므로 한 걸음 하고 다른 일을 하다 와도, 페이지·서버를 다시 켜도 된다.
     책상 위에 큐브가 하나씩만 있어도 된다 (사용자: 여러 개면 손이 부딪힌다) — 순서의 다른 큐브가 안 보여도 막지 않는다.
@@ -142,6 +142,8 @@ def steps(cubes, base, order, placed=None):
     다른 아무 큐브 ('보이는 큐브 N번', 순서를 비우면 늘 이것). placed = {층: 큐브 ID} 는 이 화면이 놓았던 기록 (힌트) — 가려진 층의 번호 표시와
     '그 큐브가 다른 층에 보임' 판정에만 쓴다. 탑 속 보이는 큐브: 아래 큐브 (안 보이면 탑 자리, 허용은 층마다 OFF_TOL 씩) 에서 2 cm 넘게 어긋남 ·
     15° 넘게 기울어짐 · 기록과 다른 층 → 문제 → 다음 걸음을 막는다 (이유).
+    층·자리가 확실하지 않은 인식 (2026-11-24 검토: 2층 맨 위가 1층으로 읽히면 든 큐브가 기존 큐브를 누른다): level_unsure (프레임 전체) 이거나
+    집을 큐브·탑 속 큐브가 unsure 면 다음 걸음을 막는다 (state blocked).
     돌려주는 것: {ok, text, bad?, done?, height, top, warn, steps: [{n, id, level, state done|bad|next|blocked|wait, text, why}], next: {n, cube, level, target, obstacles, params}}"""
     out = {"ok": False, "steps": [], "warn": [], "next": None, "height": 0, "top": None}
     try:
@@ -149,7 +151,7 @@ def steps(cubes, base, order, placed=None):
         order = [int(i) for i in (order or [])]
         hint = {int(k): int(v) for k, v in (placed or {}).items()}
         cs = [{"id": int(c["id"]), "x": float(c["x"]), "y": float(c["y"]), "yaw_deg": float(c["yaw_deg"]), "level": int(c["level"]),
-               "tilt_deg": c.get("tilt_deg")} for c in cubes if c.get("id") is not None]
+               "tilt_deg": c.get("tilt_deg"), "unsure": bool(c.get("unsure"))} for c in cubes if c.get("id") is not None]
         if not all(math.isfinite(v) for v in (bx, by, byaw)) or len(order) != len(set(order)) or len(order) > 12:
             raise ValueError
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -213,6 +215,12 @@ def steps(cubes, base, order, placed=None):
         o = next((q for q in odd if q["id"] == r["id"]), None)
         if o:
             why = f"큐브 {o['id']} 가 다른 큐브 위에 있음 ({o['level'] + 1}층) — 책상에 내려놓기"
+    if not why and level_unsure:
+        why = "큐브 층이 확실하지 않은 프레임 — 기준 종이를 같이 보이게 하거나 큐브를 폰 가까이 (층이 틀리면 든 큐브가 탑을 누른다)"
+    if not why:
+        us = [q for q in tower + ([c] if c is not None else []) if q["unsure"]]
+        if us:
+            why = "큐브 " + ", ".join(str(q["id"]) for q in us) + " 의 층·자리가 확실하지 않음 (마커 한 변이 안 맞음) — 큐브를 반듯이·폰 가까이 두고 다시"
     if not why and over:
         why = f"탑 자리가 큐브 {', '.join(str(o['id']) for o in over)} 와 겹침 — 8 cm 넘게 띄우거나, 그 큐브 위에 쌓으려면 지도에서 그 큐브를 누름"
     if why:
@@ -285,7 +293,7 @@ def install(app, log_dir):
     async def _steps(req: Request):
         try:
             b = await req.json()
-            return JSONResponse(steps(b.get("cubes") or [], b.get("base") or {}, b.get("order") or [], _saved().get("placed")))
+            return JSONResponse(steps(b.get("cubes") or [], b.get("base") or {}, b.get("order") or [], _saved().get("placed"), bool(b.get("level_unsure"))))
         except Exception:
             return JSONResponse({"ok": False, "text": "요청 값이 틀림"}, status_code=400)
 

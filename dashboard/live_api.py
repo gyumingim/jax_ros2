@@ -47,6 +47,7 @@ CUBE_IDS = tuple(range(10, 16))
 STACK_R = 0.03           # 가상 장면: 이 안(m)이면 같은 자리 (그 위에 쌓임)
 JITTER_M, JITTER_DEG = 0.01, 5.0
 TD_DEFAULT = 0.4775
+TD_MATCH_M = 0.0005      # 계산에 쓴 d 가 화면의 d 와 이보다 다르면 그 결과를 안 준다
 
 
 def fold(deg):
@@ -277,7 +278,8 @@ class Live:
         import phone_fuse as PF
         td = self.td
         # 기준 종이가 안 보이면 CAD 거치 자세 + 폰 보정값 + 책상 높이 (화면의 d 칸) 로 큐브 자리 (phone_detect)
-        cam_cfg = {**phone_api._load(self.log_dir / "phone_cam.json"), "intr": phone_api.intrinsics(dcfg), "td": td}
+        cam_cfg = {**phone_api._load(self.log_dir / "phone_cam.json"), "intr": phone_api.intrinsics(dcfg), "td": td,
+                   "image_rot_q": phone_api.image_rot_q(dcfg)}
         now = time.monotonic()
         dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None)
         if dep.get("ok"):
@@ -314,7 +316,8 @@ class Live:
                 self.n += 1
             self.res = {"t_frame": t, "t_done": time.time(), "src": src, "frame_n": self.n, "cubes": cubes,
                         "refs": multi.get("refs", []), "warn": multi.get("warn", []), "reason": None if multi.get("ok") else multi.get("reason"),
-                        "level_unsure": bool(multi.get("level_unsure")), "fused": fused, "depth_age_s": dep.get("age_s")}
+                        "level_unsure": bool(multi.get("level_unsure")), "fused": fused, "depth_age_s": dep.get("age_s"), "td": td,
+                        "camera_src": (multi.get("camera") or {}).get("src")}
             self.jpeg = jpeg
             self.td_done = td
 
@@ -343,12 +346,19 @@ def _pick_camera(res, stale, pick_id):
             return {"ok": False, "warn": [], "note": [], "sources": [], "reason": f"큐브 {pick_id} 가 지금 프레임에 안 보임"}
         out = {"ok": True, "id": pick_id, "cube": {"x": c["x"], "y": c["y"], "yaw_deg": c["yaw_deg"]}, "used": "aruco", "sources": ["aruco"],
                "text": f"출처: ArUco (큐브 {pick_id})", "blocked": False, "block": "", "warn": list(res.get("warn") or []), "note": [], "check": None}
-        if c["level"] > 0:
+        if c.get("unsure") or res.get("level_unsure"):   # 층·자리가 확실하지 않음 (쌓인 큐브가 책상 위로 읽혔을 수 있다)
+            out.update(blocked=True, block="층이 확실하지 않음")
+            out["warn"].insert(0, f"큐브 {pick_id} 의 층·자리가 확실하지 않아 막음 — 기준 종이를 같이 보이게 하거나 큐브를 폰 가까이")
+        elif c["level"] > 0:
             out.update(blocked=True, block="쌓인 큐브")
             out["warn"].insert(0, f"큐브 {pick_id} 는 {c['level'] + 1}층 — 휴대폰 탭은 책상 위 큐브만 집는다 (탑 쌓기 탭)")
         return out
     f = dict(res["fused"])
     f["id"] = 10 if f.get("used") == "aruco" else None
+    c10 = next((c for c in res["cubes"] if c.get("id") == 10), None)
+    if f.get("ok") and not f.get("blocked") and c10 and (res.get("level_unsure") or c10.get("unsure") or c10["level"] > 0):
+        f.update(blocked=True, block="쌓인 큐브" if c10["level"] > 0 and not c10.get("unsure") and not res.get("level_unsure") else "층이 확실하지 않음",
+                 warn=["큐브 10 이 쌓여 있거나 층이 확실하지 않아 막음 (휴대폰 탭은 책상 위 큐브만)"] + list(f.get("warn") or []))
     return f
 
 
@@ -379,11 +389,13 @@ SCENE = None
 def cubes(td=None, pick_id=None):
     """GET /api/live/cubes 의 몸통 (다른 모듈도 부른다: rl_api 의 실물 재생 전 확인)."""
     import phone_api
-    if td is not None and math.isfinite(td) and 0.2 <= td <= 0.8:
+    if td is not None and not (math.isfinite(td) and 0.2 <= td <= 0.8):
+        td = None
+    if td is not None:
         LIVE.td = td
     pipe = phone_api.PIPE
     measured = phone_api.LAST_TABLE.get("r")
-    table = {"d": LIVE.td, "measured": measured}
+    table = {"d": LIVE.td, "measured": measured}      # 카메라 모드면 아래에서 '이 결과를 계산할 때 쓴 d' 로 바꾼다
     if LIVE.mode() == "virtual":
         cs, s = SCENE.cubes_view()
         return {"ok": True, "mode": "virtual", "stale": False, "reason": None, "age_s": 0.0, "src": "virtual", "rate_hz": None,
@@ -401,12 +413,24 @@ def cubes(td=None, pick_id=None):
            "src": res.get("src") if res else None, "rate_hz": LIVE.rate(), "t_frame": res.get("t_frame") if res else None,
            "frame_n": res.get("frame_n") if res else None, "table": table, "pipeline": pl, "scene": None,
            "error": (res or {}).get("error")}
+    # 책상 높이 d 는 서버에 하나 (LIVE.td) 라 마지막에 부른 화면의 d 로 다시 계산된다 (2026-11-24 검토) — 결과에는 계산에 쓴 d 를 싣고,
+    # 이 화면의 d 와 다르면 (다른 기기가 다른 d 로 부름 · 바꾼 직후 아직 다시 계산 전) 그 결과를 주지 않는다 (큐브 x·y·층이 d 에 달림)
+    td_used = res.get("td") if res else None
+    table["d"] = td_used
+    mismatch = td is not None and td_used is not None and abs(td_used - td) > TD_MATCH_M
     if stale:
         out.update(cubes=[], refs=[], warn=[], reason="영상 없음" + (f" — 마지막 프레임 {age:.1f}초 전" if age is not None else
                                                                  " — 폰 프로그램의 프레임이 아직 없음 (폰 프로그램 켜기)"))
+    elif mismatch:
+        out.update(ok=False, td_mismatch=True, cubes=[], refs=[], warn=[],
+                   reason=f"책상 높이가 이 화면 d {td:.4f} m 와 다른 {td_used:.4f} m 로 계산된 결과 — 다시 계산 중 "
+                          "(계속 이러면 다른 기기·탭이 다른 d 칸으로 보고 있다: d 칸을 맞추기)")
     else:
         out.update(cubes=[{**c, "age_s": round(age, 2)} for c in res["cubes"]], refs=res["refs"], warn=res["warn"], reason=res["reason"],
                    level_unsure=res["level_unsure"], depth_age_s=res.get("depth_age_s"))
+    if mismatch:
+        out["pick"] = {"ok": False, "stale": False, "warn": [], "note": [], "sources": [], "reason": out["reason"]}
+        return out
     out["pick"] = _pick_camera(res, stale, pick_id)
     if res is not None and not stale:
         out["pick"]["depth"] = res["fused"].get("depth")
