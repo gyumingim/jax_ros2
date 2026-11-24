@@ -486,7 +486,8 @@ class VirtualArm:
         self.diag_t = t
 
     # ------------------------------------------------------------------ 궤적 재생 (역기구학 탭, 가상 모드 전용)
-    def play_trajectory(self, traj, max_speed, hold=2.0):
+    def play_trajectory(self, traj, max_speed, hold=2.0, on_end=None):
+        """on_end(reason): 재생이 끝나면 (재생 스레드에서) 부른다 — live_api.Scene 이 '끝까지 재생' 이면 옮긴 큐브를 놓을 자리로."""
         from arm_control import play as P
         with self.lock:
             if self.play.get("running"):
@@ -518,6 +519,11 @@ class VirtualArm:
                 reason = P.play(publish, traj, max_speed, hold, stop=self._play_stop)
             except Exception as e:
                 reason = f"{type(e).__name__}: {e}"
+            if on_end is not None:
+                try:
+                    on_end(reason or "끝까지 재생")
+                except Exception as e:
+                    self._log("arm_control", f"[가상] 재생 끝 처리 오류: {type(e).__name__}: {e}")
             self.play.update(running=False, reason=reason or "끝까지 재생", ended=time.time())
             self._log("arm_control", f"[가상] 궤적 재생 끝: {reason or '끝까지'}")
 

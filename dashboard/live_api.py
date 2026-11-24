@@ -1,0 +1,449 @@
+"""큐브 실시간 인식 (2026-11-24): 휴대폰 카메라·탑 쌓기·강화학습 탭이 같이 쓰는 '지금 책상 위의 큐브들' 한 곳.
+
+사진 올리기는 없다. 두 모드:
+
+    실물 (직접 CAN / ROS)  서버 스레드(Live)가 거치한 폰의 폰 스테레오 프로그램(SteroDepthSeg z_phone_stereo.py)의 결과 폴더를 20 Hz 로 보고
+                           새 프레임이 생길 때마다 인식한다 — 프레임의 ArUco (phone_detect.detect_cubes: ID 10~15 + 층 + 기울기)
+                           + 그때의 뎁스 결과 (phone_depth.evaluate) → phone_fuse 로 합친 '집을 큐브 하나' (휴대폰 탭) 와 큐브 목록.
+                           프레임:  <결과 폴더>/live.jpg   — 손대지 않은 왼쪽 렌즈 그림 (그 프로그램에 --live-jpg 를 넣은 판, README) ≥ 5 Hz
+                                    <결과 폴더>/inference.png — 없으면 이것 (그 프로그램이 1초쯤마다 저장, 객체 테두리·글자가 덧그려짐,
+                                                               오른쪽 뎁스 색 그림은 잘라 냄)
+                           마지막 프레임이 STALE_S (1.5 초, inference.png 면 그 저장 간격의 1.6 배까지 늘림 — 최대 3 초) 보다 오래되면
+                           '영상 없음' → 집기·탑 쌓기를 막는다.
+    가상                   카메라는 아예 안 읽는다. 큐브 = 서버의 가상 장면 (Scene, logs/virtual_scene.json): 화면 지도에서 놓기·끌기·돌리기·지우기.
+                           가상 팔 재생이 끝까지 가면 (VirtualArm.play_trajectory 의 on_end) 그 계획이 옮긴 큐브를 놓을 자리로 옮긴다.
+                           '놓을 때 어긋남' 을 켜면 ±1 cm · ±5° 를 무작위로 더한다.
+
+    GET  /api/live/cubes?d=<책상 높이>&pick=<ID>   {ok, mode 'camera'|'virtual', stale, reason, age_s, src, rate_hz, stale_s, t_frame, frame_n,
+                                                  cubes: [{id, x, y, yaw_deg, level, source, age_s, tilt_deg?, unsure?}], refs, warn,
+                                                  table {d, measured}, pick {휴대폰 탭이 집을 큐브 하나 — phone_fuse 모양}, pipeline, scene{jitter}}
+    GET  /api/live/frame.jpg                     마지막 프레임 (마커를 그린 것) JPEG
+    POST /api/live/scene  {op: add|move|yaw|delete|clear|jitter, …}   가상 장면 고치기 (가상 모드에서만)
+    GET  /api/phone/live?d=&pick=                예전 휴대폰 탭 주소 — 위 pick 과 같은 것 (+ fresh, pipeline)
+
+좌표는 전부 대시보드 실좌표 (pick_plan 과 같음): 원점 = 어깨 roll 축, +x = 로봇 왼쪽, +y = 뒤 (책상은 −y). level 0 = 책상 위.
+"""
+import json
+import math
+import os
+import random
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
+
+import phone_depth as DP
+
+STALE_S = 1.5            # 2026-11-24 사용자: 마지막 프레임이 이보다 오래되면 '영상 없음' (집기·탑 쌓기 막음)
+STALE_MAX_S = 3.0        # inference.png (1초쯤 간격) 일 때 늘려 주는 한계
+POLL_S = 0.05            # 결과 폴더를 보는 간격
+LIVE_JPG_FRESH_S = 3.0   # live.jpg 가 이보다 새것이면 그것을 쓴다 (아니면 inference.png)
+DEPTH_POS_TOL = 0.03     # 뎁스 큐브가 ArUco 큐브와 이 안이면 같은 큐브 (source 'aruco+depth')
+CUBE_IDS = tuple(range(10, 16))
+STACK_R = 0.03           # 가상 장면: 이 안(m)이면 같은 자리 (그 위에 쌓임)
+JITTER_M, JITTER_DEG = 0.01, 5.0
+TD_DEFAULT = 0.4775
+
+
+def fold(deg):
+    return (float(deg) + 45.0) % 90.0 - 45.0
+
+
+def left_panel(img):
+    """inference.png = [객체 그림 (렌즈 하나) | (bbox 그림) | 뎁스 색 그림 + 눈금 70 px] 가로로 붙인 것 → 첫 칸만 (ArUco 는 가운데를 주점으로 본다)."""
+    h, w = img.shape[:2]
+    for n in (2, 3):
+        lw = (w - 70) / n
+        if lw == int(lw) and 1.0 <= lw / h <= 2.0:
+            return img[:, :int(lw)]
+    return img
+
+
+# ---------------------------------------------------------------- 가상 장면
+class Scene:
+    """가상 모드의 책상 위 큐브들. level = 그 밑에 깔린 큐브 수. 바꿀 때마다 파일에 쓴다."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        self.cubes, self.jitter, self.t, self.last_move = [], False, time.time(), None
+        try:
+            d = json.loads(self.path.read_text())
+            self.cubes = [{"id": int(c["id"]), "x": float(c["x"]), "y": float(c["y"]), "yaw_deg": round(fold(c["yaw_deg"]), 1), "level": int(c["level"])}
+                          for c in d.get("cubes", []) if int(c["id"]) in CUBE_IDS]
+            self.jitter = bool(d.get("jitter"))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    def _save(self):
+        self.t = time.time()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"cubes": self.cubes, "jitter": self.jitter, "t": self.t, "last_move": self.last_move}, ensure_ascii=False))
+        os.replace(tmp, self.path)
+
+    def snapshot(self):
+        with self.lock:
+            return {"cubes": [dict(c) for c in self.cubes], "jitter": self.jitter, "t": self.t, "last_move": self.last_move}
+
+    def _at(self, x, y, skip=None):
+        """(x, y) 자리 (STACK_R 안) 의 큐브 중 맨 위 것, 없으면 None."""
+        near = [c for c in self.cubes if c is not skip and math.hypot(c["x"] - x, c["y"] - y) <= STACK_R]
+        return max(near, key=lambda c: c["level"]) if near else None
+
+    def _covered(self, c):
+        return any(o is not c and o["level"] > c["level"] and math.hypot(o["x"] - c["x"], o["y"] - c["y"]) <= STACK_R for o in self.cubes)
+
+    def _by_id(self, i):
+        return next((c for c in self.cubes if c["id"] == i), None)
+
+    def op(self, b):
+        """화면 지도에서: add {x, y, yaw_deg?} · move {id, x, y} · yaw {id, yaw_deg} · delete {id} · clear · jitter {on}."""
+        op = str(b.get("op") or "")
+        with self.lock:
+            if op == "clear":
+                self.cubes = []
+            elif op == "jitter":
+                self.jitter = bool(b.get("on"))
+            elif op in ("add", "move", "yaw", "delete"):
+                c = None
+                if op != "add":
+                    c = self._by_id(int(b.get("id")))
+                    if c is None:
+                        return {"ok": False, "error": f"큐브 {b.get('id')} 없음"}
+                if op in ("add", "move"):
+                    x, y = float(b["x"]), float(b["y"])
+                    if not (math.isfinite(x) and math.isfinite(y) and abs(x) <= 1 and abs(y) <= 1):
+                        return {"ok": False, "error": "x, y 는 ±1 m 안"}
+                if op in ("move", "delete") and self._covered(c):
+                    return {"ok": False, "error": f"큐브 {c['id']} 위에 다른 큐브가 있음 — 위의 것부터"}
+                if op == "add":
+                    free = [i for i in CUBE_IDS if self._by_id(i) is None]
+                    if not free:
+                        return {"ok": False, "error": f"큐브는 {len(CUBE_IDS)}개까지 (ID {CUBE_IDS[0]}~{CUBE_IDS[-1]})"}
+                    if self._at(x, y):
+                        return {"ok": False, "error": "그 자리에 큐브가 있음 — 끌어서 옮기기"}
+                    yaw = float(b.get("yaw_deg") or 0.0)
+                    self.cubes.append({"id": free[0], "x": round(x, 4), "y": round(y, 4), "yaw_deg": round(fold(yaw), 1), "level": 0})
+                elif op == "move":
+                    under = self._at(x, y, skip=c)
+                    if under:   # 다른 큐브 위에 떨어뜨림 → 그 위에 쌓기 (자리·각을 맞춘다)
+                        x, y, c["yaw_deg"] = under["x"], under["y"], under["yaw_deg"]
+                    c.update(x=round(x, 4), y=round(y, 4), level=under["level"] + 1 if under else 0)
+                elif op == "yaw":
+                    v = float(b["yaw_deg"])
+                    if not math.isfinite(v):
+                        return {"ok": False, "error": "각은 숫자"}
+                    c["yaw_deg"] = round(fold(v), 1)
+                else:
+                    self.cubes.remove(c)
+            else:
+                return {"ok": False, "error": "op = add · move · yaw · delete · clear · jitter"}
+            self._save()
+            return {"ok": True, "scene": {"cubes": [dict(c) for c in self.cubes], "jitter": self.jitter, "t": self.t}}
+
+    def place(self, src_xy, dst_xy, yaw_deg, why=""):
+        """가상 팔이 큐브를 옮겼다: src 자리 맨 위 큐브 → dst (그 자리에 큐브가 있으면 그 위). 어긋남이 켜져 있으면 ±1 cm·±5°."""
+        with self.lock:
+            c = self._at(*src_xy)
+            if c is None or math.hypot(c["x"] - src_xy[0], c["y"] - src_xy[1]) > 0.02:
+                self.last_move = {"ok": False, "t": time.time(), "why": why, "text": f"가상 장면에 집은 자리 ({src_xy[0]:.3f}, {src_xy[1]:.3f}) 의 큐브가 없음 — 장면 안 바뀜"}
+                self._save()
+                return self.last_move
+            x, y, yaw = float(dst_xy[0]), float(dst_xy[1]), float(yaw_deg)
+            dx = dy = dyaw = 0.0
+            if self.jitter:
+                dx, dy, dyaw = random.uniform(-JITTER_M, JITTER_M), random.uniform(-JITTER_M, JITTER_M), random.uniform(-JITTER_DEG, JITTER_DEG)
+            under = self._at(x, y, skip=c)
+            c.update(x=round(x + dx, 4), y=round(y + dy, 4), yaw_deg=round(fold(yaw + dyaw), 1), level=under["level"] + 1 if under else 0)
+            self.last_move = {"ok": True, "t": time.time(), "why": why, "id": c["id"], "level": c["level"],
+                              "jitter_mm": [round(dx * 1000, 1), round(dy * 1000, 1)], "jitter_deg": round(dyaw, 1),
+                              "text": f"가상 큐브 {c['id']} → ({c['x']:.3f}, {c['y']:.3f}) {c['level'] + 1}층" +
+                                      (f" (어긋남 {dx * 1000:+.0f}, {dy * 1000:+.0f} mm · {dyaw:+.1f}°)" if self.jitter else "")}
+            self._save()
+            return self.last_move
+
+    def on_play(self, traj, why=""):
+        """가상 팔 재생을 시작할 때 부른다 → 재생이 끝까지 가면 부를 함수 (on_end). 큐브를 옮기는 계획이 아니면 None.
+        traj['real'] = {cube: [x, y, yaw], target: [x, y], target_yaw?} (pick_plan 계획, 강화학습 재생이 같은 모양으로 넣음)."""
+        r = (traj or {}).get("real") or {}
+        try:
+            src = (float(r["cube"][0]), float(r["cube"][1]))
+            dst = (float(r["target"][0]), float(r["target"][1]))
+            yaw = float(r["target_yaw"] if r.get("target_yaw") is not None else r["cube"][2])
+        except (KeyError, TypeError, ValueError, IndexError):
+            return None
+
+        def end(reason):
+            if reason == "끝까지 재생":
+                self.place(src, dst, yaw, why)
+        return end
+
+    def cubes_view(self):
+        s = self.snapshot()
+        return [{**c, "source": "virtual", "age_s": 0.0} for c in s["cubes"]], s
+
+
+# ---------------------------------------------------------------- 실물: 폰 프레임 → 인식 (서버 스레드)
+class Live:
+    def __init__(self, log_dir, mode):
+        self.log_dir = Path(log_dir)
+        self.mode = mode
+        self.lock = threading.Lock()
+        self.res = None            # 마지막 프레임의 인식 결과
+        self.jpeg = None           # 그 프레임 (마커를 그린 것)
+        self.frame = None          # 다시 계산용 (책상 높이가 바뀌면)
+        self.key = None
+        self.td = TD_DEFAULT
+        self.td_done = None
+        self.arrivals = deque(maxlen=12)
+        self.prev = {"pos": None, "t": 0.0}
+        self.n = 0
+        self.thread = None
+        self.inject = None         # 시험: (BGR 배열, 프레임 시각) — 파일 대신
+
+    def start(self):
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._loop, daemon=True, name="live-cubes")
+            self.thread.start()
+
+    def _loop(self):
+        while True:
+            try:
+                if self.mode() != "virtual":
+                    self._step()
+            except Exception as e:   # 한 프레임이 망가져도 스레드는 산다
+                with self.lock:
+                    self.res = {**(self.res or {}), "error": f"{type(e).__name__}: {e}"}
+            time.sleep(POLL_S)
+
+    def _grab(self, dcfg):
+        """새 프레임이 있으면 (BGR, 프레임 시각, 출처 이름), 없으면 None."""
+        import cv2
+        if self.inject is not None:
+            img, t = self.inject
+            self.inject = None
+            return img, t, "test"
+        run = DP.run_dir(dcfg)
+        now = time.time()
+        for name in ("live.jpg", "inference.png"):
+            p = os.path.join(run, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if name == "live.jpg" and now - st.st_mtime > LIVE_JPG_FRESH_S:
+                continue
+            key = (name, st.st_mtime_ns, st.st_size)
+            if key == self.key:
+                return None
+            img = cv2.imread(p, cv2.IMREAD_COLOR)
+            if img is None:          # 쓰는 중 — 다음 번에
+                return None
+            self.key = key
+            return (left_panel(img) if name == "inference.png" else img), st.st_mtime, name
+        return None
+
+    def _step(self):
+        import phone_api
+        dcfg = DP.load_cfg(self.log_dir / "phone_depth.json")
+        got = self._grab(dcfg)
+        if got is None:
+            if self.frame is not None and self.td_done != self.td:   # 책상 높이가 바뀜 → 마지막 프레임 다시
+                img, t, src = self.frame
+                self._process(img, t, src, dcfg, phone_api, again=True)
+            return
+        img, t, src = got
+        self.arrivals.append((t, src))
+        self.frame = (img, t, src)
+        self._process(img, t, src, dcfg, phone_api)
+
+    def _process(self, img, t, src, dcfg, phone_api, again=False):
+        import cv2
+        import phone_detect as PD
+        import phone_fuse as PF
+        td = self.td
+        cam_cfg = phone_api._load(self.log_dir / "phone_cam.json")
+        now = time.monotonic()
+        dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None)
+        if dep.get("ok"):
+            self.prev.update(pos=dep.pop("pos"), t=now)
+        fused = PF.find(img, cam_cfg, dep)            # 휴대폰 탭: 큐브 하나 (ID 10 + 뎁스)
+        if fused.get("aruco") is not None:
+            for k in ("annotated", "cfg"):
+                fused["aruco"].pop(k, None)
+        multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (ID 10~15, 층, 기울기)
+        vis = multi.pop("annotated", None)
+        multi.pop("cfg", None)
+        cubes = []
+        for c in multi.get("cubes", []):
+            cubes.append({**c, "source": "aruco"})
+        p = dep if dep.get("ok") else None
+        if p:
+            near = [c for c in cubes if c["level"] == 0 and math.hypot(c["x"] - p["cube"]["x"], c["y"] - p["cube"]["y"]) <= DEPTH_POS_TOL]
+            if near:
+                near[0]["source"] = "aruco+depth"
+            else:
+                cubes.append({"id": None, "x": p["cube"]["x"], "y": p["cube"]["y"], "yaw_deg": p["cube"]["yaw_deg"], "level": 0,
+                              "source": "depth", "usable": p.get("usable", True)})
+        jpeg = None
+        if vis is None:
+            vis = img
+        k = 960 / max(vis.shape[:2])
+        if k < 1:
+            vis = cv2.resize(vis, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 78])
+        if ok:
+            jpeg = buf.tobytes()
+        with self.lock:
+            if not again:
+                self.n += 1
+            self.res = {"t_frame": t, "t_done": time.time(), "src": src, "frame_n": self.n, "cubes": cubes,
+                        "refs": multi.get("refs", []), "warn": multi.get("warn", []), "reason": None if multi.get("ok") else multi.get("reason"),
+                        "level_unsure": bool(multi.get("level_unsure")), "fused": fused, "depth_age_s": dep.get("age_s")}
+            self.jpeg = jpeg
+            self.td_done = td
+
+    def stale_s(self):
+        """기다릴 한계: live.jpg 면 STALE_S, inference.png 면 그 저장 간격의 1.6 배 (STALE_S ~ STALE_MAX_S)."""
+        a = [t for t, s in self.arrivals if s == "inference.png"]
+        if len(a) < 3 or self.res is None or self.res.get("src") != "inference.png":
+            return STALE_S
+        gaps = sorted(b - a_ for a_, b in zip(a, a[1:]))
+        return min(STALE_MAX_S, max(STALE_S, 1.6 * gaps[len(gaps) // 2]))
+
+    def rate(self):
+        a = [t for t, _ in self.arrivals]
+        return round((len(a) - 1) / (a[-1] - a[0]), 1) if len(a) >= 3 and a[-1] > a[0] else None
+
+
+# ---------------------------------------------------------------- 응답
+def _pick_camera(res, stale, pick_id):
+    """휴대폰 탭이 집을 큐브 하나 (phone_fuse 모양): ID 를 고르지 않았거나 10 이면 ArUco 10 + 뎁스를 합친 것, 다른 ID 면 그 ArUco 큐브."""
+    if res is None or stale:
+        return {"ok": False, "stale": True, "warn": [], "note": [], "sources": [],
+                "reason": "영상 없음 — 폰 프로그램이 꺼져 있거나 프레임이 멈춤 (새 프레임이 들어와야 집는다)"}
+    if pick_id is not None and pick_id != 10:
+        c = next((c for c in res["cubes"] if c["id"] == pick_id), None)
+        if c is None:
+            return {"ok": False, "warn": [], "note": [], "sources": [], "reason": f"큐브 {pick_id} 가 지금 프레임에 안 보임"}
+        out = {"ok": True, "id": pick_id, "cube": {"x": c["x"], "y": c["y"], "yaw_deg": c["yaw_deg"]}, "used": "aruco", "sources": ["aruco"],
+               "text": f"출처: ArUco (큐브 {pick_id})", "blocked": False, "block": "", "warn": list(res.get("warn") or []), "note": [], "check": None}
+        if c["level"] > 0:
+            out.update(blocked=True, block="쌓인 큐브")
+            out["warn"].insert(0, f"큐브 {pick_id} 는 {c['level'] + 1}층 — 휴대폰 탭은 책상 위 큐브만 집는다 (탑 쌓기 탭)")
+        return out
+    f = dict(res["fused"])
+    f["id"] = 10 if f.get("used") == "aruco" else None
+    return f
+
+
+def _pick_virtual(cubes, pick_id):
+    top = [c for c in cubes if not any(o is not c and o["level"] > c["level"] and math.hypot(o["x"] - c["x"], o["y"] - c["y"]) <= STACK_R for o in cubes)]
+    if not cubes:
+        return {"ok": False, "warn": [], "note": [], "sources": [], "reason": "가상 큐브가 없음 — 지도를 눌러 큐브를 놓기"}
+    if pick_id is None:
+        c = min((c for c in top if c["level"] == 0), key=lambda c: c["id"], default=None) or min(cubes, key=lambda c: c["id"])
+    else:
+        c = next((c for c in cubes if c["id"] == pick_id), None)
+        if c is None:
+            return {"ok": False, "warn": [], "note": [], "sources": [], "reason": f"가상 큐브 {pick_id} 없음"}
+    out = {"ok": True, "id": c["id"], "cube": {"x": c["x"], "y": c["y"], "yaw_deg": c["yaw_deg"]}, "used": "virtual", "sources": ["virtual"],
+           "text": f"출처: 가상 큐브 {c['id']}", "blocked": False, "block": "", "warn": [], "note": [], "check": None}
+    if c not in top:
+        out.update(blocked=True, block="위에 큐브가 있음")
+    elif c["level"] > 0:
+        out.update(blocked=True, block="쌓인 큐브")
+        out["warn"].append(f"큐브 {c['id']} 는 {c['level'] + 1}층 — 휴대폰 탭은 책상 위 큐브만 집는다 (탑 쌓기 탭)")
+    return out
+
+
+LIVE = None
+SCENE = None
+
+
+def cubes(td=None, pick_id=None):
+    """GET /api/live/cubes 의 몸통 (다른 모듈도 부른다: rl_api 의 실물 재생 전 확인)."""
+    import phone_api
+    if td is not None and math.isfinite(td) and 0.2 <= td <= 0.8:
+        LIVE.td = td
+    pipe = phone_api.PIPE
+    measured = phone_api.LAST_TABLE.get("r")
+    table = {"d": LIVE.td, "measured": measured}
+    if LIVE.mode() == "virtual":
+        cs, s = SCENE.cubes_view()
+        return {"ok": True, "mode": "virtual", "stale": False, "reason": None, "age_s": 0.0, "src": "virtual", "rate_hz": None,
+                "stale_s": None, "t_frame": s["t"], "frame_n": None, "cubes": cs, "refs": [], "warn": [], "table": table,
+                "pick": _pick_virtual(cs, pick_id), "pipeline": {}, "scene": {"jitter": s["jitter"], "last_move": s["last_move"]}}
+    with LIVE.lock:
+        res = LIVE.res
+    now = time.time()
+    lim = LIVE.stale_s()
+    age = None if res is None or "t_frame" not in res else now - res["t_frame"]
+    stale = age is None or age > lim
+    pid = pipe.pid() if pipe else None
+    pl = {"alive": pid is not None, "pid": pid, "log": (pipe.tail() if pid is None else pipe.tail(3)) if pipe else []}
+    out = {"ok": not stale, "mode": "camera", "stale": stale, "age_s": None if age is None else round(age, 2), "stale_s": round(lim, 2),
+           "src": res.get("src") if res else None, "rate_hz": LIVE.rate(), "t_frame": res.get("t_frame") if res else None,
+           "frame_n": res.get("frame_n") if res else None, "table": table, "pipeline": pl, "scene": None,
+           "error": (res or {}).get("error")}
+    if stale:
+        out.update(cubes=[], refs=[], warn=[], reason="영상 없음" + (f" — 마지막 프레임 {age:.1f}초 전" if age is not None else
+                                                                 " — 폰 프로그램의 프레임이 아직 없음 (폰 프로그램 켜기)"))
+    else:
+        out.update(cubes=[{**c, "age_s": round(age, 2)} for c in res["cubes"]], refs=res["refs"], warn=res["warn"], reason=res["reason"],
+                   level_unsure=res["level_unsure"], depth_age_s=res.get("depth_age_s"))
+    out["pick"] = _pick_camera(res, stale, pick_id)
+    if res is not None and not stale:
+        out["pick"]["depth"] = res["fused"].get("depth")
+    return out
+
+
+def install(app, log_dir, mode):
+    """server.py 가 부른다. mode() → 'direct'|'virtual'|'ros'."""
+    global LIVE, SCENE
+    LIVE = Live(log_dir, mode)
+    SCENE = Scene(Path(log_dir) / "virtual_scene.json")
+    LIVE.start()
+
+    def _args(d, pick):
+        td = float(d) if str(d).strip() else None
+        pid = int(pick) if str(pick).strip() not in ("", "null", "None") else None
+        return td, pid
+
+    @app.get("/api/live/cubes")
+    def _cubes(d: str = "", pick: str = ""):
+        try:
+            td, pid = _args(d, pick)
+        except ValueError:
+            return JSONResponse({"ok": False, "reason": "d (m), pick (큐브 번호) 숫자"}, status_code=400)
+        return JSONResponse(cubes(td, pid))
+
+    @app.get("/api/live/frame.jpg")
+    def _frame():
+        j = LIVE.jpeg
+        if j is None or LIVE.mode() == "virtual":
+            return Response(status_code=404)
+        return Response(j, media_type="image/jpeg", headers={"cache-control": "no-store"})
+
+    @app.post("/api/live/scene")
+    async def _scene(req: Request):
+        if mode() != "virtual":
+            return JSONResponse({"ok": False, "error": "가상 모드에서만 (실물은 카메라가 본 큐브)"})
+        try:
+            b = await req.json()
+            return JSONResponse(SCENE.op(b))
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "값이 틀림"}, status_code=400)
+
+    @app.get("/api/phone/live")
+    def _phone_live(d: str = "", pick: str = ""):
+        try:
+            td, pid = _args(d, pick)
+        except ValueError:
+            return JSONResponse({"ok": False, "reason": "책상 높이 d 숫자 (0.2~0.8 m)"}, status_code=400)
+        r = cubes(td, pid)
+        return JSONResponse({**r["pick"], "fresh": not r["stale"], "pipeline": r["pipeline"], "mode": r["mode"]})

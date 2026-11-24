@@ -84,6 +84,23 @@ def _top(np, cam, cpix, cube_h):
     return top, float(np.mean([np.linalg.norm(top[i] - top[(i + 1) % 4]) for i in range(4)])) * 1000
 
 
+def _tilt(cv2, np, cam, cpix):
+    """큐브 마커 한 장의 기울기 (°, 책상 면과의 각): 마커만으로 자세를 풀어 (IPPE, 재투영 오차가 작은 쪽) 그 법선을 기준 마커로 구한
+    카메라 자세로 로봇 틀에 돌린다. 탑 쌓기가 '놓은 큐브가 기울었나' 를 본다. 마커가 작으면 (20 px 안팎) 몇 도 흔들린다. 못 풀면 None."""
+    K, R = cam[0], cam[1]
+    h = CUBE_MARKER_MM / 2000.0
+    obj = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float64)
+    try:
+        n, rvs, _, _ = cv2.solvePnPGeneric(obj, cpix.astype(np.float64), K, None, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    except cv2.error:
+        return None
+    if not n:
+        return None
+    Rm, _ = cv2.Rodrigues(rvs[0])
+    up = R.T @ Rm[:, 2]
+    return float(np.degrees(np.arccos(min(1.0, abs(float(up[2])) / max(1e-9, float(np.linalg.norm(up)))))))
+
+
 def detect(image_bytes, cfg=None):
     """사진(JPEG/PNG 바이트) → dict. ok=False 여도 annotated(BGR 그림)·refs 는 될 수 있는 만큼 채운다."""
     import cv2
@@ -231,6 +248,9 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
         yaw = (math.degrees(math.atan2(ex[1], ex[0])) + 45.0) % 90.0 - 45.0
         c = {"id": i, "x": round(float(cx), 4), "y": round(float(cy), 4), "yaw_deg": round(yaw, 1), "level": lv,
              "top_cm": round((lv + 1) * ch * 100, 1), "marker_mm": round(side, 1)}
+        t = _tilt(cv2, np, cam, found[i])
+        if t is not None:
+            c["tilt_deg"] = round(t, 1)
         if abs(side - CUBE_MARKER_MM) > 0.06 * CUBE_MARKER_MM:
             c["unsure"] = True
             out["warn"].append(f"큐브 {i}: 마커 한 변이 {side:.1f} mm 로 재짐 (원래 {CUBE_MARKER_MM:.0f}) — 높이·자리가 틀릴 수 있다")
