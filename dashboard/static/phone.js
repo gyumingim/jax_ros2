@@ -75,7 +75,8 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
         el("div", { class: "ph-row" }, el("button", { class: "btn line", onclick: phSaveCfg }, "종이 자리 저장"))),
       el("h3", { class: "ph-h3" }, "뎁스 — 폰 프로그램 · 거치 자세"),
       el("div", { class: "card" },
-        el("div", { class: "help", style: "margin:0" }, "로봇에 거치한 Galaxy S25 (USB) 의 화면과 두 렌즈 깊이로 책상 위 큐브를 찾는다 (표시지가 없어도 뎁스로)."),
+        el("div", { class: "help", style: "margin:0" }, "로봇에 거치한 폰 (Galaxy S24/S25, USB) 의 화면과 두 렌즈 깊이로 책상 위 큐브를 찾는다 (표시지가 없어도 뎁스로)."),
+        PH.calib = el("div", { class: "help", style: "margin:8px 0 0" }, "보정 파일: …"),
         el("div", { class: "ph-row" }, PH.bPipe), PH.pipeNote,
         el("label", { class: "help", style: "display:flex;gap:8px;align-items:center;margin:14px 0 0" }, PH.df.save_rgbd = el("input", { type: "checkbox" }),
           "뎁스 맵 저장 (책상 높이를 뎁스로도 재려면 — 저장한 뒤 폰 프로그램을 껐다 켜기)"),
@@ -227,6 +228,7 @@ async function phLoadDepthCfg() {
     PH.df.repo_dir.value = d.cfg.repo_dir; PH.df.run_dir.value = d.cfg.run_dir; PH.df.save_rgbd.checked = !!d.cfg.save_rgbd;
     PH.cmd.textContent = `cd ${d.cfg.repo_dir} && ${d.command}`;
     PH.missing = d.missing || [];
+    if (d.calib) PH.calib.textContent = `보정 파일: ${d.calib.file} — 폰 모델로 고름 (${d.calib.note})`;
   } catch (e) { /* 다음에 다시 */ }
 }
 
@@ -242,6 +244,7 @@ async function phPipe() {
   PH.bPipe.disabled = true;
   await post(on ? "/api/phone/depth/stop" : "/api/phone/depth/start");
   PH.bPipe.disabled = false;
+  phLoadDepthCfg();     // 붙은 폰이 바뀌었으면 보정 파일 줄도
   lvPoll();
 }
 

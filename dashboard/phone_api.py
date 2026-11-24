@@ -14,6 +14,8 @@ server.py 는 install(app, log_dir) 한 줄만 가진다. 계획·재생은 화�
     GET  /api/phone/depth/image           그 프로그램이 저장한 inference.png
     GET  /api/phone/depth/config, POST    {repo_dir, run_dir, camera_to_robot[6], yaw_manual_deg, …} (logs/phone_depth.json)
     POST /api/phone/depth/start, /stop    폰 스테레오 프로그램 켜기·끄기 (venv_ffs, --headless; 끌 때 Ctrl+C 와 같은 SIGINT)
+                                          보정 파일은 붙은 폰 모델로 고른다 (CALIB_BY_MODEL: SM-S921N → calib_phone_pair_s24.json, 그 밖 기본)
+                                          → config 의 calib {file, model, note}
 
 '책상 높이 재기' (phone_table.py: 거치대의 폰이 CAD 자리에 있다고 보고 책상 높이 d 를 잰다 — 보정 없음):
     POST /api/phone/table_height          본문 없음. 지금 프레임의 기준 종이 (ArUco) 와 뎁스 맵 (<결과 폴더>/rgbd/rgbd.npz 가 새것일 때) 으로
@@ -41,7 +43,40 @@ HERE = Path(__file__).resolve().parent
 PIPE = None                 # 폰 스테레오 프로그램 (Pipeline) — live_api 가 상태를 읽는다
 LAST_TABLE = {"r": None}    # 마지막 '책상 높이 재기' {d, source, t} — live_api 의 table 칸
 SHEET = HERE / "phone_markers" / "phone_markers.pdf"
+# 폰 모델별 두 렌즈 보정 파일 (저장소 안). 없는 모델이면 calib_phone_pair.json (지금 S25 SM-S931N 것).
+# 다른 폰의 보정으로 켜면 그 프로그램이 'Phone rectification failed' 로 멈춘다 (dy 20 px 넘음).
+CALIB_DEFAULT = "calib_phone_pair.json"
+CALIB_BY_MODEL = {"SM-S921N": "calib_phone_pair_s24.json"}     # Galaxy S24 — 2026-09-22 보드 캘리 (SteroDepthSeg 96fad02 에서 꺼냄)
+_MODEL = {"t": 0.0, "v": None}
 LIMITS = {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "rot_deg": (-180.0, 180.0), "cube_h": (0.0, 0.3)}
+
+
+def phone_model():
+    """USB 로 붙은 폰의 모델 (adb getprop ro.product.model), 없거나 adb 가 안 되면 None. 5초 캐시."""
+    if time.monotonic() - _MODEL["t"] < 5.0:
+        return _MODEL["v"]
+    v = None
+    try:
+        r = subprocess.run(["adb", "shell", "getprop", "ro.product.model"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0 and r.stdout.strip():
+            v = r.stdout.strip().splitlines()[-1].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _MODEL.update(t=time.monotonic(), v=v)
+    return v
+
+
+def calib_choice(cfg):
+    """{file, model, note}: 붙은 폰 모델로 고른 보정 파일 (저장소 기준 상대 경로)."""
+    model = phone_model()
+    name = CALIB_BY_MODEL.get(model or "")
+    if name and not (Path(cfg["repo_dir"]) / name).exists():
+        return {"file": CALIB_DEFAULT, "model": model, "note": f"{model} 용 {name} 이 저장소에 없어 기본 파일 — 다른 폰 보정이면 정류 검사에서 멈춘다"}
+    if name:
+        return {"file": name, "model": model, "note": f"{model} → {name}"}
+    if model is None:
+        return {"file": CALIB_DEFAULT, "model": None, "note": f"폰이 USB 로 안 보임 (adb) — 기본 {CALIB_DEFAULT} (S25 SM-S931N)"}
+    return {"file": CALIB_DEFAULT, "model": model, "note": f"{model} → 기본 {CALIB_DEFAULT} (S25 SM-S931N" + (" — 이 폰 것" if model == "SM-S931N" else " 것 — 이 폰 보정이 아니면 정류 검사에서 멈춘다") + ")"}
 
 
 def _load(path):
@@ -130,27 +165,30 @@ class Pipeline:
         except OSError:
             return False
 
-    def command(self, cfg):
+    def command(self, cfg, calib=None):
         repo = Path(cfg["repo_dir"])
-        return ([str(repo / "venv_ffs" / "bin" / "python"), "z_phone_stereo.py", "--physical", "2", "5", "--calib-stereo", "calib_phone_pair.json",
+        calib = calib or calib_choice(cfg)["file"]
+        return ([str(repo / "venv_ffs" / "bin" / "python"), "z_phone_stereo.py", "--physical", "2", "5", "--calib-stereo", calib,
                  "--yolo", "seg", "--headless", "--out", DP.run_dir(cfg)] + (["--rgbd-viewer"] if cfg.get("save_rgbd") else [])
                 + (["--live-jpg", "10"] if self.live_jpg_supported(cfg) else []))
 
-    def missing(self, cfg):
+    def missing(self, cfg, calib=None):
         repo = Path(cfg["repo_dir"])
+        calib = calib or calib_choice(cfg)["file"]
         need = [(repo / "z_phone_stereo.py", "폰 스테레오 저장소 (git clone https://github.com/team-jax/SteroDepthSeg)"),
                 (repo / "venv_ffs" / "bin" / "python", "venv_ffs (그 저장소에서 bash tools/setup_ffs.sh)"),
-                (repo / "calib_phone_pair.json", "calib_phone_pair.json (S25 두 렌즈 보정 파일)")]
+                (repo / calib, f"{calib} (이 폰의 두 렌즈 보정 파일)")]
         return [f"{what} — {p} 없음" for p, what in need if not p.exists()]
 
     def start(self, cfg):
         with self.lock:
             if self.pid() is not None:
                 return {"ok": False, "error": "이미 켜져 있음"}
-            miss = self.missing(cfg)
+            calib = calib_choice(cfg)
+            miss = self.missing(cfg, calib["file"])
             if miss:
                 return {"ok": False, "error": "켤 수 없음: " + " / ".join(miss)}
-            cmd = self.command(cfg)
+            cmd = self.command(cfg, calib["file"])
             Path(DP.run_dir(cfg)).mkdir(parents=True, exist_ok=True)
             self.log.parent.mkdir(parents=True, exist_ok=True)
             with open(self.log, "wb") as lf:
@@ -159,7 +197,7 @@ class Pipeline:
                 self.proc = subprocess.Popen(cmd, cwd=cfg["repo_dir"], stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                              start_new_session=True)
             self.pid_file.write_text(json.dumps({"pid": self.proc.pid, "stime": self._stime(self.proc.pid)}))
-            return {"ok": True, "msg": "폰 스테레오 프로그램 켬 — 폰 잠금을 풀고, 처음 몇 초는 가만히"}
+            return {"ok": True, "calib": calib, "msg": f"폰 스테레오 프로그램 켬 ({calib['file']}) — 폰 잠금을 풀고, 처음 몇 초는 가만히"}
 
     def stop(self):
         with self.lock:
@@ -282,10 +320,11 @@ def _install_depth(app, log_dir):
         return FileResponse(str(p), media_type="image/png", headers={"cache-control": "no-store"})
 
     @app.get("/api/phone/depth/config")
-    def _get():
+    def _get():     # def (async 아님) — adb getprop 이 이벤트 루프를 막지 않게 스레드에서
         cfg = DP.load_cfg(cfg_file)
-        return JSONResponse({"ok": True, "cfg": cfg, "default_c2r": DP.DEFAULT_C2R, "run_dir": DP.run_dir(cfg),
-                             "missing": pipe.missing(cfg), "command": " ".join(pipe.command(cfg))})
+        calib = calib_choice(cfg)
+        return JSONResponse({"ok": True, "cfg": cfg, "default_c2r": DP.DEFAULT_C2R, "run_dir": DP.run_dir(cfg), "calib": calib,
+                             "missing": pipe.missing(cfg, calib["file"]), "command": " ".join(pipe.command(cfg, calib["file"]))})
 
     @app.post("/api/phone/depth/config")
     async def _set(req: Request):
