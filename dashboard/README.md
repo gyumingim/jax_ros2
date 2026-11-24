@@ -73,6 +73,13 @@ API: `GET /api/ik/graspmap?grasp=auto|vertical|horizontal&yaw=°`, `POST /api/ik
 서보는 피드백이 없어 한 번도 안 보낸 서보는 0° 로 보고 계획한다(실물은 real_arm 이 '한 번도 안 보낸 서보' 재생을 따로 거절). 책상 옆 기둥·받침은 검사하지 않는다.
 시험: 저장된 계획 궤적 50 프레임마다(60 자세) 모두 HOME 까지 playable, 끝 = 정확히 0. 가상 팔로 늘어진 팔(관절 직선 5 s)·계획 중간(손목 길 23.5 s)에서 HOME 도착 확인.
 
+### 재생 중 '지금 하는 동작' 한 줄 (2026-11-24)
+
+팔 재생(가상·실물, 역기구학 계획·⌂ HOME·탑 쌓기 걸음·강화학습 팔로 재생) 동안 머리띠 안 파란 줄에 지금 동작이 보인다 — 어느 탭에서든. 예: `▶ 큐브 위로 가는 중 · 2/12단계 · 남은 35초 · 프레임 807/2565`. 끝나면 6초 동안 `끝`(초록) 또는 `멈춤 (STOP) · 그때: 큐브 위로 가는 중`(빨강). 역기구학·HOME·실물·강화학습 칸의 재생 줄에도 같은 글이 붙는다.
+- 서버 `play_phase.py`: 재생 시작 때 `phases(traj)` 로 단계표 [(시작 프레임, 글)] → `ros.virtual_state.playback` / `ros.direct_state.playback` 에 `phase`·`phase_k`·`phase_n`·`left_s`. 첫 프레임 홀드 동안은 '첫 자세 잡는 중'.
+- 단계 출처: `pick_plan.plan()`·`plan_place_from()` = `marks`(경유점 → 닿는 프레임, plan() 출력에도 이제 넣음), 경유점 k 에 닿기까지가 'k 로 가는 중' (HOME 나가는 중 → 큐브 위로 → 내려가는 중 → 손가락 닫는 중 → 들어 올리는 중 → 놓을 자리로 옮기는 중(탑이면 'N층 자리로') → 내려놓는 중 → 손 펴는 중 → 손 빼고 올라가는 중 → HOME 으로 돌아가는 중). `plan_home()` = `marks` (yaw0 / exit_back / home). 강화학습 `rl_api.build_traj` = `phase_marks`(체인 RAISE·SETTLE·INSERT·GRASP_LIFT·RETURN·DONE + 내리기 CARRY·LOWER·OPEN·RETREAT·HOME, BUILD 3 → 옛 rl_traj.json 다시 만듦). 그 밖 옛 궤적 파일은 waypoints label.
+- 확인: 가상 8093 IK 계획 재생 12단계·HOME 2단계 글이 차례로 바뀜(CDP), `--fake-hw` HOME + 실물 재생 중 STOP → '멈춤 (STOP) · 그때: 큐브 위로 가는 중', `try_direct_fake.py` 39/39.
+
 ### 검토 뒤 고친 것 (2026-11-23 밤)
 
 - **STOP 이 재생 시작과 겹쳐도 안 사라진다**: STOP·힘 빼기·재생 멈춤은 잠금 안에서 `stop_gen` 을 올리고, 재생은 시작할 때의 값을 기억해 바뀌면 멈춘다.

@@ -245,7 +245,7 @@ renderTraj = function () {
   o.go.disabled = !T.traj || !DC() || pb.running || stale;
   o.go.title = !DC() ? "연결 탭 ② 팔 연결 먼저" : !T.traj ? "계획(궤적) 먼저" : stale ? "값이 바뀜 — 계획 다시" : "";
   o.stop.disabled = !pb.running;
-  o.info.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` : pb.reason ? `마지막: ${pb.reason}` : "";
+  o.info.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` + (pb.phase ? " — " + phaseText(pb) : "") : pb.reason ? `마지막: ${pb.reason}` : "";
 };
 async function playReal() {
   const mtime = T.info && T.info.mtime;     // 지금 화면이 보여 주는 계획. 확인창 사이에 계획이 바뀌면 서버가 거절

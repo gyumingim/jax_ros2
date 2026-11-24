@@ -105,6 +105,17 @@ CRTL_WARN, CRTL_PASSIVE, CRTL_ACTIVE = 0x04 | 0x08, 0x10 | 0x20, 0x40
 PROT_FORM, PROT_STUFF = 0x02, 0x04
 
 
+def _play_view(play):
+    """snapshot 의 playback: 단계표(phases)는 빼고 지금 단계 글·번호·남은 초 (play_phase.view)."""
+    try:
+        import play_phase
+        return play_phase.view(play)
+    except Exception:
+        p = dict(play)
+        p.pop("phases", None)
+        return p
+
+
 def ak45_brake_frame(controller_id, amps=0.0):
     """모드 2 (current brake). ak45_set_current_brake 와 같은 바이트: int32 BE, A × 1000."""
     amps = min(max(float(amps), 0.0), 5.0)
@@ -992,8 +1003,10 @@ class RealArm:
         self._play_stop.clear()
         gen0 = self.stop_gen           # 이 재생이 시작할 때의 STOP 번호. 바뀌면 멈춤(아래 step)
         self._play_bad = None
-        self.play = {"running": True, "frame": 0, "frames": n, "period": period, "slow": slow,
-                     "seconds": hold + (n - 1) * period, "started": time.time(), "reason": None, "real": True}
+        import play_phase
+        self.play = {"running": True, "frame": 0, "frames": n, "period": period, "slow": slow, "hold": hold,
+                     "seconds": hold + (n - 1) * period, "started": time.time(), "reason": None, "real": True,
+                     "phases": play_phase.phases(traj)}   # 지금 무슨 동작 (snapshot 이 play_phase.view 로)
         state = {"k": 0}
 
         def publish(nm, positions):
@@ -1191,7 +1204,7 @@ class RealArm:
                 "direct_state": {
                     "connected": self.running, "interface": self.interface, "channel": self.channel,
                     "lock": self.lock_path if self.lock_fd is not None else None, "started": self.started,
-                    "params": dict(P), "playback": dict(self.play), "foreign": foreign,
+                    "params": dict(P), "playback": _play_view(self.play), "foreign": foreign,
                     "calib_dirty": self.calib_dirty, "calibration": cal_rows, "calibration_file": str(self.cal.path),
                     "servo_targets": dict(self.servo_mover.target),
                     "log": list(self.lines)[-40:],

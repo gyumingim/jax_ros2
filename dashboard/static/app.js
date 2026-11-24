@@ -128,6 +128,33 @@ const f1 = (x, u = "°") => x == null || !Number.isFinite(x) ? "—" : `${Number
 const f2 = (x, u = "°") => x == null ? "—" : `${Number(x).toFixed(2)}${u}`;
 const svcById = (id) => (S.services.find((x) => x.id === id) || {});
 
+// ---------- 재생 중 '지금 무슨 동작' (서버 play_phase: playback.phase·phase_k·phase_n·left_s) ----------
+const PHASE_SHOW_S = 6;   // 끝난 뒤 이만큼(초) 더 보인다
+function playbackNow() {   // 지금 모드의 팔 재생 상태 (가상 = virtual_state, 실물 직접 CAN = direct_state)
+  const r = (S && S.ros) || {};
+  return ((VIRT() ? r.virtual_state : r.direct_state) || {}).playback || {};
+}
+function phaseText(pb) {   // "큐브 위로 가는 중 · 3/12단계 · 남은 21초" (단계표 없는 재생이면 "")
+  if (!pb || !pb.phase) return "";
+  const k = pb.phase_k && pb.phase_n ? ` · ${pb.phase_k}/${pb.phase_n}단계` : "";
+  return pb.running ? `${pb.phase}${k} · 남은 ${Math.ceil(pb.left_s || 0)}초` : pb.phase;
+}
+function renderPhaseLine() {
+  const n = $("#phaseline"), pb = playbackNow();
+  const recent = !pb.running && pb.ended && S.t - pb.ended < PHASE_SHOW_S;
+  const show = !!pb.phase && (pb.running || recent);
+  if (n.hidden !== !show) {
+    n.hidden = !show;
+    document.documentElement.style.setProperty("--topbar-h", $(".topbar").offsetHeight + "px");
+  }
+  if (!show) return;
+  const stop = !pb.running && pb.reason && pb.reason !== "끝까지 재생";
+  n.className = "phaseline" + (pb.running ? "" : stop ? " stop" : " done");
+  const k = pb.phase_k && pb.phase_n ? `${pb.phase_k}/${pb.phase_n}단계` : "";
+  n.replaceChildren(el("span", {}, (VIRT() ? "(가상) " : "") + (pb.running ? "▶ " : "") + pb.phase),
+    el("small", {}, pb.running ? [k, `남은 ${Math.ceil(pb.left_s || 0)}초`, `프레임 ${pb.frame}/${pb.frames - 1}`].filter(Boolean).join(" · ") : k));
+}
+
 function render() {
   if (!S) return;
   if (!curTab) { const h = location.hash.slice(1); showTab(OLD_TABS[h] || (TAB_IDS.has(h) ? h : (lsGet(TAB_KEY) || "conn"))); }
@@ -172,6 +199,7 @@ function render() {
   renderPose();
   renderTraj();
   renderHandIk();
+  renderPhaseLine();
   renderViewers();
   $("#foot").textContent = `${v ? "가상 모드 · " : ""}워크스페이스 ${S.info.ws} · ROS ${S.info.distro} · 레포 ${S.info.repo} · 로그 ${S.info.logs} · ${S.info.platform}` +
     ` · 메시 ${S.robot.mesh_ok ? S.robot.mesh_dir : "없음"}`;
@@ -1780,7 +1808,7 @@ function renderTraj() {
   const stale = planStale();
   T.vplay.disabled = !t || pb.running || stale; T.vstop.disabled = !pb.running;
   T.vplay.title = stale ? "값이 바뀜 — 계획 다시" : "";
-  T.vinfo.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` : pb.reason ? `마지막: ${pb.reason}` : "";
+  T.vinfo.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${pb.slow.toFixed(1)}배 느리게, 약 ${pb.seconds.toFixed(0)}초)` + (pb.phase ? " — " + phaseText(pb) : "") : pb.reason ? `마지막: ${pb.reason}` : "";
   updateIkView();
 }
 
@@ -1871,7 +1899,7 @@ function renderGoHome() {
   const why = kind === "ros" ? "ROS 모드에선 아직 없음" : kind === "direct" && !DC() ? "연결 탭 ② 팔 연결 먼저" : pb.running ? "재생 중 — 끝나거나 멈춘 뒤" : "";
   GH.btn.disabled = !!why; GH.btn.title = why;
   GH.stop.disabled = !pb.running;
-  GH.note.textContent = pb.running ? `가는 중 ${pb.frame}/${pb.frames - 1}` : pb.reason ? "마지막: " + pb.reason : "";
+  GH.note.textContent = pb.running ? (pb.phase ? phaseText(pb) : `가는 중 ${pb.frame}/${pb.frames - 1}`) : pb.reason ? "마지막: " + pb.reason : "";
   // HOME·재생이 끝난 틱: 슬라이더를 지금 자세로 (옛 값으로 '보내기'를 누르면 팔이 되돌아가던 것)
   if (GH.wasRun && !pb.running) syncToActual(true);
   GH.wasRun = !!pb.running;

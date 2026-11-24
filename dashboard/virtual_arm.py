@@ -57,6 +57,17 @@ SERVICE_NODES = {
 }
 
 
+def _play_view(play):
+    """snapshot 의 playback: 단계표(phases)는 빼고 지금 단계 글·번호·남은 초 (play_phase.view)."""
+    try:
+        import play_phase
+        return play_phase.view(play)
+    except Exception:
+        p = dict(play)
+        p.pop("phases", None)
+        return p
+
+
 def _f2(x):
     return f"{x:.2f}"
 
@@ -504,8 +515,10 @@ class VirtualArm:
             period, slow, peak = P.schedule(traj, max_speed)
             n = len(traj["positions"])
             self._play_stop.clear()
-            self.play = {"running": True, "frame": 0, "frames": n, "period": period, "slow": slow,
-                         "seconds": hold + (n - 1) * period, "started": time.time(), "reason": None}
+            import play_phase
+            self.play = {"running": True, "frame": 0, "frames": n, "period": period, "slow": slow, "hold": hold,
+                         "seconds": hold + (n - 1) * period, "started": time.time(), "reason": None,
+                         "phases": play_phase.phases(traj)}   # 지금 무슨 동작 (snapshot 이 play_phase.view 로)
 
         state = {"k": 0}
 
@@ -573,7 +586,7 @@ class VirtualArm:
                 "cmd_subs": 1 if "arm_control" in self.nodes else 0,
                 "virtual_state": {
                     "nodes": sorted(self.nodes), "power": all(m.powered for m in self.motors.values()),
-                    "cube": list(self.cube) if self.cube else None, "playback": dict(self.play),
+                    "cube": list(self.cube) if self.cube else None, "playback": _play_view(self.play),
                     "phys_deg": {n: round(m.phys, 2) for n, m in self.motors.items()},
                     "enc_off_deg": {n: round(m.enc_off, 2) for n, m in self.motors.items()},
                 },
