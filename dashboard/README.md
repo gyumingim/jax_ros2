@@ -273,3 +273,52 @@ python3 dashboard/server.py --ros        # 팀 ROS 버전 (ROS 2 + colcon build 
 큐브 윗면은 책상보다 5 cm 높아서, 기준 마커로 카메라 자세를 구해 그 높이 평면에 쏜다 (비스듬한 사진에서 5~7 cm 보정).
 초점거리는 모르므로 훑어서 고른다. 확인값 = '큐브 마커 한 변' 이 40 mm 근처로 나오는지 (10% 넘게 다르면 경고).
 시험: `python3 dashboard/tools/test_phone_detect.py` (가짜 사진 3장, 위치 1 cm·yaw 3° 안).
+
+### 세그먼트(폰 뎁스) 모드 — 표시지 없이, 거치한 S25 의 두 렌즈 깊이로 큐브 찾기 (2026-11-24)
+
+탭 맨 위 스위치 **ArUco(표시지) / 세그먼트(폰 뎁스)**. 세그먼트 모드는 팀 폰 스테레오 프로그램
+([team-jax/SteroDepthSeg](https://github.com/team-jax/SteroDepthSeg): Galaxy S25 렌즈 2·5 → FFS 깊이 → YOLO seg + `lib_blobs` 가 책상 위로
+튀어나온 덩어리를 찾음) 이 1초쯤마다 덮어쓰는 `<결과 폴더>/inference.json`·`inference.png` 를 읽는다. 큐브 고르기와 카메라 → 로봇 좌표 변환은
+팀 `jax_ros2` `vision-select` 의 `vision_node` (`camera_result.py` 의 `select_cube`·`camera_to_robot`, `tools/solve_camera_to_robot.py`) 를
+ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 결과 (x, y, yaw) 는 ArUco 모드와 똑같이 '집으러 가기' 로 간다 (확인창·검사 그대로).
+파일: `phone_depth.py`(읽기·고르기·변환·각) · `phone_api.py`(`/api/phone/depth*`, 프로그램 켜기·끄기) · `tools/solve_phone_mount.py`(거치 자세 풀기)
+· `tools/test_phone_depth.py`(시험).
+
+화면: 결과 한 줄 (큐브 x·y·yaw, 몇 초 전, 크기, 책상 위 높이, 각을 어떻게 구했나, 카메라 좌표, 경고) + 폰 프로그램이 저장한 그림 + 집을 수 있는지.
+- 3초 넘게 안 바뀐 결과는 안 쓴다. 후보가 여럿이고 점수가 비슷하면 '헷갈림' 으로 안 고른다 (큐브만 보이게 치우기).
+- **큐브 높이가 책상 위 0~5 cm 로 안 나오면** (거치 자세·책상 높이가 안 맞음) '집으러 가기' 를 막는다.
+- **각(yaw)은 근삿값**이다. 폰 프로그램의 yaw 는 '보이는 면이 카메라에 대해 돌아선 각'이라 그대로 못 쓰고, 그 면의 법선을 로봇 좌표로 돌려
+  구한다 (옆면이 보이면 법선의 수평 방향, 윗면이면 면 안 모서리 방향). 큐브는 90° 마다 같아 −45~45° 로만 나온다. 작은 큐브에서는 10° 안팎
+  틀릴 수 있고 두 면이 섞여 잡히면 더 틀린다 — 틀려 보이면 '준비' 에서 각을 직접 넣는다.
+- 자리 (x, y) 는 큐브 중심이 아니라 **보이는 면의 가운데**다 (옆면이면 중심에서 2.5 cm). 아래 거치 자세 보정을 큐브 중심 좌표로 하면 대부분 흡수된다.
+
+**실험실에서 할 일** (이 노트북에는 2026-11-24 기준 저장소만 받아 둠 — `venv_ffs`·FFS 가중치·`adb` 없음, GPU RTX 4060 은 켜져 있음):
+
+1. 폰 스테레오 환경 (한 번): `sudo apt install adb python3.12-dev` (python3.12 필요), 그다음
+   `cd ~/Documents/SteroDepthSeg && bash tools/setup_ffs.sh` (torch 2.6 cu124 + xformers + FFS 가중치, 몇 GB).
+   YOLO seg 가중치는 처음 실행 때 내려받는다. 확인: `./venv_ffs/bin/python z_ffs_smoke.py`.
+2. 폰: Galaxy S25 (SM-S931N, `calib_phone_pair.json` 이 이 폰 전용) 를 USB 로 연결, USB 디버깅 허용. 앱이 없으면 한 번
+   `./venv/bin/python z_phone_stereo.py --install --list` (그 저장소 README; JDK 필요). 폰을 로봇 거치대에 끼우고 잠금(PIN)을 푼다.
+3. 켜기: 탭의 **폰 프로그램 켜기** (서버가 아래 명령을 `--headless` 로 띄움, 기록 `logs/phone_depth.log`), 또는 터미널에서 직접
+   ```bash
+   cd ~/Documents/SteroDepthSeg
+   ./venv_ffs/bin/python z_phone_stereo.py --physical 2 5 --calib-stereo calib_phone_pair.json --yolo seg --out phone_stereo/runs/dash
+   ```
+   (`--headless` 를 빼면 창이 뜬다. 결과 폴더를 바꾸면 탭 '준비' 의 결과 폴더도 같게.) 시작 후 정류 검사가 끝날 때까지
+   (정지한 쌍 3개, 0.6 m 이상 떨어진 질감 있는 장면) 객체에 `rectification_unverified` 경고가 붙는다 — 거치한 채로 경고가 안 없어지면
+   폰을 잠깐 빼서 방을 비춘 뒤 다시 끼운다.
+4. **거치 자세 보정 (꼭)**: 처음 값은 팀 `camera.yaml` 의 CAD 임시값이라 화면에 경고가 뜬다. 큐브를 로봇 좌표를 아는 자리 3곳 이상
+   (일렬이 아니게, 집는 범위에 넓게) 에 놓고, 놓을 때마다 결과 줄의 '카메라 좌표' 를 적어
+   ```bash
+   python3 dashboard/tools/solve_phone_mount.py --d 0.4775 --save \
+       --point "cx,cy,cz:-0.05,-0.33" --point "cx,cy,cz:0.05,-0.30" --point "cx,cy,cz:-0.10,-0.38"
+   ```
+   (`--d` = 역기구학 탭의 책상 높이. `--save` 가 `dashboard/logs/phone_depth.json` 에 쓴다 — 서버 재시작 필요 없음, 화면 '준비' 칸은 새로고침.
+   다른 logs 폴더를 쓰는 서버면 `--cfg`.) 잔차가 0 이어도 부호를 잘못 넣은 것은 못 잡으니, **큐브를 새 자리에 놓고 화면의 x·y 가 자로 잰 값과
+   맞는지** 확인한 뒤 가상 팔 → 실물 순서로 집어 본다.
+
+시험 (폰·GPU 없이): `python3 dashboard/tools/test_phone_depth.py` — 팀 `camera.yaml` 의 검증값 3개·손 계산값과 변환이 같은지, 실제 파일에서
+따온 큐브 + 잡음에서 큐브만 고르는지, 로봇 좌표에 둔 큐브를 카메라 좌표로 거꾸로 옮겨 만든 inference.json 에서 자리(1 mm)·각(0.5°)을 되찾는지,
+`solve_mount` 가 아는 자세를 되찾는지. **확인 안 한 것**: 실제 폰·FFS 로 돈 적 없다 (실제 큐브 기록 파일은 저장소에 없음), 거치 자세 미보정,
+각 추정의 실제 정확도, 팔이 화면에 들어왔을 때 후보가 헷갈리는 정도. 팀 fixture 의 실제 큐브 값 (cam 0.0715, 0.0906, 0.4457) 은 CAD 임시
+자세로 옮기면 책상 위 21 cm 로 나온다 — 거치대에서 찍은 값이 아니다.
