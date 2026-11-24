@@ -28,9 +28,11 @@
   let R = null, busy = false;
 
   function setChipRec(r) {
-    chipEl.className = "chip rec-chip" + (r && r.on ? " rec" : "");
+    const low = r && !r.on && r.low_disk;   // 남은 디스크가 모자라 기록을 안 엶
+    chipEl.className = "chip rec-chip" + (r && r.on ? " rec" : low ? " bad" : "");
     chipEl.innerHTML = '<span class="dot"></span>';
-    chipEl.append(r && r.on ? `기록 중 runs/${r.run}` : "기록");
+    chipEl.append(r && r.on ? `기록 중 runs/${r.run}` : low ? `기록 못 함: 디스크 ${mb(low.free)} 남음` : "기록");
+    chipEl.title = low ? `남은 디스크가 ${low.min_gb} GB 아래라 실행 기록을 안 연다` : "실행 기록 (연결 탭 맨 아래)";
   }
 
   function render() {

@@ -79,7 +79,22 @@ function showTab(id) {
   lsSet(TAB_KEY, id);
   if (S) { initViewers(); renderViewers(); updateIkView(); }
   for (const v of Object.values(VW)) if (v && v.resize) { v.resize(); }
+  streamSyncAll();
 }
+// ---------- MJPEG 스트림 (<img>) — 보이는 탭·보이는 창에서만 연결 ----------
+// 브라우저는 호스트당 HTTP 연결 6개: 숨은 탭에 스트림이 열려 있으면 긴 요청과 겹쳐 STOP POST 가 줄 설 수 있다.
+// 각 탭은 streamSet(img, 켜기?) 만 부르고, 실제 연결은 탭이 보일 때만 (떠나면 끊고 돌아오면 다시 건다).
+const STREAM_URL = "/api/live/stream.mjpg";
+const BLANK_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";   // src 지우기만으로는 안 끊는 브라우저가 있어 빈 그림으로 바꿔 끊음
+function streamSync(img) {
+  const page = img.closest(".page");
+  const want = img.dataset.stream === "1" && !document.hidden && !(page && page.hidden);
+  if (want && img.dataset.streamOn !== "1") { img.dataset.streamOn = "1"; img.src = STREAM_URL + "?t=" + Date.now(); }
+  else if (!want && img.dataset.streamOn === "1") { img.dataset.streamOn = ""; img.src = BLANK_IMG; }
+}
+function streamSet(img, on) { img.dataset.stream = on ? "1" : ""; streamSync(img); }
+function streamSyncAll() { document.querySelectorAll("img[data-stream]").forEach(streamSync); }
+document.addEventListener("visibilitychange", streamSyncAll);
 (function buildTabs() {
   const nav = $("#tabs");
   for (const [id, label, sub] of TABS) {

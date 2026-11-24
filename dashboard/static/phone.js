@@ -147,7 +147,7 @@ function phLive(all) {
   // 영상: MJPEG 스트림 하나를 열어 둔다 (새 프레임마다 바로 보임, 최대 15 Hz). 끊기면(영상 없음) 닫았다가 다시 열기
   const src = !fresh || all.frame_n == null ? "" : "/api/live/stream.mjpg";
   PH.img.hidden = !src;
-  if (PH.imgSrc !== src) { PH.imgSrc = src; PH.img.src = src ? src + "?t=" + Date.now() : ""; }
+  if (PH.imgSrc !== src) { PH.imgSrc = src; streamSet(PH.img, !!src); }
   // 뎁스·세그 결과 (폰 프로그램의 inference.png: 객체 세그 + 뎁스 색) — 원본 영상 아래 (2026-11-24 사용자)
   if (!PH.inf) { PH.inf = el("img", { class: "ph-img", alt: "뎁스·세그", title: "폰 프로그램의 뎁스·세그 결과 (1초쯤마다)" }); PH.img.after(PH.inf); }
   PH.inf.hidden = !src;

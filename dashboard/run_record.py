@@ -45,6 +45,7 @@ LOOP_S = 0.05             # 쓰기 스레드 간격 (가상 팔 읽기 20 Hz)
 LIVE_FPS, INFER_FPS = 10.0, 4.0
 FILL_MAX_S = 3.0          # 프레임이 이보다 오래 안 오면 메우지 않고 다음 프레임을 바로 붙임 (ts.csv 로 알 수 있음)
 MANUAL_MAX_S = 30 * 60    # 손으로 켠 기록이 끝없이 커지지 않게
+MIN_FREE_GB = float(os.environ.get("JAX_DASH_RUNS_MIN_FREE_GB") or 1.5)   # 남은 디스크가 이보다 적으면 기록을 안 연다
 Q_MAX = 50 * 60 * 10      # 제어 루프 줄 버퍼 (10분, 쓰기 스레드가 멈춰도 메모리 상한)
 SKIP_POST = ("/api/log/follow", "/api/record/")   # 화면이 자주 보내는 진단·이 모듈 자신은 events 에 안 남김
 
@@ -85,21 +86,32 @@ class _Video:
         self.t0 = None
         self.n = 0                # 쓴 영상 프레임 수 (되풀이 포함)
         self.uniq = 0
+        self.skipped = 0          # 원본이 fps 보다 빨라 건너뛴 프레임 (영상 시간 = 실제 시간 유지)
         self.last = None
+        self.bad = False          # VideoWriter 를 못 열었음 (한 번만 알리고 그 뒤로는 조용히 건너뜀)
         self.ts = open(self.path.with_name(self.path.stem + "_ts.csv"), "w", newline="")
         self.tsw = csv.writer(self.ts)
         self.tsw.writerow(["video_frame", "t_unix", "t_rel_s", "src_t_unix", "repeats_before"])
 
     def add(self, img, t, src_t=None):
         import cv2
+        if self.bad:
+            return
         if self.w is None:
             h, w = img.shape[:2]
             self.size = (w - w % 2, h - h % 2)
             self.w = cv2.VideoWriter(str(self.path), cv2.VideoWriter_fourcc(*"mp4v"), self.fps, self.size)
             self.t0 = t
+            if not self.w.isOpened():
+                self.bad = True
+                raise RuntimeError(f"{self.path.name} VideoWriter 못 엶 (mp4v, {self.size[0]}x{self.size[1]})")
         if (img.shape[1], img.shape[0]) != self.size:
             img = cv2.resize(img, self.size, interpolation=cv2.INTER_AREA)
         want = int((t - self.t0) * self.fps)     # 이 프레임이 놓일 영상 번호
+        if want < self.n:                        # 원본이 fps 보다 빠름: 이 자리는 이미 찼다 (다 쓰면 영상이 실제보다 길어짐)
+            self.skipped += 1
+            self.last = img                      # 다음에 메울 때는 가장 새 프레임으로
+            return
         rep = 0
         if self.last is not None and want > self.n and (want - self.n) / self.fps <= FILL_MAX_S:
             while self.n < want:
@@ -157,6 +169,7 @@ class Run:
         self.can_text = None
         self.virtual = False
         self.play_obj = None
+        self._sample = None                      # 이 기록이 arm.rec 에 단 함수 (닫을 때 내 것일 때만 지움)
         self.close_req = None                    # 다른 스레드가 끝내 달라고 한 이유 (닫기는 쓰기 스레드만: 영상 쓰는 중 release 를 막음)
         self.closed = threading.Event()
         self.meta = {"name": self.name, "kind": kind, "mode": mode, "auto": auto, "start": self.t0,
@@ -225,6 +238,7 @@ class Run:
             if self.jw is None:
                 self.jw = csv.writer(self.jf)
                 self.jw.writerow(self._header(arm))
+            self._sample = sample
             arm.rec = sample
         else:
             self.ak_list, self.servo_list = [], []
@@ -235,8 +249,9 @@ class Run:
 
     def detach(self):
         a = self.arm
-        if a is not None and getattr(a, "rec", None) is not None:
-            a.rec = None
+        if a is not None and self._sample is not None and getattr(a, "rec", None) is self._sample:
+            a.rec = None                         # 새 기록이 이미 단 훅은 그대로
+        self._sample = None
         self.arm = None
 
     def _write_joints(self):
@@ -381,17 +396,16 @@ class Run:
             self.can_text = can_text
 
     def step(self, live, scene, virtual_mode, can_text):
-        self._write_joints()
-        try:
-            self._write_video(live if not virtual_mode else None)
-        except Exception as e:
-            self._once("video", f"영상 쓰기 오류: {type(e).__name__}: {e}")
-        try:
-            self._write_cubes(live, scene, virtual_mode)
-        except Exception as e:
-            self._once("cubes", f"cubes.csv 오류: {type(e).__name__}: {e}")
-        self._tail_log()
-        self._watch_bus(self.arm, can_text)
+        """부분마다 따로 try: 하나가 계속 실패해도(디스크 가득·direct.log 사라짐) 나머지와 닫기 판정은 돈다."""
+        for key, what, fn in (("joints", "joints.csv", self._write_joints),
+                              ("video", "영상 쓰기", lambda: self._write_video(live if not virtual_mode else None)),
+                              ("cubes", "cubes.csv", lambda: self._write_cubes(live, scene, virtual_mode)),
+                              ("tail", "direct.log 따라 읽기", self._tail_log),
+                              ("bus", "CAN 상태 보기", lambda: self._watch_bus(self.arm, can_text))):
+            try:
+                fn()
+            except Exception as e:
+                self._once(key, f"{what} 오류: {type(e).__name__}: {e}")
 
     def _once(self, key, text):
         k = "_err_" + key
@@ -401,22 +415,29 @@ class Run:
 
     def close(self, reason, extra_meta):
         self.detach()
-        self._write_joints()
-        self._tail_log()
+        for fn in (self._write_joints, self._tail_log):
+            try:
+                fn()
+            except Exception:
+                pass
         self.event(f"기록 끝: {reason}")
         for v in (self.vlive, self.vinfer):
             if v is not None:
-                v.close()
+                try:
+                    v.close()
+                except Exception:
+                    pass
         for f in (self.jf, self.cf, self.ev):
             try:
                 f.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
         t1 = time.time()
         self.meta.update(end=t1, end_local=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t1)), seconds=round(t1 - self.t0, 2),
                          end_reason=reason, plays=self.plans, joint_rows=self.rows,
                          joint_hz=round(self.rows / (t1 - self.t0), 1) if t1 > self.t0 else None,
                          video_live_frames=self.vlive.uniq if self.vlive else 0, video_live_written=self.vlive.n if self.vlive else 0,
+                         video_live_skipped=self.vlive.skipped if self.vlive else 0,
                          video_infer_frames=self.vinfer.uniq if self.vinfer else 0, cube_rows=self.cube_rows, **extra_meta)
         self.meta["bytes"] = _dir_size(self.dir)
         (self.dir / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -436,6 +457,7 @@ class Recorder:
         self.last = None                          # 마지막으로 닫은 기록 이름
         self._list_cache = (0.0, None)
         self.git = None
+        self.low_disk = None                      # 남은 디스크가 모자라 기록을 안 연 때: {"free": 바이트, "t": 시각}
 
     # -------------------------------------------------- 설정
     def setup(self, log_dir, get_arm, get_mode, get_can):
@@ -471,6 +493,20 @@ class Recorder:
             return None
 
     # -------------------------------------------------- 시작 / 끝
+    def _disk_ok(self):
+        """남은 디스크 ≥ MIN_FREE_GB 인가 (statvfs 한 번 — 빠름). 모자라면 low_disk 에 남겨 칩에 표시."""
+        try:
+            free = shutil.disk_usage(self.root).free
+        except OSError:
+            return True
+        if free < MIN_FREE_GB * (1 << 30):
+            if self.low_disk is None:
+                print(f"run_record: 남은 디스크 {free / (1 << 30):.2f} GB < {MIN_FREE_GB:g} GB — 기록 안 함", flush=True)
+            self.low_disk = {"free": free, "min_gb": MIN_FREE_GB, "t": time.time()}
+            return False
+        self.low_disk = None
+        return True
+
     @staticmethod
     def kind_of(traj, params):
         t, p = traj or {}, params or {}
@@ -492,6 +528,8 @@ class Recorder:
                 if self.cur is None:
                     if not self.settings.get("auto", True) or (virtual and not self.settings.get("virtual", True)):
                         return
+                    if not self._disk_ok():
+                        return
                     self.cur = Run(self, kind, "virtual" if virtual else "direct", auto=True)
                     self._snap_config(self.cur)
                 r = self.cur
@@ -508,6 +546,8 @@ class Recorder:
         with self.lock:
             if self.cur is not None:
                 return {"ok": False, "error": f"이미 기록 중: {self.cur.name}"}
+            if not self._disk_ok():
+                return {"ok": False, "error": f"남은 디스크 {self.low_disk['free'] / (1 << 30):.2f} GB — {MIN_FREE_GB:g} GB 아래라 기록 안 함"}
             arm, virtual = self.get_arm()
             self.cur = Run(self, kind, "virtual" if virtual else self.get_mode(), auto=False)
             self._snap_config(self.cur)
@@ -521,7 +561,8 @@ class Recorder:
             if r is None:
                 return {"ok": True, "msg": "기록 중 아님"}
             r.close_req = reason
-        r.closed.wait(5.0)                 # 쓰기 스레드가 닫는다
+        if not r.closed.wait(5.0):         # 쓰기 스레드가 닫는다
+            return {"ok": False, "error": f"기록이 5초 안에 안 닫힘: runs/{r.name} (기록 스레드 확인)", "run": r.name}
         return {"ok": True, "msg": f"기록 끝: runs/{r.name}", "run": r.name}
 
     def _close(self, r, reason):
@@ -594,15 +635,18 @@ class Recorder:
 
     def _step(self, r):
         import live_api
-        mode = self.get_mode()
-        arm, virtual = self.get_arm()
-        if not r.auto and arm is not None and arm is not r.arm:      # 손으로 켠 기록: 그 사이 팔을 연결하면 붙임
-            r.attach(arm, virtual)
-        if r.arm is not None and not virtual and not getattr(r.arm, "running", True):
-            r.event("팔 연결 끊김")
-            r.detach()
-        can = self.get_can()
-        r.step(live_api.LIVE, live_api.SCENE, mode == "virtual", can)
+        try:
+            mode = self.get_mode()
+            arm, virtual = self.get_arm()
+            if not r.auto and arm is not None and arm is not r.arm:      # 손으로 켠 기록: 그 사이 팔을 연결하면 붙임
+                r.attach(arm, virtual)
+            if r.arm is not None and not virtual and not getattr(r.arm, "running", True):
+                r.event("팔 연결 끊김")
+                r.detach()
+            can = self.get_can()
+            r.step(live_api.LIVE, live_api.SCENE, mode == "virtual", can)
+        except Exception as e:                  # 아래 닫기 판정(손으로 끝·재생 끝·30분)은 꼭 돈다
+            r._once("pre", f"기록 스레드 오류: {type(e).__name__}: {e}")
         now = time.time()
         if r.close_req:
             with self.lock:
@@ -612,11 +656,12 @@ class Recorder:
             return
         if r.auto:
             po = r.play_obj
-            running = bool(po is not None and po.play.get("running"))
+            pl = getattr(po, "play", None) or {}
+            running = bool(po is not None and pl.get("running"))
             if running:
                 r.play_seen = True
             if r.end_at is None and (r.play_seen and not running or po is None or (not r.play_seen and now - r.t0 > 5)):
-                reason = (po.play.get("reason") if po is not None else None) or "재생 끝"
+                reason = (pl.get("reason") if po is not None else None) or "재생 끝"
                 r.end_reason = reason
                 r.event(f"재생 끝: {reason} — {TAIL_S:g}초 더 기록")
                 r.end_at = now + TAIL_S
@@ -689,11 +734,14 @@ class Recorder:
 
     def status(self):
         r = self.cur
-        out = {"on": r is not None, "settings": dict(self.settings), "last": self.last}
+        out = {"on": r is not None, "settings": dict(self.settings), "last": self.last, "low_disk": self.low_disk}
         if r is not None:
             out.update(run=r.name, kind=r.kind, auto=r.auto, seconds=round(time.time() - r.t0, 1), rows=r.rows,
                        frames=r.vlive.uniq if r.vlive else 0, infer=r.vinfer.uniq if r.vinfer else 0, ending=r.end_at is not None)
         out["list"] = self.listing()
+        free = out["list"].get("free")
+        if free is not None and r is None:     # 지금 시작하면 안 열릴 만큼 모자라면 미리 칩에 (listing 이 5초 캐시)
+            out["low_disk"] = {"free": free, "min_gb": MIN_FREE_GB} if free < MIN_FREE_GB * (1 << 30) else None
         return out
 
     def zip_path(self, name):

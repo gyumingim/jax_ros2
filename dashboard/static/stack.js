@@ -104,7 +104,7 @@
     ST.mapSw.hidden = !virt; if (!virt && ST.mapMode !== "tower") setMapMode("tower");
     ST.src.textContent = lvSrcText(all);
     const live = !virt && !all.stale;   // 그림 = MJPEG 스트림 (한 번 걸고, 영상 있음/없음이 바뀔 때만 다시)
-    if (live !== ST.imgLive) { ST.imgLive = live; ST.img.hidden = !live; if (live) ST.img.src = "/api/live/stream.mjpg?t=" + Date.now(); else ST.img.removeAttribute("src"); }
+    if (live !== ST.imgLive) { ST.imgLive = live; ST.img.hidden = !live; streamSet(ST.img, live); }
     ST.det = r; ST.all = all;
     if (sig === ST.sig) { mapDraw(); return; }
     ST.sig = sig;
