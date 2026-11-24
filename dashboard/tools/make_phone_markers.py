@@ -4,6 +4,7 @@
     /usr/bin/python3 dashboard/tools/make_phone_markers.py
 
 1쪽 = 기준 종이 (ArUco 5x5 ID 0~5, 32 mm): 책상에 붙인다.  2쪽 = 큐브 윗면 마커 (ID 10, 40 mm) 6장.
+탑 쌓기용 stack_markers.pdf (1쪽, 큐브마다 다른 마커 ID 10~15) 도 같이 만든다 (--stack-only 면 그것만).
 크기·자리는 phone_detect.py 의 상수 그대로 (여기서 숫자를 따로 두지 않는다). 인쇄는 꼭 '실제 크기 100%'.
 """
 import sys
@@ -82,9 +83,43 @@ def cube_image(dpi=300):
     return im
 
 
+def stack_image(dpi=300):
+    """탑 쌓기 쪽: 큐브마다 다른 마커 6장 (ID PD.CUBE_IDS = 10~15, 40 mm, 50 mm 선을 따라 오린다). 번호는 오리는 선 밖에 적는다."""
+    im, d = _page(dpi)
+    k = dpi / 25.4
+    P = lambda x, y: (round((A4[0] / 2 + x) * k), round((A4[1] / 2 - y) * k))   # noqa: E731
+    ids = list(PD.CUBE_IDS)
+    d.text(P(0, 92), f"JAX 탑 쌓기 — 큐브 윗면 마커 (ArUco 5x5, ID {ids[0]}~{ids[-1]}, {PD.CUBE_MARKER_MM:.0f} mm)", fill=0, font=_font(5.5, dpi), anchor="mm")
+    d.text(P(0, 83), "큐브마다 다른 번호 한 장씩. 모서리 표시(50 mm 네모)에 맞춰 오려 큐브 윗면에 반듯하게 붙인다. 기준 종이는 phone_markers.pdf 1쪽 그대로.",
+           fill=110, font=_font(4.2, dpi), anchor="mm")
+    lw = max(1, round(0.25 * k))
+    for j, cy in enumerate((38, -32)):
+        for i, cx in enumerate((-80, 0, 80)):
+            mid = ids[j * 3 + i]
+            m = _marker(mid, PD.CUBE_MARKER_MM, dpi)
+            x, y = P(cx, cy)
+            im.paste(m, (x - m.width // 2, y - m.height // 2))
+            for sx in (-1, 1):   # 50 mm 네모는 모서리 표시(ㄱ자 8 mm)만: 닫힌 네모 선이 오린 뒤에도 남으면 ArUco 가 그 네모를 후보로 잡아 안쪽 마커를 버린다
+                for sy in (-1, 1):
+                    d.line([P(cx + sx * 25, cy + sy * 25), P(cx + sx * 17, cy + sy * 25)], fill=150, width=lw)
+                    d.line([P(cx + sx * 25, cy + sy * 25), P(cx + sx * 25, cy + sy * 17)], fill=150, width=lw)
+            d.text(P(cx, cy - 31), f"ID {mid}", fill=110, font=_font(4.2, dpi), anchor="mm")
+    d.line([P(-50, -84), P(50, -84)], fill=0, width=max(1, round(0.3 * k)))   # 인쇄 확인 자
+    for x in (-50, 0, 50):
+        d.line([P(x, -82), P(x, -86)], fill=0, width=max(1, round(0.3 * k)))
+    d.text(P(0, -91), "인쇄 확인: 위 선이 정확히 100 mm (실제 크기 100% 로 인쇄)", fill=110, font=_font(4.2, dpi), anchor="mm")
+    return im
+
+
 def main():
     out = HERE.parent / "phone_markers"
     out.mkdir(exist_ok=True)
+    c = stack_image(300)
+    c.save(out / "stack_markers.pdf", "PDF", resolution=300.0)
+    c.save(out / "sheet_stack_cubes.png", dpi=(300, 300), optimize=True)
+    print("만듦:", out / "stack_markers.pdf")
+    if "--stack-only" in sys.argv:
+        return
     a, b = sheet_image(300), cube_image(300)
     a.save(out / "phone_markers.pdf", "PDF", resolution=300.0, save_all=True, append_images=[b])
     a.save(out / "sheet_p1_reference.png", dpi=(300, 300), optimize=True)

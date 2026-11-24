@@ -28,8 +28,9 @@ def look_at(cam, target):
     return R, -R @ cam
 
 
-def render(cfg, cube, cam, f):
-    """cube = (x, y, yaw°) 실좌표. cam = 카메라 자리 (x, y, 책상 위 높이 m)."""
+def render(cfg, cube, cam, f, cubes=None):
+    """cube = (x, y, yaw°) 실좌표. cam = 카메라 자리 (x, y, 책상 위 높이 m).
+    cubes (탑 쌓기 시험): [(마커 ID, x, y, yaw°, 층)] — 주면 cube 대신 이것들을 그린다 (층 0 = 책상 위, 윗면 높이 = (층 + 1) × cube_h)."""
     K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1.0]])
     R, t = look_at(np.array(cam, float), [cfg["x"], cfg["y"], 0])
     proj = lambda p: (lambda q: q[:2] / q[2])(K @ (R @ np.array(p, float) + t))   # noqa: E731
@@ -42,16 +43,22 @@ def render(cfg, cube, cam, f):
     dst = np.float32([proj(real(-a, b)), proj(real(a, b)), proj(real(a, -b)), proj(real(-a, -b))])
     M = cv2.getPerspectiveTransform(np.float32([[0, 0], [sw, 0], [sw, sh], [0, sh]]), dst)
     cv2.warpPerspective(sheet, M, (W, H), dst=img, borderMode=cv2.BORDER_TRANSPARENT, flags=cv2.INTER_AREA)
-    # 큐브 윗면 (50 mm 흰 면 + 40 mm 마커), 높이 cube_h
-    cx, cy, yaw = cube
-    cc, cs = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
-    top = np.full((500, 500), 255, np.uint8)
-    top[50:450, 50:450] = cv2.aruco.drawMarker(PD._dictionary(cv2), PD.CUBE_ID, 400)
-    top = cv2.cvtColor(top, cv2.COLOR_GRAY2BGR)
-    pts = [(-0.025, 0.025), (0.025, 0.025), (0.025, -0.025), (-0.025, -0.025)]
-    dst = np.float32([proj((cx + cc * u - cs * v, cy + cs * u + cc * v, cfg["cube_h"])) for u, v in pts])
-    M = cv2.getPerspectiveTransform(np.float32([[0, 0], [500, 0], [500, 500], [0, 500]]), dst)
-    cv2.warpPerspective(top, M, (W, H), dst=img, borderMode=cv2.BORDER_TRANSPARENT, flags=cv2.INTER_AREA)
+    # 큐브 윗면 (50 mm 흰 면 + 40 mm 마커), 높이 cube_h (쌓인 큐브는 그만큼 더 위). 카메라에서 먼(낮은) 것부터 그린다
+    items = [(PD.CUBE_ID, cube[0], cube[1], cube[2], 0)] if cubes is None else sorted(
+        cubes, key=lambda c: -math.dist(cam, (c[1], c[2], (c[4] + 0.5) * cfg["cube_h"])))
+    for mid, cx, cy, yaw, lv in items:
+        cc, cs = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        if cubes is not None:   # 큐브 몸통 (아래 큐브의 윗면을 가린다): 꼭짓점 8 개의 볼록 껍질을 칠함
+            box = np.int32([proj((cx + cc * u - cs * v, cy + cs * u + cc * v, (lv + z) * cfg["cube_h"]))
+                            for u in (-0.025, 0.025) for v in (-0.025, 0.025) for z in (0, 1)])
+            cv2.fillConvexPoly(img, cv2.convexHull(box), (70, 110, 160))
+        top = np.full((500, 500), 255, np.uint8)
+        top[50:450, 50:450] = cv2.aruco.drawMarker(PD._dictionary(cv2), mid, 400)
+        top = cv2.cvtColor(top, cv2.COLOR_GRAY2BGR)
+        pts = [(-0.025, 0.025), (0.025, 0.025), (0.025, -0.025), (-0.025, -0.025)]
+        dst = np.float32([proj((cx + cc * u - cs * v, cy + cs * u + cc * v, (lv + 1) * cfg["cube_h"])) for u, v in pts])
+        M = cv2.getPerspectiveTransform(np.float32([[0, 0], [500, 0], [500, 500], [0, 500]]), dst)
+        cv2.warpPerspective(top, M, (W, H), dst=img, borderMode=cv2.BORDER_TRANSPARENT, flags=cv2.INTER_AREA)
     return cv2.GaussianBlur(img, (3, 3), 0)
 
 
@@ -62,9 +69,47 @@ CASES = [   # (이름, 종이 cfg 덮어쓰기, 큐브 (x, y, yaw), 카메라 (x
 ]
 
 
+MULTI = [   # 탑 쌓기 (detect_cubes): (이름, 큐브 [(ID, x, y, yaw, 층)], 카메라, 초점 px)
+    ("큐브 3개 (하나는 2층)", [(10, -0.14, -0.30, 10.0, 0), (11, -0.14, -0.30, 10.0, 1), (12, 0.02, -0.27, 20.0, 0), (13, 0.10, -0.21, -15.0, 0)],
+     (-0.10, -0.80, 0.50), 1250),
+    ("큐브 3개 (3층 탑 + 하나), 옆에서", [(10, -0.14, -0.30, 0.0, 0), (11, -0.14, -0.30, 5.0, 1), (12, -0.138, -0.302, -8.0, 2), (14, 0.05, -0.35, 35.0, 0)],
+     (0.40, -0.62, 0.55), 1400),
+]
+
+
+def multi(save):
+    """가짜 사진의 보이는 큐브(같은 자리에선 맨 위 것) 모두를 1 cm·3°·층까지 맞히나."""
+    bad = 0
+    cfg = dict(PD.DEFAULT_CFG)
+    for k, (name, cubes, cam, f) in enumerate(MULTI):
+        ok, buf = cv2.imencode(".jpg", render(cfg, None, cam, f, cubes), [cv2.IMWRITE_JPEG_QUALITY, 90])
+        r = PD.detect_cubes(buf.tobytes(), cfg)
+        if save:
+            (save / f"stack_case{k}.jpg").write_bytes(buf.tobytes())
+            cv2.imwrite(str(save / f"stack_case{k}_found.jpg"), r["annotated"])
+        if not r["ok"]:
+            print(f"✗ {name}: {r.get('reason')}"); bad += 1; continue
+        got = {c["id"]: c for c in r["cubes"]}
+        vis_ = [c for c in cubes if not any(o is not c and math.hypot(o[1] - c[1], o[2] - c[2]) < 0.03 and o[4] > c[4] for o in cubes)]   # 위에 다른 큐브가 없는 것
+        line, good = [], len(got) == len(vis_)
+        for mid, x, y, yaw, lv in vis_:
+            c = got.get(mid)
+            if c is None:
+                good = False; line.append(f"{mid}: 못 찾음"); continue
+            dpos = math.hypot(c["x"] - x, c["y"] - y) * 1000
+            dyaw = abs((c["yaw_deg"] - yaw + 45) % 90 - 45)
+            good = good and dpos <= 10 and dyaw <= 3 and c["level"] == lv
+            line.append(f"{mid}: {dpos:.1f} mm, {dyaw:.1f}°, 층 {c['level']} (참 {lv}), 마커 {c['marker_mm']} mm")
+        bad += not good
+        print(f"{'✓' if good else '✗'} {name}: " + " · ".join(line) + f" · 초점 {r['camera']['f_px']} (참 {f}) {r['warn'] or ''}")
+    return bad
+
+
 def main():
     save = Path(sys.argv[1]) if len(sys.argv) > 1 else None
-    bad = 0
+    if save:
+        save.mkdir(parents=True, exist_ok=True)
+    bad = multi(save)
     for k, (name, over, cube, cam, f) in enumerate(CASES):
         cfg = {**PD.DEFAULT_CFG, **over}
         ok, buf = cv2.imencode(".jpg", render(cfg, cube, cam, f), [cv2.IMWRITE_JPEG_QUALITY, 90])
