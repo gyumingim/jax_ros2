@@ -1,7 +1,7 @@
 // '강화학습' 탭: 팀원이 학습한 집기 정책(team-jax/IK sim2sim, MuJoCo)을 한 곳에서 돌려 보고 3D 로 다시 본다.
 // 버튼 둘: [강화학습으로 들기] = 그 정책(끝 = 큐브를 쥔 ㄴ자 자세), [역기구학으로 내리기] = 거기서 이어 우리 IK 계획(pick_plan.plan_place_from)으로
 // 놓을 자리에 내려놓고 HOME. 3D 는 들기 + 내리기를 이어서 재생한다.
-// 서버: rl_api.py (/api/rl/*) → rl_runner.py. 시뮬만 — 실물·가상 팔에는 아무것도 안 보낸다.
+// 서버: rl_api.py (/api/rl/*) → rl_runner.py. 계산은 시뮬만 — 팔에는 맨 아래 '팔로 재생' 블록의 버튼에서만 보낸다.
 // app.js 다음에 읽혀 탭 하나를 덧붙인다(app.js 는 그대로). 이 파일이 실패해도 다른 탭은 그대로 돈다.
 "use strict";
 (function () {
@@ -54,7 +54,7 @@
 #page-rl .rl-seg i.sw.tgt { border-color: #1d4ed8; }`));
   R.card = el("div", { class: "card" },
     el("h3", {}, "정책 돌려보기"),
-    el("p", { class: "help" }, "팀원이 학습한 집기 정책 ", (R.policy = el("b", {}, "grasp_lift_25550")), " 을 MuJoCo 시뮬에서 돌린다. 실물 팔은 안 움직인다."),
+    el("p", { class: "help" }, "팀원이 학습한 집기 정책 ", (R.policy = el("b", {}, "grasp_lift_25550")), " 을 MuJoCo 시뮬에서 돌린다. 팔은 아래 재생 버튼을 눌러야만 움직인다."),
     el("div", { class: "modesw seg rl-seg", role: "group", "aria-label": "지도를 누르면 옮길 것" }, R.bCube, R.bPlace),
     R.map, R.mapNote,
     el("div", { class: "frow" },
@@ -350,5 +350,49 @@
     show();
   }
   requestAnimationFrame(tick);
+
+  // ===== 팔로 재생 (2026-11-24): 들기 + 내리기를 실물 / 가상 팔로 — 이 블록만 (서버 rl_api.py /api/rl/traj·play_real·play_virtual) =====
+  // 실물 = direct_api.play_real 그대로 (IK 탭 '실물로 재생'과 같은 검사·확인창), 가상 = server._play_virtual 그대로. mtime = 화면이 본 궤적.
+  const A = { info: null, res: null, msg: "" };
+  A.btn = el("button", { class: "btn red", onclick: armPlay, disabled: true }, "실물로 재생");
+  A.out = el("div", { class: "note" });
+  A.help = el("p", { class: "help" }, "팔로 재생 = 시뮬 결과(들기 + 내리기)를 그대로 되풀이 (열린 루프). 실물 손엔 손가락 압력 센서(정책 관측 37–42)가 없고 큐브를 매 순간 따라가지 않는다. 먼저 ⌂ HOME — 지금 자세가 HOME(첫 프레임)에서 5° 넘게 다르면 거절.");
+  R.place.after(A.btn);
+  R.out.after(A.out, A.help);
+  async function armInfo() { A.res = R.res; A.msg = ""; A.info = await get("/api/rl/traj"); armRender(); }
+  function armRender() {
+    if (R.res !== A.res) { armInfo(); return; }
+    const real = DIRECT(), virt = VIRT(), i = A.info;
+    const pb = (virt ? ((S.ros || {}).virtual_state || {}).playback : DS().playback) || {};
+    A.btn.hidden = A.help.hidden = A.out.hidden = !(real || virt);
+    A.btn.textContent = virt ? "가상 팔로 재생" : "실물로 재생";
+    A.btn.className = virt ? "btn" : "btn red";
+    const why = R.busy ? "계산 중" : !i || !i.ok ? (i && i.error) || "들기 + 내리기 먼저" : real && !DC() ? "연결 탭 ② 팔 연결 먼저" : pb.running ? "재생 중" : "";
+    A.btn.disabled = !!why; A.btn.title = why;
+    const plan = i && i.ok ? `재생 ${i.play_s.toFixed(0)}초 (시뮬 ${i.sim_s.toFixed(0)}초의 ${i.factor.toFixed(1)}배 — 빠른 구간 최대 ${i.stretch_max.toFixed(1)}배 늘림, ${i.speed_deg_s}°/s)` : "재생 안 됨: " + ((i && i.error) || "…");
+    A.out.className = "note" + (i && i.ok ? "" : " warn");
+    A.out.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${(pb.slow || 1).toFixed(1)}배 더 느리게, 약 ${(pb.seconds || 0).toFixed(0)}초) · 멈춤 = ■ STOP / Esc`
+      : (A.msg ? A.msg + " · " : "") + (pb.reason ? "마지막 재생: " + pb.reason + " · " : "") + plan;
+  }
+  async function armPlay() {
+    const i = A.info, real = DIRECT();
+    if (!i || !i.ok) return;
+    const what = `강화학습 들기 + 역기구학 내리기 (${i.play_s.toFixed(0)}초, 시뮬 결과 그대로 — 열린 루프)`;
+    if (!confirm(real ? `⚠ 실물 팔로 ${what} 를 재생한다.\n\n먼저 ⌂ HOME: 지금 자세가 첫 프레임(HOME, 모든 관절 0)에서 5° 넘게 다르면 거절. 원점 4개·서보 한 번씩 보낸 뒤. ` +
+      "AK45 가 명령에서 15° 넘게 0.5초 벌어지면 멈추고 그 자리 홀드.\n\n팔 주변을 비웠나요?" : `(가상) 가상 팔로 ${what} 를 재생할까요?`)) return;
+    if (real && !confirm("정말 실물로 재생할까요? (멈춤 = ■ STOP / Esc)")) return;
+    const url = real ? "/api/rl/play_real" : "/api/rl/play_virtual";
+    let r = await post(url, { force: false, mtime: i.mtime }, true);
+    if (!r.ok && r.need_force) {
+      if (!confirm("검사에서 문제가 나왔다 (play_trajectory 면 --force 가 필요):\n\n- " + r.problems.join("\n- ") + "\n\n그래도 재생할까요?")) { A.msg = "취소: 검사 " + r.problems.length + "건"; armRender(); return; }
+      r = await post(url, { force: true, mtime: i.mtime }, true);
+    }
+    A.msg = r.ok ? (r.msg || "재생 시작") : "거절: " + (r.error || "실패");
+    if (r.ok) toast(A.msg);
+    armRender();
+  }
+  setInterval(() => { if (curTab === "rl") armRender(); }, 500);
+  // ===== 팔로 재생 끝 =====
+
   if (curTab === "rl") onShow();
 })();

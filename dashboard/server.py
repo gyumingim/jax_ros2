@@ -357,10 +357,11 @@ def _trajectory():
     return out
 
 
-def _play_virtual():
+def _play_virtual(trajectory=None):
+    """trajectory: 궤적을 주는 함수 (기본 = 역기구학 탭 계획 _trajectory, 강화학습 탭은 rl_api._traj)."""
     if not MODE["virtual"]:
         return {"ok": False, "error": "가상 모드에서만 (실물 재생은 대시보드에 없음)"}
-    t = _trajectory()
+    t = (trajectory or _trajectory)()
     if not t["ok"]:
         return {"ok": False, "error": t.get("error") or "궤적 없음"}
     traj = t["traj"]
@@ -790,9 +791,9 @@ async def api_go_home(req: Request):
 
 direct_api.install(app, mode_kind, pm, can_state, _trajectory, str(LOG_DIR / "direct.log"))
 
-# --- 강화학습 탭 (rl_api.py: 팀원 정책을 MuJoCo 로 돌려보기 — 시뮬만, 팔에는 아무것도 안 보냄) ---
+# --- 강화학습 탭 (rl_api.py: 팀원 정책을 MuJoCo 로 돌려보기. 팔에는 '실물로 재생'·'가상 팔로 재생' 버튼에서만) ---
 import rl_api   # noqa: E402
-rl_api.install(app, _ik_dir)
+rl_api.install(app, _ik_dir, arm={"mode": mode_kind, "play_virtual": _play_virtual})   # 팔 재생: direct_api.play_real / _play_virtual 그대로
 # --- 강화학습 탭 끝 ---
 # 휴대폰 카메라 탭 (사진 → 큐브 자리, ArUco): 전부 phone_api.py / phone_detect.py / static/phone.js. 팔은 거기서 안 움직인다
 import phone_api   # noqa: E402

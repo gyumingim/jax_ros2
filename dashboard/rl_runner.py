@@ -130,7 +130,8 @@ def run(args):
     close_t = s["phase_t_s"]["GRASP_LIFT"]
     ci = int(np.searchsorted(tr["t"], close_t - 1e-9))
     z0 = float(tr["cube_pos"][min(ci, len(tr["t"]) - 1), 2])
-    return {"ok": True, "spot": {"x_cm": args.x, "y_cm": args.y, "yaw_deg": args.yaw}, "summary": s,
+    sp = C.spec_of() if hasattr(C, "spec_of") else {"policy": "grasp_lift_23025"}   # 실물 재생(rl_api)이 옛 정책 결과를 거절하려고 적는다
+    return {"ok": True, "policy": sp["policy"], "spot": {"x_cm": args.x, "y_cm": args.y, "yaw_deg": args.yaw}, "summary": s,
             "phases": list(C.PHASES), "joint_names": names,
             "t": [round(float(tr["t"][k]), 3) for k in idx], "phase": [int(tr["phase"][k]) for k in idx],
             "q": [[round(float(tr["q"][k][c]), 4) for c in cols] for k in idx],
