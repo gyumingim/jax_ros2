@@ -161,6 +161,8 @@ def detect(image_bytes, cfg=None):
         cad = _cad(cv2, np, cfg, found, w, h, (CUBE_ID,))
         if cad is None:
             return {**out, "reason": "기준 종이가 안 보이고 폰 보정값·책상 높이도 없어 자리를 못 구함"}
+        if "cam" not in cad:   # 사진 방향을 못 정함·보정값 안 맞음 등 (detect_cubes 와 같게) — 예전엔 KeyError 로 실시간 인식 전체가 멈춤
+            return {**out, "reason": "기준 종이가 안 보임 · " + cad["why"]}
         cam, cpix = cad["cam"], cad["und"][CUBE_ID]
         top, side = _top(np, cam, cpix, cfg["cube_h"])
         out["camera"] = {"src": "cad", "pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "image_rot_deg": cad["q"] * 90}
