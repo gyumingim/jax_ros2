@@ -172,7 +172,7 @@ def next_step(cubes, base, order, placed=None):
     loose = [c for c in cs if c not in tower and c["level"] == 0]
     odd = [c for c in cs if c not in tower and c["level"] > 0]
     out.update(height=height, top=top, hidden=hidden)
-    inside = len(hidden) + (1 if top else 0)     # order 로 설명되는 탑 큐브 수
+    inside = len(hidden) + len({c["id"] for c in tower if c["id"] in order} | ({top["id"]} if top else set()))   # order 로 설명되는 탑 큐브 수 (카메라는 맨 위만, 가상 장면은 전부 보임)
     if top and top["id"] not in order:
         out["warn"].append(f"탑 맨 위 큐브 {top['id']} 는 순서에 없는 큐브")
     if inside > height:
