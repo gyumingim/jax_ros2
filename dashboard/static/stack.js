@@ -166,7 +166,7 @@
   function baseUI() {
     const lk = ST.lock, all = ids();
     if (!lk) {
-      if (!ST.orderTouched && all.length && ST.orderFor !== all.join(",")) { ST.order.value = all.join(", "); ST.orderFor = all.join(","); }   // 기본 = 번호 오름차순
+      if (!ST.orderTouched && all.length && ST.orderFor !== all.join(",")) { ST.order.value = all.slice(0, 3).join(", "); ST.orderFor = all.join(","); }   // 기본 = 번호 오름차순, 3층까지라 앞 3개
     } else {
       ST.order.value = lk.order.join(", ");
       ST.sx.value = lk.base.x.toFixed(3); ST.sy.value = lk.base.y.toFixed(3); ST.syaw.value = String(lk.base.yaw_deg);
@@ -188,6 +188,7 @@
     if (ST.lock || !ST.det || !ST.det.ok) return "";
     const ch = chosen();
     if (ch.error) return ch.error;
+    if (ch.order.length > 3) return `순서는 3개까지 — 탑은 3층까지만 (지금 ${ch.order.length}개)`;
     for (const i of ch.order) {
       const c = ST.det.cubes.find((k) => k.id === i), g = ST.grasp[i];
       if (!c) return `순서의 큐브 ${i} 가 사진에 없음 (찾은 큐브: ${ids().join(", ") || "없음"})`;

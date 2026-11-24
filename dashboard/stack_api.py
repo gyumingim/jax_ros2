@@ -31,6 +31,7 @@ SHEET = HERE / "phone_markers" / "stack_markers.pdf"
 TOWER_R = 0.025       # 탑 자리에서 이 안(m)에 보이는 큐브 = 탑의 맨 위 큐브 (놓인 큐브가 사진마다 몇 mm 씩 달리 보이고, 층마다 조금씩 어긋나도)
 OVERLAP_R = 0.08      # 탑 자리에서 이 안인데 탑은 아닌 큐브 = 탑 자리와 겹침 (큐브 한 변 5 cm + 손가락 자리)
 NEAR_M = 0.15         # 집을 큐브에서 이 안에 다른 큐브가 있으면 알림 (벌린 손가락이 닫히며 큐브 중심에서 12 cm 쯤까지 나온다)
+MAX_LEVELS = 3        # 2026-11-24 사용자: 탑은 3층까지만 (순서는 바닥 큐브 포함 3개까지, 4층째는 계획하지 않음)
 REACH_LEVELS = 3      # 기본 책상 높이(어깨 아래 0.4775 m)에서 팔이 놓을 수 있는 층 수 (4층째 = 책상 위 15 cm 에 놓기는 어디서도 안 됨, README)
 LAST = {"r": None}
 MAP_X = (-0.26, 0.22)   # 지도 범위 (실좌표 m), 칸 2 cm
@@ -155,6 +156,10 @@ def next_step(cubes, base, order):
     over = [c for c in loose + odd if math.hypot(c["x"] - bx, c["y"] - by) <= OVERLAP_R]
     if over:
         return {**out, "text": f"탑 자리가 큐브 {', '.join(str(c['id']) for c in over)} 와 겹침 — 그 큐브 위에 쌓으려면 지도에서 그 큐브를 누르고, 아니면 8 cm 넘게 띄우기"}
+    if len(order) > MAX_LEVELS:
+        return {**out, "text": f"순서는 {MAX_LEVELS}개까지 — 탑은 {MAX_LEVELS}층까지만 쌓는다 (지금 {len(order)}개)"}
+    if height >= MAX_LEVELS:
+        return {**out, "ok": True, "done": True, "text": f"탑 완성: {height}층 (최대 {MAX_LEVELS}층)"}
     nxt = next((c for i in order for c in loose if c["id"] == i), None)
     if nxt is None:
         if height == 0:
