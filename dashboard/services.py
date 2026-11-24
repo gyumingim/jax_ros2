@@ -175,6 +175,11 @@ def _pick_args(p):
     d = (p.get("d") or "").strip()
     if d:
         a += ["--d", f"{_num(d, 'd', 0.0, 2.0):g}"]
+    g = (p.get("grasp") or "").strip()   # 집는 방향 (대시보드 계획만 — 팀 시뮬 계획은 이 옵션이 없다)
+    if g and g != "auto" and str(p.get("team_sim") or "").strip().lower() not in ("1", "true", "on", "yes"):
+        if g not in ("vertical", "horizontal"):
+            raise ValueError(f"집는 방향: auto / vertical / horizontal ({g!r})")
+        a += ["--grasp", g]
     ik = (p.get("ik") or "").strip()
     if ik:
         if not re.fullmatch(r"[A-Za-z0-9_./~:\\-]{1,200}", ik):
@@ -269,6 +274,7 @@ SERVICES = [
                     Param("target_y", "target y", "-0.33", "m"),
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
                     Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.53"),
+                    Param("grasp", "집는 방향", "auto", "auto 자동(수직 → 수평 → 기울임) / vertical 수직(위에서) / horizontal 수평(옆에서 밀어 넣기)"),
                     Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),
                     Param("team_sim", "팀 시뮬 계획 (물리)", "", "1 이면 팀 계획 (pick_place, MuJoCo 물리), 비우면 대시보드 해석 IK 계획")]),
     Service("vcan_test", "vcan 시험 (launch_vcan.sh)", _vcan, kind="once", group="시험",

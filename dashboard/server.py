@@ -350,7 +350,7 @@ def _trajectory():
         return out
     keep = ("real", "sim", "status", "reason", "playable", "delivered_in_sim", "retries", "final_error_m",
             "joint_names", "dt", "positions", "unit", "peak_speed_deg_s", "reach_map",
-            "planner", "waypoints", "checks", "problems")   # planner = "analytic" 이면 대시보드 계획 (pick_plan.py, 물리 없음)
+            "planner", "waypoints", "checks", "problems", "grasp")   # planner = "analytic" 이면 대시보드 계획 (pick_plan.py, 물리 없음)
     out.update(ok=True, traj={k: d.get(k) for k in keep if k in d}, mtime=PICK_TRAJ.stat().st_mtime)
     if not d.get("positions"):
         out.update(ok=False, error=f"궤적 없음: {d.get('status')} ({d.get('reason')})")
@@ -579,7 +579,22 @@ async def api_ik_pair(req: Request):
 
 
 _GRASP_LOCK = threading.Lock()
-_GRASP_CACHE = {}   # (관절 범위, shoulder_yaw, 책상 높이 d) -> 집을 수 있는 곳 지도 (메모리만, 저장 안 함). 높이 몇 개를 오가도 다시 안 풀게 3 개까지
+_GRASP_CACHE = {}   # (관절 범위, shoulder_yaw, 책상 높이 d, 집는 방향, 큐브 yaw) -> 집을 수 있는 곳 지도 (메모리만, 저장 안 함). 높이·방향 몇 개를 오가도 다시 안 풀게 6 개까지
+
+
+def _grasp_mode(v, yaw=None):
+    """화면의 집는 방향(auto / vertical / horizontal, 빈 값 = auto)과 큐브 yaw(°, 빈 값 = 안 줌) → (grasp, yaw). 모르는 값은 ValueError."""
+    import hand_ik
+    g = str(v or "auto").strip() or "auto"
+    if g not in hand_ik.GRASP_MODES:
+        raise ValueError(f"집는 방향(grasp)은 {' / '.join(hand_ik.GRASP_MODES)} 중 하나")
+    try:
+        y = None if yaw in (None, "") else float(yaw)
+    except (TypeError, ValueError):
+        raise ValueError("yaw 는 숫자 (°)")
+    if y is not None and not (math.isfinite(y) and abs(y) <= 720):
+        raise ValueError("yaw 는 −720~720 °")
+    return g, (None if y is None else round(y, 1))
 
 
 def _table_d(v):
@@ -613,22 +628,24 @@ def _sy(v):
 
 
 @app.get("/api/ik/graspmap")
-def api_ik_graspmap(shoulder_yaw: float = 0.0, d: str = ""):
-    """책상 위 1 cm 격자마다 큐브를 집을 수 있나 (해석 IK, 정의는 hand_ik._Solver.grasp_eval). 처음 한 번 몇 초, 이후 캐시."""
+def api_ik_graspmap(shoulder_yaw: float = 0.0, d: str = "", grasp: str = "auto", yaw: str = ""):
+    """책상 위 1 cm 격자마다 큐브를 집을 수 있나 (해석 IK, 정의는 hand_ik._Solver.grasp_eval). 처음 한 번 몇 초, 이후 캐시.
+    grasp = 집는 방향 (auto / vertical / horizontal), yaw = 이 큐브 yaw (실좌표 °) 만 보기 (비우면 모든 yaw; 수평은 '하나라도')."""
     import hand_ik
     ranges, sy = _cal_ranges(), _sy(shoulder_yaw)
     try:
         td = _table_d(d)
+        gm, gy = _grasp_mode(grasp, yaw)
     except ValueError as e:
         return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
-    key = (json.dumps(ranges, sort_keys=True), round(sy, 3), None if td is None else round(td, 4))
+    key = (json.dumps(ranges, sort_keys=True), round(sy, 3), None if td is None else round(td, 4), gm, gy)
     with _GRASP_LOCK:   # 미리 계산 중이면 기다렸다가 그 결과를 쓴다 (두 번 계산 안 함)
         r = _GRASP_CACHE.get(key)
         cached = r is not None
         if not cached:
-            r = hand_ik.graspmap(_ik_dir(), ranges, sy, d=td)
+            r = hand_ik.graspmap(_ik_dir(), ranges, sy, d=td, grasp=gm, yaw=gy)
             if r.get("ok"):
-                for k in [k for k in _GRASP_CACHE if k[:2] != key[:2]] or (list(_GRASP_CACHE)[:1] if len(_GRASP_CACHE) >= 3 else []):
+                for k in [k for k in _GRASP_CACHE if k[:2] != key[:2]] or (list(_GRASP_CACHE)[:1] if len(_GRASP_CACHE) >= 6 else []):
                     _GRASP_CACHE.pop(k, None)   # 관절 범위·어깨 옆이 다른 지도는 버리고, 같은 조건의 다른 책상 높이는 3 개까지
                 _GRASP_CACHE[key] = r
     return JSONResponse({**r, "cached": cached})
@@ -674,9 +691,10 @@ async def api_ik_graspable(req: Request):
         return JSONResponse({"ok": False, "reason": "x, y 숫자 (m, |x|,|y| ≤ 2)"}, status_code=400)
     try:
         td = _table_d(b.get("d"))
+        gm, gy = _grasp_mode(b.get("grasp"), b.get("yaw"))
     except ValueError as e:
         return JSONResponse({"ok": False, "reason": str(e)}, status_code=400)
-    return JSONResponse(await asyncio.to_thread(hand_ik.graspcheck, _ik_dir(), _cal_ranges(), x, y, _sy(b.get("shoulder_yaw")), td))
+    return JSONResponse(await asyncio.to_thread(hand_ik.graspcheck, _ik_dir(), _cal_ranges(), x, y, _sy(b.get("shoulder_yaw")), td, gm, gy))
 
 
 @app.post("/api/ik/fk")
