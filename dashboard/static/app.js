@@ -546,6 +546,9 @@ function buildPick(s) {
     c.fields.team_sim, "팀 시뮬 계획 (물리)");
   c.fields.grasp = el("select", {}, el("option", { value: "auto" }, "자동"), el("option", { value: "vertical" }, "수직"), el("option", { value: "horizontal" }, "수평"), el("option", { value: "tilted" }, "기울임 (어제 방식, 손목 ±90)"));
   c.fields.grasp.value = /^(vertical|horizontal)$/.test((P0.grasp || {}).value || "") ? P0.grasp.value : "auto";
+  c.fields.z_off = el("input", { value: lsGet("jaxdash.z_off") ?? "-8", inputmode: "decimal", style: "width:70px" });
+  c.zNote = el("span", { class: "help", style: "padding-bottom:10px" });
+  c.fields.z_off.addEventListener("input", () => { lsSet("jaxdash.z_off", c.fields.z_off.value.trim()); zOffNote(); clearTimeout(c.tD); c.tD = setTimeout(() => { G.visKey = null; graspLoad(); if (RX.on) reachLoad(); }, 700); });
   c.bStart = el("button", { class: "btn", onclick: () => post(`/api/svc/${s.id}/start`, { params: params() }) }, "▶ 계획 돌려 보기");
   c.bStop = el("button", { class: "btn red", onclick: () => post(`/api/svc/${s.id}/stop`) }, "■ 중단");
   c.result = el("div", { class: "result" });
@@ -563,6 +566,9 @@ function buildPick(s) {
         "바꾸면 집을 수 있는 곳 지도를 다시 계산하고(약 1분), 계획·HOME 으로 가기·손 위치의 '책상 위 cm' 가 이 높이를 쓴다" },
         el("b", {}, "책상 높이"), fld("d", "어깨 축 아래", "m"),
         el("span", { class: "help", style: "padding-bottom:10px" }, "비우면 0.4775 · 0.44~0.60")),
+      el("div", { class: "frow", title: "카메라 큐브 위치는 그대로 두고, 계획만 책상을 이만큼 낮춘 것으로 (−8 = 손·책상·놓는 높이 전부 8 cm 아래). 브라우저에 기억" },
+        el("b", {}, "집는 높이 보정"), el("label", { class: "field" }, el("span", {}, "보정", el("small", {}, " cm")), c.fields.z_off), c.zNote,
+        el("button", { class: "btn line small", onclick: () => camCubeFetch() }, "카메라 큐브 가져오기")),
       // 집는 방향 (2026-11-24): 자동 = 수직 → 수평 → 기울임 순서로 되는 것. 지도(집을 수 있는 곳)·확인·계획이 이 방향을 쓴다
       el("div", { class: "frow", title: "자동: 수직(위에서)이 되면 수직, 안 되는 자리만 수평(옆에서), 그것도 안 되면 손목이 되는 만큼 기울여서. " +
         "수직: 손 축이 수직에서 5° 안, 위에서 곧게. 수평: 손을 눕혀 큐브 옆 4~6 cm 에서 밀어 넣음 — 큐브 면이 팔(어깨) 쪽을 볼 때만 되고, 지도는 지금 큐브 yaw 기준" },
@@ -580,6 +586,7 @@ function buildPick(s) {
       c.result, c.status, c.note, c.logbox));
   for (const k of ["cube_x", "cube_y", "cube_yaw", "target_x", "target_y", "d"]) c.fields[k].addEventListener("input", () => mapUpdate());
   // 책상 높이를 바꾸면 지도·비전 큐브 판정·손 위치를 그 높이로 다시 (치는 중엔 기다렸다가)
+  setTimeout(zOffNote, 0); c.fields.d.addEventListener("input", zOffNote);
   c.fields.d.addEventListener("input", () => { clearTimeout(c.tD); c.tD = setTimeout(() => { G.visKey = null; graspLoad(); if (RX.on) reachLoad(); }, 700); });
   // 집는 방향을 바꾸면 지도·비전 큐브 판정을 그 방향으로 다시. 수평 지도는 큐브 yaw 기준이라 yaw 를 바꿔도 다시
   const regrasp = (ms) => { clearTimeout(c.tG); c.tG = setTimeout(() => { G.visKey = null; graspLoad(); mapUpdate(); }, ms); };
@@ -674,8 +681,35 @@ const cm = (m) => { const v = Math.round(m * 1000) / 10; return (v > 0 ? "+" : v
 const degS = (d) => `${d > 0 ? "+" : d < 0 ? "−" : ""}${Math.abs(Math.round(d))}°`;
 // 책상 높이 칸 (어깨 축 아래 m): tableD() = 서버에 보낼 글자 그대로 (빈 값 = 기본, 범위 검사는 서버 hand_ik.table_d),
 // tableDNum() = 화면 계산용 숫자 (비었거나 숫자가 아니면 기본 0.4775)
-function tableD() { const f = M.c && M.c.fields.d; return f ? f.value.trim() : ""; }
-function tableDNum() { const v = parseFloat(tableD()); return Number.isFinite(v) ? v : 0.4775; }
+// 11-24 집는 높이 보정 (cm, 기본 −8): 계획·지도·HOME·3D 는 책상을 그만큼 낮춘 d_plan = d − 보정/100 으로 (−8 → d + 0.08).
+// 카메라 큐브 위치 계산(live_api td)은 보정 없는 tableDCam(). 서버(services._pick_args)도 params 의 z_off 로 같은 계산을 한다.
+function tableDCam() { const f = M.c && M.c.fields.d; return f ? f.value.trim() : ""; }
+function zOffCm() { const f = M.c && M.c.fields.z_off; const v = f ? parseFloat(f.value) : 0; return Number.isFinite(v) ? v : 0; }
+function tableDPlanNum() { const v = parseFloat(tableDCam()); return Math.round(((Number.isFinite(v) ? v : 0.4775) - zOffCm() / 100) * 1e4) / 1e4; }
+function tableD() { return zOffCm() ? String(tableDPlanNum()) : tableDCam(); }
+function tableDNum() { return tableDPlanNum(); }
+function zOffNote() {   // 보정 칸 옆 글: 계획에 쓰는 d, 범위 밖이면 이유
+  const c = M.c; if (!c || !c.zNote) return;
+  const dp = tableDPlanNum(), bad = dp < 0.44 - 1e-9 || dp > 0.60 + 1e-9;
+  c.zNote.textContent = bad ? `⚠ 계획 d ${dp} m — 0.44~0.60 밖이라 계획 못 함` : `계획 d = ${dp} m`;
+  c.zNote.style.color = bad ? "#dc2626" : "";
+}
+// '카메라 큐브 가져오기': 휴대폰 탭에서 고른 큐브(LQ.sel) → pick.cube → 책상 위 첫 ArUco 큐브의 x, y, yaw 를 큐브 칸에
+async function camCubeFetch() {
+  let r;
+  try { r = await (await fetch("/api/live/cubes?d=" + encodeURIComponent(tableDCam()) + (LQ.sel != null ? "&pick=" + LQ.sel : ""))).json(); }
+  catch (e) { toast("서버 연결 실패", "error"); return; }
+  if (r.mode !== "virtual" && r.stale) { toast("카메라 영상이 없다 (휴대폰 앱 확인): " + (r.reason || ""), "error"); return; }
+  const cs = r.cubes || [];
+  let c = LQ.sel != null ? cs.find((k) => k.id === LQ.sel) : null;
+  if (!c && r.pick && r.pick.ok && r.pick.cube) c = r.pick.cube;
+  if (!c) c = cs.filter((k) => (k.level || 0) === 0 && /aruco|virtual/.test(k.source || "")).sort((a, b) => (a.id ?? 99) - (b.id ?? 99))[0];
+  if (!c) { toast("보이는 큐브가 없다" + (r.reason ? ": " + r.reason : ""), "error"); return; }
+  const f = M.c.fields;
+  f.cube_x.value = c.x.toFixed(3); f.cube_y.value = c.y.toFixed(3); f.cube_yaw.value = (c.yaw_deg || 0).toFixed(1);
+  mapUpdate();
+  toast(`큐브 x ${c.x.toFixed(3)} · y ${c.y.toFixed(3)} m · yaw ${(c.yaw_deg || 0).toFixed(0)}°`, "info");
+}
 // 집는 방향 칸: auto / vertical / horizontal. graspQ() = 지도·확인 요청에 붙일 값 (수평은 지금 큐브 yaw 기준 — 큐브 면이 팔 쪽을 볼 때만 되므로)
 function graspMode() { const f = M.c && M.c.fields.grasp; return f ? f.value : "auto"; }
 function graspQ() {
@@ -1844,9 +1878,9 @@ function trajScene() {
   // 큐브·놓을 자리: 지금 칸 값, 없으면 궤적의 real(계획에 쓴 값), 그것도 없으면 마지막 실행 칸
   const t = T.traj, p = (T.info && T.info.params) || {};
   const num = (x) => { const v = parseFloat(x); return Number.isFinite(v) ? v : null; };
-  let cube = null, target = null, d = num(p.d) ?? 0.4775;
+  let cube = null, target = null, d = (num(p.d) ?? 0.4775) - (num(p.z_off) || 0) / 100;
   const v = mapVals();   // 지금 지도·숫자칸 값이 먼저 (고르는 중에도 3D 가 따라오게)
-  if (v.cube && v.target) { cube = v.cube; target = v.target; d = v.d ?? (t && t.real && t.real.d) ?? d; }
+  if (v.cube && v.target) { cube = v.cube; target = v.target; d = tableDPlanNum(); }
   else if (t && t.real) { cube = { x: t.real.cube[0], y: t.real.cube[1], yaw: t.real.cube[2] }; target = { x: t.real.target[0], y: t.real.target[1] }; d = t.real.d ?? d; }
   else if (num(p.cube_x) != null) { cube = { x: num(p.cube_x), y: num(p.cube_y), yaw: num(p.cube_yaw) || 0 }; target = { x: num(p.target_x), y: num(p.target_y) }; }
   return { cube, target, d };

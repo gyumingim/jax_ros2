@@ -66,7 +66,7 @@ _LOGS_LOCK = _own_logs()      # 파일을 열어 둔 동안 잠금 유지 (프�
 from procman import IS_LINUX, LOG_DIR, ProcessManager, tail_file   # noqa: E402
 from ros_bridge import RosBridge   # noqa: E402
 from ros_monitor import HOMING_SRV   # noqa: E402  (rclpy 는 import 하지 않음 — 구독은 자식 프로세스)
-from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, PICK_TRAJ, REPO, ROS_DISTRO, WS   # noqa: E402
+from services import CALIBRATE_GUIDE, CAN_IFACE, CAN_UP_CMD, PICK_TRAJ, REPO, ROS_DISTRO, WS, plan_d   # noqa: E402
 import direct_api   # noqa: E402  (실물 직접 CAN: real_arm.py)
 import procman   # noqa: E402
 
@@ -750,7 +750,7 @@ def _go_home(b):
         speed = 30.0
     speed = min(max(speed, 1.0), 90.0)    # 0·음수면 프레임이 경유점만 남아 검사가 빈다, 아주 작으면 프레임 수가 폭발
     try:   # 책상 높이: 화면 칸 값(body d), 없으면 마지막 계획에 쓴 칸 값, 그것도 비었으면 기본
-        td = _table_d(b["d"] if isinstance(b, dict) and "d" in b else _trajectory()["params"].get("d"))
+        td = _table_d(b["d"] if isinstance(b, dict) and "d" in b else plan_d(_trajectory()["params"]))
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     try:

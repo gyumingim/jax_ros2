@@ -18,7 +18,7 @@ async function lvPoll() {
   LQ.busy = true;
   let r;
   try {
-    const q = "d=" + encodeURIComponent(tableD()) + (LQ.sel != null ? "&pick=" + LQ.sel : "");
+    const q = "d=" + encodeURIComponent(tableDCam()) + (LQ.sel != null ? "&pick=" + LQ.sel : "");
     r = await (await fetch("/api/live/cubes?" + q)).json();
   } catch (e) { r = { ok: false, stale: true, reason: "서버 연결 실패", cubes: [], pick: { ok: false, reason: "서버 연결 실패", warn: [], note: [] } }; }
   LQ.busy = false;

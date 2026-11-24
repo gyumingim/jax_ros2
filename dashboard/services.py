@@ -193,6 +193,17 @@ def _stack_args(p, cx, cy, tx, ty):
         raise ValueError("stack: 탑 쌓기 값이 틀림 (탑 쌓기 탭에서 다시)")
 
 
+def plan_d(p):
+    """계획에 쓸 책상 높이 (글자, 빈 값 = 기본): 칸 d (비면 0.4775) − z_off/100. z_off = '집는 높이 보정' cm (11-24, −8 이면 8 cm 아래로 집음).
+    카메라 큐브 위치(live_api)에는 안 쓴다 — 계획만."""
+    d = str(p.get("d") or "").strip()
+    z = str(p.get("z_off") or "").strip()
+    zo = _num(z, "집는 높이 보정 (cm)", -30, 30) if z else 0.0
+    if not zo:
+        return f"{_num(d, 'd', 0.0, 2.0):g}" if d else ""
+    return f"{round((_num(d, 'd', 0.0, 2.0) if d else 0.4775) - zo / 100, 4):g}"
+
+
 def _pick_args(p):
     cx = _num(p.get("cube_x"), "cube x", -1.0, 1.0)
     cy = _num(p.get("cube_y"), "cube y", -1.0, 1.0)
@@ -201,9 +212,9 @@ def _pick_args(p):
     ty = _num(p.get("target_y"), "target y", -1.0, 1.0)
     ms = _num(p.get("max_speed"), "max_speed", 0.1, 360)
     a = ["--cube", f"{cx:g}", f"{cy:g}", f"{cyaw:g}", "--target", f"{tx:g}", f"{ty:g}", "--max-speed", f"{ms:g}"]
-    d = (p.get("d") or "").strip()
+    d = plan_d(p)
     if d:
-        a += ["--d", f"{_num(d, 'd', 0.0, 2.0):g}"]
+        a += ["--d", d]
     g = (p.get("grasp") or "").strip()   # 집는 방향 (대시보드 계획만 — 팀 시뮬 계획은 이 옵션이 없다)
     if g and g != "auto" and str(p.get("team_sim") or "").strip().lower() not in ("1", "true", "on", "yes"):
         if g not in ("vertical", "horizontal", "tilted"):
@@ -304,6 +315,7 @@ SERVICES = [
                     Param("target_y", "target y", "-0.33", "m"),
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
                     Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.60"),
+                    Param("z_off", "집는 높이 보정 (cm)", "", "계획만 책상을 이만큼 낮춘 것으로: d_plan = d − z_off/100 (−8 = 8 cm 아래로 집음)"),
                     Param("grasp", "집는 방향", "auto", "auto 자동(수직 → 수평 → 기울임) / vertical 수직(위에서) / horizontal 수평(옆에서 밀어 넣기)"),
                     Param("stack", "탑 쌓기 (탑 쌓기 탭이 채움)", "", "JSON: 놓는 층·다른 큐브 — 이번 큐브·놓을 자리와 같을 때만 쓴다"),
                     Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),
