@@ -797,6 +797,8 @@ rl_api.install(app, _ik_dir)
 # 휴대폰 카메라 탭 (사진 → 큐브 자리, ArUco): 전부 phone_api.py / phone_detect.py / static/phone.js. 팔은 거기서 안 움직인다
 import phone_api   # noqa: E402
 phone_api.install(app, LOG_DIR)
+import stack_api   # noqa: E402  탑 쌓기 탭 (사진 → 큐브 여러 개 → 한 큐브씩 계획): stack_api.py / static/stack.js. 팔은 거기서 안 움직인다
+stack_api.install(app, LOG_DIR)
 
 _MESH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,80}\.obj")
 

@@ -161,6 +161,9 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     h, w = img.shape[:2]
     prm = cv2.aruco.DetectorParameters_create()
     prm.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    # 큐브 윗면의 흰 네모(50 mm)도 네모 후보로 잡힌다 — 기본값(0.05)이면 그 안의 마커(40 mm)와 '너무 가까운 후보'로 묶여 마커 쪽이 버려진다
+    # (어두운 책상·큐브 옆면 위에서 12 장 중 6 장을 놓쳤다). 가까운 후보도 둘 다 남긴다
+    prm.minMarkerDistanceRate = 0.02
     corners, mids, _ = cv2.aruco.detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), _dictionary(cv2), parameters=prm)
     mids = [] if mids is None else [int(i) for i in mids.ravel()]
     found = {i: c.reshape(4, 2).astype(np.float64) for i, c in zip(mids, corners)}

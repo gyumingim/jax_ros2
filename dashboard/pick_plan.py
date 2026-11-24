@@ -1339,7 +1339,9 @@ def _plan_style(a, P, style, out):
         add([qp, qp], O, O, "opened", GRIP_HOLD_S)
         add(out2, O, O, "lift2")
         n_tail, mk_tail = len(fr), dict(mk)
-        for at in ((0.4, 0.6, 0.8, None) if stack and t3 is not None and len(P.exit) > 1 else (None,)):
+        # 탑 쌓기: 돌아가는 길에서 손가락을 어디서 좁히나 — (길의 몇 할 지점, 그 자리에 서서 좁히나) 후보 중 탑·놓은 큐브에 안 닿는 첫 것
+        opts = [(at, stand) for stand in (False, True) for at in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9)] + [(None, False)]
+        for at, stand in (opts if stack and t3 is not None and len(P.exit) > 1 else ((None, False),)):
             del fr[n_tail:]
             mk.clear(); mk.update(mk_tail)
             sp3 = split(t3, at) if at else None
@@ -1347,7 +1349,9 @@ def _plan_style(a, P, style, out):
                 if sp3:   # 탑 쌓기: 돌아가는 길을 둘로 — 앞쪽은 벌린 채 (낮게 든 손은 좁히면 뒤따르는 손가락이 놓은 큐브를 스친다), 뒤쪽에서 좁힘
                     #       (HOME 쪽 경유점으로 내려갈 때 벌린 손가락이 탑에 닿지 않게). 나누는 자리는 탑·놓은 큐브에 안 닿는 첫 값
                     add(sp3[0], O, O, "away")
-                    add(sp3[1], O, OX, "exit_back")
+                    if stand:
+                        add([sp3[0][-1], sp3[0][-1]], O, OX, "narrow", GRIP_S)
+                    add(sp3[1], OX if stand else O, OX, "exit_back")
                 else:
                     add(leg(t3, qo, hx, "놓을 자리 위→HOME", fb), O, O if hz else OX, "exit_back")
                 if hz:   # 수평: 다 벌린 채 돌아와 책상 위 경유점에서 좁힌다
@@ -1427,7 +1431,7 @@ def _plan_style(a, P, style, out):
               "place": "내려감: 놓는 자세", "open": "손가락 열기", "opened": "기다림", "lift2": "들기",
               "home0": "HOME (shoulder_yaw 만 0)" if "home" in mk else "HOME", "home": "HOME",
               "exit_out": "HOME 나감 경유점 (팔 돌림 → 어깨 젖히고 팔꿈치 접기 → 책상 위)", "exit_back": "HOME 들어가기 전 경유점 (책상 위)",
-              "away": "탑에서 멀어짐 (손가락 벌린 채)"}
+              "away": "탑에서 멀어짐 (손가락 벌린 채)", "narrow": "서서 손가락 좁힘"}
     if hz:
         labels.update({"above_pick": f"큐브 옆 {ap['push_cm']:g} cm 의 위 (+{ha:g} cm, 손 수평)", "grasp": f"내려와 {ap['push_cm']:g} cm 밀어 넣음: 큐브 잡는 자세", "lift": f"들기 (곧게 위로 {ha:g} cm, 손 수평)",
                        "above_place": f"놓을 자리 위 (+{hb:g} cm, 손 수평)", "lift2": f"옆으로 {bp['push_cm']:g} cm 빠진 뒤 위로"})
