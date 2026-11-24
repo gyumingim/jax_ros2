@@ -49,7 +49,7 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브 찾기"),
     el("div", { class: "card" },
       PH.bOn, PH.dStat, PH.img, PH.src, PH.map, lvTools(), PH.res, PH.grasp_el,
-      PH.help = el("div", { class: "help", style: "margin:10px 0 0" }, "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 기준 종이와 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다. 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.")),
+      PH.help = el("div", { class: "help", style: "margin:10px 0 0" }, "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다 (기준 종이는 없어도 된다 — 없으면 거치 자세와 책상 높이로). 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.")),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "집으러 가기"),
     el("div", { class: "card" },
       PH.bGo,
@@ -60,15 +60,15 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
     PH.thCard = el("div", { class: "card" },
       el("div", { class: "ph-row", style: "margin-top:0" }, PH.bTh, PH.bThFill),
       PH.thImg, PH.thRes,
-      el("div", { class: "help", style: "margin:10px 0 0" }, "거치한 폰의 화면으로 잰다 (폰 프로그램이 켜져 있어야 한다): 기준 종이 마커가 보이면 ArUco 로, 뎁스 맵이 새것이면 뎁스로도 재서 차이를 보여 준다.",
+      el("div", { class: "help", style: "margin:10px 0 0" }, "거치한 폰의 화면으로 잰다 (폰 프로그램이 켜져 있어야 한다): 책상 위 큐브의 윗면 마커로 (여러 개면 중앙값), 기준 종이가 있으면 그것으로, 뎁스 맵이 새것이면 뎁스로도 재서 차이를 보여 준다.",
         el("br"), "보정 없이 CAD 거치 자리를 믿는다 — 렌즈 자리·초점거리 때문에 1~3 cm 틀릴 수 있다. 처음 한 번은 줄자로 잰 값(어깨 축 ~ 책상 윗면)과 맞춰 보기.")),
     el("details", { class: "adv" }, el("summary", {}, "준비 — 인쇄물 · 폰 프로그램(뎁스) · 자리 설정"),
-      el("h3", { class: "ph-h3" }, "ArUco — 인쇄물 · 기준 종이 자리"),
+      el("h3", { class: "ph-h3" }, "ArUco — 인쇄물 · 기준 종이 자리 (종이는 선택)"),
       el("div", { class: "card" },
         el("a", { class: "btn line", href: "/api/phone/sheet", target: "_blank" }, "인쇄물 PDF 열기 (A4 가로 2쪽)"),
         el("ol", { class: "help" },
           el("li", {}, "실제 크기 100% 로 인쇄 (1쪽의 100 mm 선을 자로 확인)."),
-          el("li", {}, "1쪽(기준 종이)을 책상에 평평하게 붙인다: '로봇 쪽' 글자가 로봇을 향하게, 가운데 십자가 아래 자리에 오게."),
+          el("li", {}, "(선택) 1쪽(기준 종이)을 책상에 평평하게 붙인다: '로봇 쪽' 글자가 로봇을 향하게, 가운데 십자가 아래 자리에 오게. 없으면 거치 자세(CAD)와 책상 높이로 자리를 구한다 — 종이가 있으면 더 정확하다."),
           el("li", {}, "2쪽의 마커 한 장을 50 mm 선으로 오려 큐브 윗면에 붙인다.")),
         el("div", { class: "frow" }, el("b", {}, "종이 가운데"), fld("x", "x", "m"), fld("y", "y", "m"), fld("rot_deg", "돌아간 각", "°"), fld("cube_h", "큐브 높이", "m")),
         el("div", { class: "help", style: "margin:8px 0 0" }, "로봇 좌표: 원점 = 어깨 축 바로 아래, +x = 로봇 왼쪽, 앞(책상 쪽) = −y. 각 = 위에서 볼 때 종이가 반시계로 돌아간 만큼."),
@@ -125,7 +125,7 @@ function phLive(all) {
   if (virt) PH.bOn.hidden = PH.dStat.hidden = true;
   PH.thH.hidden = PH.thCard.hidden = virt;
   PH.help.textContent = virt ? "가상 모드: 카메라는 안 쓴다. 지도의 빈 곳을 누르면 가상 큐브를 놓고, 끌어서 옮기고, 누르면 그 큐브를 집는다. 가상 팔로 끝까지 재생하면 큐브가 놓을 자리로 옮겨진다."
-    : "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 기준 종이와 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다. 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.";
+    : "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다 (기준 종이는 없어도 된다 — 없으면 거치 자세와 책상 높이로). 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.";
   if (virt) {
     PH.img.hidden = true;
     if (!r.ok) { PH.cube = null; PH.grasp = null; PH.block = ""; PH.last = null; PH.grasp_el.hidden = true; phShow(PH.res, "가상 큐브 없음", "", r.reason || ""); return; }
@@ -161,7 +161,7 @@ function phLive(all) {
   }
   const a = r.aruco && r.aruco.ok ? r.aruco : null, p = r.depth && r.depth.ok ? r.depth : null;
   const det = [];
-  if (a) det.push(`ArUco: 기준 마커 ${a.refs.length}개 · 큐브 마커 ${a.cube_marker_mm} mm 로 재짐 (원래 40)`);
+  if (a) det.push(`ArUco: ${a.refs.length ? `기준 마커 ${a.refs.length}개` : "기준 종이 없음 (거치 자세 + 책상 높이)"} · 큐브 마커 ${a.cube_marker_mm} mm 로 재짐 (원래 40)`);
   if (p) det.push(`뎁스: ${p.age_s.toFixed(0)}초 전 · 크기 ${p.dims_mm[0].toFixed(0)}×${p.dims_mm[1].toFixed(0)} mm · 책상 위 ${p.height_cm.toFixed(1)} cm · 각 ${PH_YAW_FROM[p.yaw_from] || "모름"}` +
     ` · 카메라 좌표 ${p.cam.map((v) => v.toFixed(4)).join(", ")}`);
   if (tail) det.push(tail);
@@ -186,7 +186,7 @@ async function phGrasp(cube, hint) {
   else phShow(PH.grasp_el, g.ok ? "여기는 못 집음" : "집을 수 있는지 확인 못 함", g.ok ? "bad" : "warn", (g.reason || "") + (g.ok ? hint : ""));
 }
 
-// ---- 책상 높이 재기 (phone_table.py): 거치한 폰의 지금 프레임(기준 종이 ArUco) 과 폰 뎁스 맵 → d. 넣는 것은 사람이 버튼으로 ----
+// ---- 책상 높이 재기 (phone_table.py): 거치한 폰의 지금 프레임(큐브 윗면 마커·기준 종이 ArUco) 과 폰 뎁스 맵 → d. 넣는 것은 사람이 버튼으로 ----
 async function phTable() {
   if (PH.thBusy) return;
   PH.thBusy = true; PH.th = null; PH.bTh.disabled = PH.bThFill.disabled = true;
@@ -201,13 +201,15 @@ async function phTable() {
   const warn = (r.warn || []).join(" · ");
   if (!r.ok) { phShow(PH.thRes, "책상 높이를 못 잼", "bad", (r.reason || "") + (warn ? " · " + warn : "")); return; }
   let text = r.text;
-  const a = r.aruco && r.aruco.ok ? r.aruco : null, p = r.depth && r.depth.ok ? r.depth : null;
-  if (a) PH.thA = { d: a.d, t: Date.now() };
+  const a = r.aruco && r.aruco.ok ? r.aruco : null, cb = r.cubes && r.cubes.ok ? r.cubes : null, p = r.depth && r.depth.ok ? r.depth : null;
+  if (a || cb) PH.thA = { d: (a || cb).d, t: Date.now() };
   else if (PH.thA && Date.now() - PH.thA.t < 600000)    // 이번엔 뎁스만: 10분 안에 ArUco 로 잰 값이 있으면 같이
     text += ` · ArUco ${PH.thA.d.toFixed(3)} m (${Math.round((Date.now() - PH.thA.t) / 60000)}분 전) · 차이 ${Math.round(Math.abs(PH.thA.d - r.d) * 1000)} mm`;
-  const m = a || p, now = tableDNum();
+  const m = a || cb || p, now = tableDNum();
   const note = [`기울기 ${m.tilt_deg.toFixed(1)}° (CAD 와 차이, 0 이어야)`, `카메라가 책상 위 ${m.cam_above_table.toFixed(3)} m`,
-    a ? `마커 ${a.refs.length}개 · 초점거리 추정 흔들림 ± ${a.d_pm_mm.toFixed(0)} mm` : `평면 점 ${Math.round(p.inlier * 100)} % · 잔차 ${p.rms_mm} mm`,
+    a ? `기준 마커 ${a.refs.length}개 · 초점거리 추정 흔들림 ± ${a.d_pm_mm.toFixed(0)} mm`
+      : cb ? `큐브 마커 ${cb.n}개 (${cb.ids.join(", ")}) · 한 변 ${cb.marker_px} px · 흔들림 ± ${cb.d_pm_mm.toFixed(0)} mm · 마커 법선으로 ${cb.d_normal.toFixed(3)} m`
+      : `평면 점 ${Math.round(p.inlier * 100)} % · 잔차 ${p.rms_mm} mm`,
     `지금 칸 ${now.toFixed(4)} m 와 ${Math.round((r.d - now) * 1000)} mm 차이`];
   if (!r.in_range) note.unshift(r.reason);
   if (warn) note.push(warn);

@@ -10,6 +10,10 @@
 큐브 윗면은 책상보다 cube_h (5 cm) 높다 → 책상 평면 호모그래피만 쓰면 카메라 반대쪽으로 밀려 보인다 (비스듬히 찍으면 몇 cm).
 그래서 기준 마커로 카메라 자세를 구해 (solvePnP; 초점거리는 훑어서 재투영 오차가 작고 큐브 마커 한 변이 40 mm 에 가장
 가깝게 나오는 값) 큐브 마커 꼭짓점을 높이 cube_h 평면에 쏜다. 확인값: 그렇게 잰 큐브 마커 한 변.
+
+기준 종이는 없어도 된다 (2026-11-24): 종이 마커가 하나도 안 보이면 카메라 = 거치대의 CAD 자세 (phone_table.cad_camera) 에
+cfg 의 'intr' (폰 보정값 K·dist) 과 'td' (책상 높이 d, m) 로 놓고 같은 식으로 쏜다. 이때는 렌즈 자리·거치 각 오차가 그대로
+자리에 들어간다 (각 1° ≈ 1 cm). camera.src = 'paper' | 'cad'.
 """
 import math
 
@@ -129,10 +133,16 @@ def detect(image_bytes, cfg=None):
     out.update(refs=refs, cube_seen=CUBE_ID in found, annotated=vis, size=[w, h])
     if CUBE_ID in found:
         cv2.polylines(vis, [found[CUBE_ID].astype(np.int32)], True, (0, 140, 255), lw)
-    if not refs:
-        return {**out, "reason": "기준 종이의 마커가 하나도 안 보임 — 종이가 다 나오게, 밝은 곳에서 다시"}
     if CUBE_ID not in found:
-        return {**out, "reason": f"큐브 마커(ID {CUBE_ID})가 안 보임 — 큐브 윗면이 보이게 위쪽에서 다시 (기준 마커는 {len(refs)}개 보임)"}
+        return {**out, "reason": f"큐브 마커(ID {CUBE_ID})가 안 보임 — 큐브 윗면이 보이게 다시" + (f" (기준 마커는 {len(refs)}개 보임)" if refs else "")}
+    if not refs:   # 기준 종이 없음 → CAD 거치 자세 + 책상 높이
+        cad = _cad(cv2, np, cfg, found, w, h, (CUBE_ID,))
+        if cad is None:
+            return {**out, "reason": "기준 종이가 안 보이고 폰 보정값·책상 높이도 없어 자리를 못 구함"}
+        cam, cpix = cad["cam"], cad["und"][CUBE_ID]
+        top, side = _top(np, cam, cpix, cfg["cube_h"])
+        out["camera"] = {"src": "cad", "pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "image_rot_deg": cad["q"] * 90}
+        return _finish_one(cv2, out, vis, lw, top, side, found[CUBE_ID])
     if len(refs) < 2:
         out["warn"].append("기준 마커가 1개만 보임 — 정확도가 떨어진다 (2개 이상 나오게)")
 
@@ -151,12 +161,23 @@ def detect(image_bytes, cfg=None):
         lo = min(c[3] for c in cams)
         cam = min((c for c in cams if c[3] <= 1.25 * lo + 0.3), key=lambda c: abs(_top(np, c, cpix, cfg["cube_h"])[1] - CUBE_MARKER_MM))
         top, side = _top(np, cam, cpix, cfg["cube_h"])
-        out.update(camera={"pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "reproj_px": round(cam[3], 2)},
+        out.update(camera={"src": "paper", "pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "reproj_px": round(cam[3], 2)},
                    height_shift_mm=round(float(np.linalg.norm(flat.mean(axis=0) - top.mean(axis=0))) * 1000, 1))
     else:
         top = flat
         side = float(np.mean([np.linalg.norm(top[i] - top[(i + 1) % 4]) for i in range(4)])) * 1000
         out["warn"].append("카메라 자세를 못 구해 큐브 높이 보정 없음 — 비스듬한 사진이면 몇 cm 틀릴 수 있다 (위에서 찍기)")
+    return _finish_one(cv2, out, vis, lw, top, side, cpix)
+
+
+def _cad(cv2, np, cfg, found, w, h, ids):
+    """기준 종이 없을 때의 카메라 (phone_table.cad_camera) — cfg 에 intr·td 가 없으면 None."""
+    import phone_table as PT
+    return PT.cad_camera(cv2, np, found, cfg.get("intr"), w, h, cfg.get("td"), ids)
+
+
+def _finish_one(cv2, out, vis, lw, top, side, cpix):
+    """detect(): 윗면 4 꼭짓점 (실좌표) → cube {x, y, yaw_deg} + 그림."""
     out["cube_marker_mm"] = round(side, 1)
     if abs(side - CUBE_MARKER_MM) > 0.1 * CUBE_MARKER_MM:
         out["warn"].append(f"큐브 마커 한 변이 {side:.1f} mm 로 재짐 (원래 {CUBE_MARKER_MM:.0f} mm) — 인쇄 크기·큐브 높이·사진 각도 확인")
@@ -207,17 +228,23 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     for i in refs:
         cv2.polylines(vis, [found[i].astype(np.int32)], True, (60, 200, 60), lw)
     out.update(refs=refs, annotated=vis, size=[w, h], seen=seen)
-    if not refs:
-        return {**out, "reason": "기준 종이의 마커가 하나도 안 보임 — 종이가 다 나오게, 밝은 곳에서 다시"}
     if not seen:
-        return {**out, "reason": f"큐브 마커(ID {min(ids)}~{max(ids)})가 하나도 안 보임 — 큐브 윗면이 보이게 다시 (기준 마커는 {len(refs)}개 보임)"}
-    if len(refs) < 2:
-        out["warn"].append("기준 마커가 1개만 보임 — 정확도가 떨어진다 (2개 이상 나오게)")
-    obj = np.vstack([real[i] for i in refs])
-    pix = np.vstack([found[i] for i in refs])
-    cams = _cameras(cv2, np, obj, pix, w, h)
-    if not cams:
-        return {**out, "reason": "기준 마커로 카메라 자세를 못 구함 — 큐브 높이를 알 수 없다. 기준 종이가 더 크게·또렷하게 나오게 다시"}
+        return {**out, "reason": f"큐브 마커(ID {min(ids)}~{max(ids)})가 하나도 안 보임 — 큐브 윗면이 보이게 다시" + (f" (기준 마커는 {len(refs)}개 보임)" if refs else "")}
+    src = "paper"
+    if refs:
+        if len(refs) < 2:
+            out["warn"].append("기준 마커가 1개만 보임 — 정확도가 떨어진다 (2개 이상 나오게)")
+        obj = np.vstack([real[i] for i in refs])
+        pix = np.vstack([found[i] for i in refs])
+        cams = _cameras(cv2, np, obj, pix, w, h)
+        if not cams:
+            return {**out, "reason": "기준 마커로 카메라 자세를 못 구함 — 큐브 높이를 알 수 없다. 기준 종이가 더 크게·또렷하게 나오게 다시"}
+    else:          # 기준 종이 없음 → CAD 거치 자세 + 책상 높이 (초점거리를 아니까 후보 하나)
+        cad = _cad(cv2, np, cfg, found, w, h, ids)
+        if cad is None:
+            return {**out, "reason": "기준 종이가 안 보이고 폰 보정값·책상 높이도 없어 자리를 못 구함"}
+        cams, src = [cad["cam"]], "cad"
+        found = {**found, **cad["und"]}       # 왜곡 푼 꼭짓점으로 쏜다 (그림은 원래 꼭짓점)
     ch = float(cfg["cube_h"])
 
     def fit(cam):   # 큐브마다 한 변이 가장 잘 맞는 층 → (점수, [(id, 층, 윗면 4x2, 한 변 mm)])
@@ -241,7 +268,7 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     if alt:
         out["warn"].append("사진이 거의 바로 위에서 찍혀 큐브 높이(층)가 확실하지 않음 — 비스듬히(30° 이상 기울여) 다시 찍기")
         out["level_unsure"] = True
-    out["camera"] = {"pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "reproj_px": round(cam[3], 2)}
+    out["camera"] = {"src": src, "pos": [round(float(v), 3) for v in cam[2]], "f_px": round(float(cam[0][0, 0]), 1), "reproj_px": round(cam[3], 2)}
     for i, lv, top, side in rows:
         cx, cy = top.mean(axis=0)
         ex = (top[1] - top[0]) + (top[2] - top[3])

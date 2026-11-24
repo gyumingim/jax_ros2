@@ -59,7 +59,7 @@ def fuse(aruco, depth):
         if aruco is None and depth_off:
             out["reason"] = NOTHING
         elif aruco is None:
-            out["reason"] = "큐브를 못 찾음 — 큐브만 보이게 하거나, 기준 종이와 큐브 윗면 마커가 화면에 나오게 하기"
+            out["reason"] = "큐브를 못 찾음 — 큐브 윗면 마커가 화면에 나오게 하기"
         else:
             out["reason"] = aruco.get("reason") or "못 찾음"
             if depth_off:
@@ -85,7 +85,7 @@ def fuse(aruco, depth):
         if bad:
             out.update(blocked=True, block="ArUco·뎁스가 안 맞음")
             out["warn"].insert(0, f"ArUco 와 뎁스가 {' · '.join(bad)} 다름 (허용 {POS_TOL_M * 100:.0f} cm · {YAW_TOL_DEG:.0f}°) — 큐브가 움직였거나 "
-                                  f"기준 종이 자리·폰 거치 자세가 틀림 (뎁스 x {p['cube']['x']:.3f} y {p['cube']['y']:.3f} yaw {p['cube']['yaw_deg']:.0f}°)")
+                                  f"기준 종이 자리·책상 높이·폰 거치 자세가 틀림 (뎁스 x {p['cube']['x']:.3f} y {p['cube']['y']:.3f} yaw {p['cube']['yaw_deg']:.0f}°)")
             out["text"] = "출처: ArUco + 뎁스 — 서로 안 맞음"
         else:
             out["text"] = (f"출처: ArUco + 뎁스 (자리·각은 ArUco, 뎁스와 {dpos * 1000:.0f} mm" +
