@@ -19,6 +19,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 import real_arm as R
+import run_record
 
 # 같은 can0 에 명령하는 ROS 노드 (대시보드 밖에서 떠 있으면 연결 거부)
 ROS_PROCS = ("ak45_node", "stm_bridge_node", "arm_control_node", "homing_guard", "calibrate", "play_trajectory")
@@ -149,6 +150,8 @@ def play_real(trajectory, b):
     except ValueError:
         speed = 30.0
     r = arm.play_trajectory(traj, speed, stop_gen=gen)
+    if r.get("ok"):
+        run_record.REC.on_play(traj, t.get("params"), arm=arm, extra={"force": bool(b.get("force")), "problems": problems, "speed": speed})
     if r.get("ok") and problems:
         r["msg"] += f" (검사 {len(problems)}건 무시하고 재생: force)"
     return r

@@ -379,6 +379,8 @@ def _play_virtual(trajectory=None):
         speed = 30.0
     import live_api
     r = VM["arm"].play_trajectory(traj, speed, on_end=live_api.SCENE.on_play(traj, "역기구학 계획"))   # 끝까지 가면 가상 장면의 큐브를 옮긴다
+    if r.get("ok"):
+        run_record.REC.on_play(traj, t.get("params"), arm=VM["arm"], virtual=True, extra={"problems": problems, "speed": speed})
     if r.get("ok") and problems:
         r["msg"] += f" (검사 {len(problems)}건은 실물이면 --force 가 필요: 가상이라 재생)"
     return r
@@ -781,6 +783,8 @@ def _go_home(b):
             return {"ok": False, "error": f"HOME 재생 거절: {fatal}"}
         r = VM["arm"].play_trajectory(traj, speed)
     if r.get("ok"):
+        run_record.REC.on_play(traj, {"max_speed": speed, "d": td, "from_deg": now}, arm=arm if kind == "direct" else VM["arm"],
+                               virtual=kind == "virtual")
         r["msg"] = f"HOME 으로 가는 중 — {traj['reason']}"
     return r
 
@@ -801,6 +805,10 @@ import phone_api   # noqa: E402
 phone_api.install(app, LOG_DIR, mode_kind)
 import live_api   # noqa: E402  큐브 실시간 인식 (폰 프레임 스레드) + 가상 장면: /api/live/*, /api/phone/live
 live_api.install(app, LOG_DIR, mode_kind)
+import run_record   # noqa: E402  실물 재생마다 logs/runs/<시각>_<kind>/ 에 영상·관절·인식·계획·사건 (run_record.py, static/record.js)
+run_record.install(app, LOG_DIR,
+                   lambda: (VM["arm"], True) if MODE["virtual"] else (direct_api.DIRECT.arm if direct_api.DIRECT.connected() else None, False),
+                   mode_kind, lambda: can_state.get("text"))
 import stack_api   # noqa: E402  탑 쌓기 탭 (사진 → 큐브 여러 개 → 한 큐브씩 계획): stack_api.py / static/stack.js. 팔은 거기서 안 움직인다
 stack_api.install(app, LOG_DIR)
 

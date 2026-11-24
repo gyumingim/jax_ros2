@@ -204,6 +204,7 @@ class RealArm:
         self._play_stop = threading.Event()
         self._play_bad = None
         self.stop_gen = 0           # STOP·힘 빼기·재생 멈춤마다 +1. 계획을 세우는 동안 STOP 이 눌렸는지 play_trajectory(stop_gen=) 가 본다
+        self.rec = None             # run_record: 기록 중이면 rec(self, now) — 제어 루프가 틱마다 숫자 몇 개를 deque 에 넣는다 (파일 쓰기는 그쪽 스레드)
 
     # ------------------------------------------------------------------ 시작 / 끝
     def start(self):
@@ -549,6 +550,9 @@ class RealArm:
             try:
                 with self.lock:
                     self._tick(now, dt)
+                    rec = self.rec
+                    if rec is not None:
+                        rec(self, now)
             except Exception as e:
                 if now - getattr(self, "_tick_err_t", 0.0) > 5.0:
                     self._tick_err_t = now
