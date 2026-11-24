@@ -1,11 +1,13 @@
-"""대시보드 '탑 쌓기' 탭의 서버 쪽: 프레임 → 큐브 여러 개 (phone_detect.detect_cubes, 큐브마다 다른 ArUco) → 다음에 옮길 큐브 한 걸음.
+"""대시보드 '탑 쌓기' 탭의 서버 쪽: 실시간 인식의 큐브 여러 개 + 순서·탑 자리 → 걸음 목록 ('N층: N번 옮기기', 걸음마다 버튼).
 사진 올리기 (POST /api/stack/detect) 는 없앴다 (2026-11-24) — 인식은 detect_frame(프레임 배열, 종이 자리) 을 부르는 쪽 (실시간 인식, 준비 중) 이 한다.
 팔은 여기서 안 움직인다 — 계획·재생은 화면(static/stack.js)이 원래 있던 경로를 그대로 쓴다:
 계획 = POST /api/svc/pick_dry/start (역기구학 탭의 계획, stack 칸으로 놓는 층·다른 큐브를 넘김), 재생 = 그 탭의 재생 버튼(확인창·검사 그대로).
 server.py 는 install(app, log_dir) 한 줄만 가진다.
 
     GET  /api/stack/last     마지막 detect_frame 결과 {ok, cubes: [{id, x, y, yaw_deg, level, top_cm}], refs, warn, image, t}. 없으면 {ok: false, none: true}
-    POST /api/stack/next     {cubes, base: {x, y, yaw_deg, id?}, order: [id…]} → 한 걸음 (아래 next_step)
+    POST /api/stack/steps    {cubes, base: {x, y, yaw_deg}, order: [id…]} → 걸음 목록 + 다음 걸음 (아래 steps, 상태 없음)
+    GET/POST /api/stack/plan {order, base} — 화면의 순서·탑 자리 (logs/stack_plan.json, 페이지·서버를 다시 켜도 남음)
+    POST /api/stack/placed   {level, id} — 이 화면이 놓은 기록 (힌트만, steps 의 placed)
     POST /api/stack/spot     {x, y, yaw_deg, levels, d} → 그 자리에 levels 층까지 놓을 수 있나 (계획기 point_check, 손 수직) {ok, text, levels: [{level, ok, why}]}
     GET  /api/stack/map?d=   놓을 수 있는 곳 지도 (2 cm 칸마다 바닥부터 몇 층까지 놓을 수 있나, 처음 한 번 계산 20~40초 → 책상 높이마다 기억)
     GET  /api/stack/sheet    큐브 마커 인쇄물 (phone_markers/stack_markers.pdf, ID 10~15)
@@ -120,97 +122,120 @@ def _f3(v):
     return f"{float(v):.3f}"
 
 
-def check_placed(cs, placed):
-    """방금 놓은 큐브 (placed = {id, x, y, yaw_deg, level}: 계획한 놓을 자리) 가 지금 인식에서 그 자리·층에 반듯이 있나 → (큐브, None) 또는 (None, 이유)."""
-    i = int(placed["id"])
-    c = next((c for c in cs if c["id"] == i), None)
-    if c is None:
-        return None, f"방금 놓은 큐브 {i} 가 안 보임 — 떨어졌거나 가려짐. 확인하고 '처음부터'"
-    lv = int(placed["level"])
-    if c["level"] != lv:
-        return None, f"방금 놓은 큐브 {i} 가 {c['level'] + 1}층으로 보임 (놓은 곳은 {lv + 1}층) — 떨어졌거나 기울어짐. 멈춤"
-    off = math.hypot(c["x"] - float(placed["x"]), c["y"] - float(placed["y"]))
-    if off > OFF_TOL:
-        return None, f"방금 놓은 큐브 {i} 가 계획 자리에서 {off * 100:.1f} cm 어긋남 (허용 {OFF_TOL * 100:.0f} cm) — 멈춤"
+def _check_cube(c, ref, tol, what):
+    """탑 속 큐브 c 가 ref (그 아래 큐브 또는 탑 자리) 에서 tol 안이고 반듯한가 → None 또는 이유 (예전 check_placed 의 어긋남·기울기 판정)."""
+    off = math.hypot(c["x"] - ref[0], c["y"] - ref[1])
+    if off > tol:
+        return f"큐브 {c['id']} ({c['level'] + 1}층) 가 {what}에서 {off * 100:.1f} cm 어긋남 (허용 {tol * 100:.0f} cm)"
     if (c.get("tilt_deg") or 0.0) > TILT_TOL:
-        return None, f"방금 놓은 큐브 {i} 가 {c['tilt_deg']:.0f}° 기울어짐 (허용 {TILT_TOL:.0f}°) — 멈춤"
-    return c, None
+        return f"큐브 {c['id']} ({c['level'] + 1}층) 가 {c['tilt_deg']:.0f}° 기울어짐 (허용 {TILT_TOL:.0f}°)"
+    return None
 
 
-def next_step(cubes, base, order, placed=None):
-    """사진에서 찾은 큐브들 + 탑 자리(base) + 쌓는 순서(order = 이 탑에 쓰는 큐브 ID 전부, 바닥 큐브 포함) → 다음 한 걸음.
+def steps(cubes, base, order, placed=None):
+    """지금 인식 (cubes) + 탑 자리 (base) + 순서 (order, 비어도 됨) → 층마다 한 걸음. 상태를 안 가진다 (2026-11-24):
+    누를 때마다 지금 보이는 것만으로 판단하므로 한 걸음 하고 다른 일을 하다 와도, 페이지·서버를 다시 켜도 된다.
+    책상 위에 큐브가 하나씩만 있어도 된다 (사용자: 여러 개면 손이 부딪힌다) — 순서의 다른 큐브가 안 보여도 막지 않는다.
 
-    탑의 높이는 사진이 정한다: base 자리(3 cm 안)에 보이는 큐브 중 가장 높은 것이 맨 위 (그 아래 큐브는 가려서 안 보인다).
-    안 보이는 order 의 큐브 = 탑 속에 깔린 것으로 본다 → 그 수와 사진의 탑 높이가 안 맞으면 (마커를 못 찾음·큐브가 떨어짐) 멈춘다.
-    placed (실시간 인식 2026-11-24) = 방금 놓은 큐브 {id, x, y, yaw_deg, level} — 주면 먼저 check_placed (어긋남·기울기·층) 로 보고, 맞으면
-    탑 자리를 그 큐브의 실제 자리로 바꾼다 (다음 큐브는 실제로 놓인 맨 위 큐브 위에, 각은 그 큐브와 90° 마다 맞춤). 안 맞으면 {ok: false, stop: true}.
-    돌려주는 것: {ok, done, text, height(지금 탑 층 수), cube(다음에 집을 것), level(놓을 층, 0 = 책상), target, params(pick_dry 칸), warn}."""
-    out = {"ok": False, "done": False, "warn": []}
+    탑 = 탑 자리 TOWER_R 안의 바닥 큐브 + OVERLAP_R 안의 쌓인 큐브. 탑 높이 = 보이는 맨 위 큐브의 층 + 1 (이것을 믿는다: 아래는 가려져도 됨).
+    층 L 의 걸음: L < 높이 → 완료. L = 높이 → 다음 걸음: 순서에서 아직 안 쓴 첫 번호가 책상 위에 보이면 그것, 없으면 책상 위에 보이는
+    다른 아무 큐브 ('보이는 큐브 N번', 순서를 비우면 늘 이것). placed = {층: 큐브 ID} 는 이 화면이 놓았던 기록 (힌트) — 가려진 층의 번호 표시와
+    '그 큐브가 다른 층에 보임' 판정에만 쓴다. 탑 속 보이는 큐브: 아래 큐브 (안 보이면 탑 자리, 허용은 층마다 OFF_TOL 씩) 에서 2 cm 넘게 어긋남 ·
+    15° 넘게 기울어짐 · 기록과 다른 층 → 문제 → 다음 걸음을 막는다 (이유).
+    돌려주는 것: {ok, text, bad?, done?, height, top, warn, steps: [{n, id, level, state done|bad|next|blocked|wait, text, why}], next: {n, cube, level, target, obstacles, params}}"""
+    out = {"ok": False, "steps": [], "warn": [], "next": None, "height": 0, "top": None}
     try:
         bx, by, byaw = float(base["x"]), float(base["y"]), float(base.get("yaw_deg") or 0.0)
-        order = [int(i) for i in order]
+        order = [int(i) for i in (order or [])]
+        hint = {int(k): int(v) for k, v in (placed or {}).items()}
         cs = [{"id": int(c["id"]), "x": float(c["x"]), "y": float(c["y"]), "yaw_deg": float(c["yaw_deg"]), "level": int(c["level"]),
                "tilt_deg": c.get("tilt_deg")} for c in cubes if c.get("id") is not None]
-        if not all(math.isfinite(v) for v in (bx, by, byaw)) or len(order) != len(set(order)) or not 1 <= len(order) <= 12:
+        if not all(math.isfinite(v) for v in (bx, by, byaw)) or len(order) != len(set(order)) or len(order) > 12:
             raise ValueError
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return {**out, "text": "탑 자리·순서·큐브 값이 틀림"}
-    if placed:
-        try:
-            pc, why = check_placed(cs, placed)
-        except (KeyError, TypeError, ValueError):
-            return {**out, "text": "placed 값이 틀림"}
-        if why:
-            return {**out, "stop": True, "text": why}
-        bx, by, byaw = pc["x"], pc["y"], pc["yaw_deg"]
-        out["placed"] = pc
-    tower = [c for c in cs if math.hypot(c["x"] - bx, c["y"] - by) <= TOWER_R]
-    top = max(tower, key=lambda c: c["level"]) if tower else None
-    height = top["level"] + 1 if top else 0
-    seen = {c["id"] for c in cs}
-    hidden = [i for i in order if i not in seen]
-    loose = [c for c in cs if c not in tower and c["level"] == 0]
-    odd = [c for c in cs if c not in tower and c["level"] > 0]
-    out.update(height=height, top=top, hidden=hidden)
-    inside = len(hidden) + len({c["id"] for c in tower if c["id"] in order} | ({top["id"]} if top else set()))   # order 로 설명되는 탑 큐브 수 (카메라는 맨 위만, 가상 장면은 전부 보임)
-    if top and top["id"] not in order:
-        out["warn"].append(f"탑 맨 위 큐브 {top['id']} 는 순서에 없는 큐브")
-    if inside > height:
-        miss = ", ".join(map(str, hidden))
-        return {**out, "text": f"큐브 {miss} 가 사진에 안 보임 — 탑은 {height}층으로 보이는데 순서의 큐브 {len(order)}개 중 {len(hidden)}개가 없다. "
-                               "가려지지 않게 다시 찍기 (큐브가 떨어졌으면 '처음부터')"}
-    if inside < height:
-        out["warn"].append(f"탑이 {height}층으로 보이는데 순서의 큐브로는 {inside}층 — 순서에 없는 큐브가 깔려 있거나 높이를 잘못 봄")
-    if odd:
-        out["warn"].append("탑 밖에 겹쳐 있는 큐브: " + ", ".join(str(c["id"]) for c in odd) + " (그 자리는 피해 간다)")
-    over = [c for c in loose + odd if math.hypot(c["x"] - bx, c["y"] - by) <= OVERLAP_R]
-    if over:
-        return {**out, "text": f"탑 자리가 큐브 {', '.join(str(c['id']) for c in over)} 와 겹침 — 그 큐브 위에 쌓으려면 지도에서 그 큐브를 누르고, 아니면 8 cm 넘게 띄우기"}
     if len(order) > MAX_LEVELS:
         return {**out, "text": f"순서는 {MAX_LEVELS}개까지 — 탑은 {MAX_LEVELS}층까지만 쌓는다 (지금 {len(order)}개)"}
-    if height >= MAX_LEVELS:
-        return {**out, "ok": True, "done": True, "text": f"탑 완성: {height}층 (최대 {MAX_LEVELS}층)"}
-    nxt = next((c for i in order for c in loose if c["id"] == i), None)
-    if nxt is None:
-        if height == 0:
-            return {**out, "text": "쌓을 큐브가 사진에 없음 — 순서의 큐브가 책상 위에 보이게 다시 찍기"}
-        return {**out, "ok": True, "done": True, "text": f"탑 완성: {height}층 (맨 위 큐브 {top['id']})"}
-    level = height
-    tx, ty, tyaw = (top["x"], top["y"], top["yaw_deg"]) if top else (bx, by, byaw)
-    tyaw = (tyaw + 45.0) % 90.0 - 45.0   # 큐브는 90° 마다 같다   # 실제로 놓인 맨 위 큐브 위에 (없으면 탑 자리)
+    near = lambda c, r: math.hypot(c["x"] - bx, c["y"] - by) <= r   # noqa: E731
+    tower = sorted([c for c in cs if (c["level"] == 0 and near(c, TOWER_R)) or (c["level"] > 0 and near(c, OVERLAP_R))], key=lambda c: c["level"])
+    loose = [c for c in cs if c["level"] == 0 and c not in tower]
+    odd = [c for c in cs if c["level"] > 0 and c not in tower]
+    top = tower[-1] if tower else None
+    height = top["level"] + 1 if top else 0
+    at = {c["level"]: c for c in tower}
+    probs = {}   # 층 → 이유
+    for c in tower:
+        lv = c["level"]
+        hl = next((k for k, v in hint.items() if v == c["id"] and k < height), None)
+        if hl is not None and hl != lv:
+            probs.setdefault(lv, f"큐브 {c['id']} 가 탑 {lv + 1}층으로 보임 (놓은 곳은 {hl + 1}층) — 떨어졌거나 기울어짐")
+            continue
+        below = at.get(lv - 1)
+        why = _check_cube(c, (below["x"], below["y"]) if below else (bx, by), OFF_TOL if below or lv == 0 else OFF_TOL * (lv + 1),
+                          f"아래 큐브 {below['id']} " if below else "탑 자리")
+        if why:
+            probs.setdefault(lv, why)
+    over = [c for c in loose if near(c, OVERLAP_R)]
+    out.update(height=height, top=top)
+    if odd:
+        out["warn"].append("탑 밖에 겹쳐 있는 큐브: " + ", ".join(str(c["id"]) for c in odd) + " (그 자리는 피해 간다)")
+    used = {c["id"] for c in tower} | {v for k, v in hint.items() if k < height and k not in at}
+    rest = [i for i in order if i not in used]
+    total = min(MAX_LEVELS, height + len(rest)) if order else MAX_LEVELS
+    total = max(total, min(height, MAX_LEVELS))
+    rows = []
+    for L in range(height):
+        c = at.get(L)
+        i = c["id"] if c else hint.get(L)
+        rows.append({"n": L + 1, "id": i, "level": L, "state": "bad" if L in probs else "done", "text": f"{L + 1}층: " + (f"{i}번" if i is not None else "큐브"),
+                     "why": probs.get(L) or ("탑에 보임" if c else "탑 속 (위 큐브에 가려 안 보임)")})
+    for k, L in enumerate(range(height, total)):
+        i = rest[k] if k < len(rest) else None
+        rows.append({"n": L + 1, "id": i, "level": L, "state": "wait", "text": f"{L + 1}층: " + (f"{i}번 옮기기" if i is not None else "보이는 큐브 옮기기"), "why": "앞 걸음 먼저"})
+    stop = probs[min(probs)] if probs else None
+    if height >= MAX_LEVELS or height >= total:
+        if stop:
+            return {**out, "ok": True, "steps": rows, "text": stop, "bad": True}
+        return {**out, "ok": True, "done": True, "steps": rows, "text": f"탑 완성: {height}층" + (f" (맨 위 큐브 {top['id']})" if top else "")}
+    r = rows[height]
+    L = height
+    c = next((q for q in loose if q["id"] == r["id"]), None) if r["id"] is not None else None
+    sub = False
+    if c is None:   # 순서의 다음 번호가 책상 위에 없음 → 보이는 다른 큐브 (순서의 남은 번호 먼저, 탑 자리와 겹친 것은 빼고)
+        cand = [q for q in loose if q not in over]
+        cand.sort(key=lambda q: (q["id"] not in rest, rest.index(q["id"]) if q["id"] in rest else 0, q["id"]))
+        if cand:
+            c, sub = cand[0], r["id"] is not None
+            r.update(id=c["id"], text=f"{L + 1}층: " + ("보이는 큐브 " if sub or not order else "") + f"{c['id']}번 옮기기")
+    why = stop
+    if not why and c is None:
+        why = (f"큐브 {r['id']} 가 책상 위에 안 보임" if r["id"] is not None else "책상 위에 보이는 큐브가 없음") + " — 탑 옆 (8 cm 밖) 에 하나 놓기"
+        o = next((q for q in odd if q["id"] == r["id"]), None)
+        if o:
+            why = f"큐브 {o['id']} 가 다른 큐브 위에 있음 ({o['level'] + 1}층) — 책상에 내려놓기"
+    if not why and over:
+        why = f"탑 자리가 큐브 {', '.join(str(o['id']) for o in over)} 와 겹침 — 8 cm 넘게 띄우거나, 그 큐브 위에 쌓으려면 지도에서 그 큐브를 누름"
+    if why:
+        r.update(state="blocked", why=why)
+        return {**out, "ok": True, "steps": rows, "text": why, "bad": True}
+    r.update(state="next", why="")
+    if sub:
+        out["warn"].append(f"순서의 큐브 {rest[0]} 대신 보이는 큐브 {c['id']}")
+    tx, ty, tyaw = (top["x"], top["y"], top["yaw_deg"]) if top else (bx, by, byaw)   # 실제로 보이는 맨 위 큐브 위에 (없으면 탑 자리)
+    tyaw = (tyaw + 45.0) % 90.0 - 45.0   # 큐브는 90° 마다 같다
     obst = [[round(tx, 4), round(ty, 4), round(tyaw, 1), k] for k in range(height)]
-    obst += [[round(c["x"], 4), round(c["y"], 4), round(c["yaw_deg"], 1), 0] for c in loose if c is not nxt]
-    obst += [[round(c["x"], 4), round(c["y"], 4), round(c["yaw_deg"], 1), k] for c in odd for k in range(c["level"] + 1)]
-    near = [o for o in obst if math.hypot(o[0] - nxt["x"], o[1] - nxt["y"]) < NEAR_M]
-    if near:
-        out["warn"].append(f"큐브 {nxt['id']} 의 {NEAR_M * 100:.0f} cm 안에 다른 큐브 — 벌린 손가락이 닿을 수 있다 (계획이 검사한다, 걸리면 더 띄우기)")
-    if level >= REACH_LEVELS:
-        out["warn"].append(f"{level + 1}층째는 기본 책상 높이에서 팔이 못 닿는다 ({REACH_LEVELS}층까지) — 계획이 거절할 것")
-    p = {"cube_x": _f3(nxt["x"]), "cube_y": _f3(nxt["y"]), "cube_yaw": f"{nxt['yaw_deg']:.1f}", "target_x": _f3(tx), "target_y": _f3(ty), "grasp": "vertical"}
+    obst += [[round(o["x"], 4), round(o["y"], 4), round(o["yaw_deg"], 1), 0] for o in loose if o is not c]
+    obst += [[round(o["x"], 4), round(o["y"], 4), round(o["yaw_deg"], 1), k] for o in odd for k in range(o["level"] + 1)]
+    if [o for o in obst if math.hypot(o[0] - c["x"], o[1] - c["y"]) < NEAR_M]:
+        out["warn"].append(f"큐브 {c['id']} 의 {NEAR_M * 100:.0f} cm 안에 다른 큐브 — 벌린 손가락이 닿을 수 있다 (계획이 검사한다, 걸리면 더 띄우기)")
+    if L >= REACH_LEVELS:
+        out["warn"].append(f"{L + 1}층째는 기본 책상 높이에서 팔이 못 닿는다 ({REACH_LEVELS}층까지) — 계획이 거절할 것")
+    p = {"cube_x": _f3(c["x"]), "cube_y": _f3(c["y"]), "cube_yaw": f"{c['yaw_deg']:.1f}", "target_x": _f3(tx), "target_y": _f3(ty), "grasp": "vertical"}
     p["stack"] = json.dumps({"for": [float(p["cube_x"]), float(p["cube_y"]), float(p["target_x"]), float(p["target_y"])],
-                             "level": level, "target_yaw": round(tyaw, 1), "obstacles": obst})
-    return {**out, "ok": True, "cube": nxt, "level": level, "target": {"x": tx, "y": ty, "yaw_deg": tyaw}, "obstacles": obst, "params": p,
-            "text": f"다음: 큐브 {nxt['id']} → {level + 1}층" + (f" (큐브 {top['id']} 위)" if top else " (탑 자리 바닥)")}
+                             "level": L, "target_yaw": round(tyaw, 1), "obstacles": obst})
+    out["next"] = {"n": r["n"], "cube": c, "level": L, "target": {"x": tx, "y": ty, "yaw_deg": tyaw}, "obstacles": obst, "params": p, "top": top, "height": height}
+    return {**out, "ok": True, "steps": rows,
+            "text": f"다음: {r['n']}층 — 큐브 {c['id']}" + (f" (큐브 {top['id']} 위)" if top else " (탑 자리 바닥)")}
 
 
 def detect_frame(image, cfg=None, keep=True):
@@ -239,13 +264,69 @@ def install(app, log_dir):
     def _last():
         return JSONResponse(LAST["r"] or {"ok": False, "none": True})
 
-    @app.post("/api/stack/next")
-    async def _next(req: Request):
+    plan_file = Path(log_dir) / "stack_plan.json"
+
+    def _saved():
+        try:
+            d = json.loads(plan_file.read_text())
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write(d):
+        d["t"] = time.time()
+        plan_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = plan_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d))
+        os.replace(tmp, plan_file)
+        return d
+
+    @app.post("/api/stack/steps")
+    async def _steps(req: Request):
         try:
             b = await req.json()
-            return JSONResponse(next_step(b.get("cubes") or [], b.get("base") or {}, b.get("order") or [], b.get("placed")))
+            return JSONResponse(steps(b.get("cubes") or [], b.get("base") or {}, b.get("order") or [], _saved().get("placed")))
         except Exception:
             return JSONResponse({"ok": False, "text": "요청 값이 틀림"}, status_code=400)
+
+    @app.get("/api/stack/plan")
+    def _plan_get():
+        d = _saved()
+        return JSONResponse({"ok": True, "order": d.get("order"), "base": d.get("base"), "placed": d.get("placed") or {}})
+
+    @app.post("/api/stack/plan")
+    async def _plan_set(req: Request):
+        """순서·탑 자리 저장. 탑 자리가 바뀌면 놓은 기록 (placed) 은 지운다."""
+        try:
+            b = await req.json()
+            order = [int(i) for i in b.get("order") or []][:12]
+            base = b.get("base") or {}
+            base = {"x": float(base["x"]), "y": float(base["y"]), "yaw_deg": float(base.get("yaw_deg") or 0.0)}
+            if not all(math.isfinite(v) and abs(v) <= 360 for v in base.values()):
+                raise ValueError
+        except Exception:
+            return JSONResponse({"ok": False, "text": "순서·탑 자리 값이 틀림"}, status_code=400)
+        old = _saved()
+        placed = old.get("placed") or {}
+        if old.get("base") != base:
+            placed = {}
+        return JSONResponse({"ok": True, **_write({"order": order, "base": base, "placed": placed})})
+
+    @app.post("/api/stack/placed")
+    async def _placed(req: Request):
+        """화면이 걸음을 끝까지 재생했다: {level, id} — 힌트 기록 (가려진 층의 번호 표시, 다른 층에 보이면 막기)."""
+        try:
+            b = await req.json()
+            lv, i = int(b["level"]), int(b["id"])
+            if not 0 <= lv < 12:
+                raise ValueError
+        except Exception:
+            return JSONResponse({"ok": False}, status_code=400)
+        d = _saved()
+        pl = {k: v for k, v in (d.get("placed") or {}).items() if int(k) < lv and v != i}
+        pl[str(lv)] = i
+        d["placed"] = pl
+        return JSONResponse({"ok": True, **_write(d)})
 
     @app.post("/api/stack/spot")
     async def _spot(req: Request):

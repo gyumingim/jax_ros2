@@ -1,16 +1,15 @@
 // 탑 쌓기 탭: 실시간 인식 (live.js → GET /api/live/cubes: 거치한 폰의 영상, 가상 모드면 가상 큐브) → 큐브 여러 개 → 한 번에 한 큐브씩 탑 위로.
 // 옮기기 = 역기구학 탭과 같은 우리 IK 계획 (강화학습 아님): 계획 = POST /api/svc/pick_dry/start (역기구학 탭 칸 + stack 칸 = 놓는 층·다른 큐브),
 // 재생 = 역기구학 탭의 원래 버튼(가상 팔로 재생 / 실물로 재생)을 그대로 누른다 → 확인창·검사·force 확인이 전부 원래 것.
-// 한 큐브를 놓고 팔이 HOME 에 오면 새 프레임(가상이면 가상 장면)에서 놓인 큐브를 확인한다 (어긋남 2 cm · 기울기 15° · 층 — stack_api.check_placed).
-// 맞으면 다음 큐브는 실제로 놓인 맨 위 큐브 자리·각(90° 마다 맞춤) 위에, 안 맞으면 멈춘다.
+// 걸음 목록 (2026-11-24): 'N층: N번 옮기기' 마다 버튼. 상태가 없다 — 서버(stack_api.steps)가 지금 인식 + 순서·탑 자리만으로 완료·다음·막음을 정한다
+// (탑 속 큐브의 어긋남 2 cm · 기울기 15° · 층). 그래서 한 걸음 하고 다른 일을 하다 와도, 페이지·서버를 다시 켜도 이어서 누른다.
+// 순서·탑 자리는 서버 logs/stack_plan.json 에 둔다 (GET/POST /api/stack/plan). 버튼은 팔 HOME · 영상 있음 · 집을 수 있음일 때만.
 // app.js·direct.js·phone.js 는 안 고친다: 탭 버튼도 여기서 단다 (phone.js 와 같은 방식).
 "use strict";
 (function () {
   const page = document.getElementById("page-stack");
   if (!page) return;
-  const LOCK_KEY = "jaxdash.stack";
-  const ST = { det: null, grasp: {}, busy: false, going: false, waitLive: false, mapMode: "tower", played: false, sawRun: false, lock: null, view: null, extra: [], att: null };
-  try { ST.lock = JSON.parse(lsGet(LOCK_KEY) || "null"); } catch (e) { ST.lock = null; }
+  const ST = { det: null, grasp: {}, busy: false, going: false, mapMode: "tower", played: false, sawRun: false, view: null, extra: [], att: null, rows: null, endT: 0 };
 
   TABS.push(["stack", "탑 쌓기", "큐브 여러 개"]);
   TAB_IDS.add("stack");
@@ -26,8 +25,8 @@
   ST.src = el("div", { class: "lv-src" });
   ST.res = el("div", { class: "result", hidden: true });
   ST.list = el("div", { class: "st-list", hidden: true });
-  ST.order = el("input", { placeholder: "예: 12, 10, 11", inputmode: "numeric", onchange: () => { ST.orderTouched = true; mapDraw(); spot(); plan(); } });
-  const xy = () => { mapDraw(); spot(); plan(); };
+  ST.order = el("input", { placeholder: "비우면 보이는 큐브 아무거나", inputmode: "numeric", onchange: () => { save(); mapDraw(); spot(); plan(); } });
+  const xy = () => { save(); mapDraw(); spot(); plan(); };
   ST.sx = el("input", { inputmode: "decimal", value: lsGet("jaxdash.stack.x") || "-0.16", onchange: xy });
   ST.sy = el("input", { inputmode: "decimal", value: lsGet("jaxdash.stack.y") || "-0.28", onchange: xy });
   ST.syaw = el("input", { inputmode: "decimal", value: "0", onchange: xy });
@@ -38,9 +37,7 @@
   ST.mapSw = el("div", { class: "modesw seg", role: "group", hidden: true, style: "margin-top:12px" }, ST.bmTower, ST.bmCube);
   ST.mapNote = el("div", { class: "help", style: "margin:6px 0 0" }, "지도를 눌러 탑 자리를 고른다 (위 = 로봇, 아래 = 앞, 오른쪽 = 로봇 왼쪽 +x).");
   ST.spotNote = el("div", { class: "result", hidden: true });
-  ST.lockNote = el("div", { class: "help", style: "margin:8px 0 0" });
-  ST.bReset = el("button", { class: "btn line", onclick: reset }, "처음부터");
-  ST.bGo = el("button", { class: "btn st-big", disabled: true, onclick: go }, "탑 쌓기");
+  ST.steps = el("div", { class: "st-steps" });
   ST.bStop = el("button", { class: "btn red", onclick: () => post(VIRT() ? "/api/ik/stop_virtual" : "/api/ik/stop_real") }, "■ 멈춤");
   ST.note = el("div", { class: "result" }, "큐브를 알아보면 목록이 나온다 (실시간 인식 준비 중)");
   ST.bPlay = el("button", { class: "btn", onclick: () => { if (!T.traj) return; if (T.frame >= T.traj.positions.length - 1) T.frame = 0; T.playing = !T.playing; T.last = performance.now(); } }, "▶ 재생");
@@ -62,6 +59,12 @@
 #page-stack .st-map { display: block; width: 100%; max-width: 460px; margin: 12px auto 0; border-radius: 12px; background: var(--fill); touch-action: none; cursor: crosshair; }
 #page-stack .frow .field input, #page-stack .frow .field select { font-size: 16px; }
 #page-stack ol.help { padding-left: 20px; margin: 10px 0 0; line-height: 1.6; }
+#page-stack .st-steps { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+#page-stack .st-step { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#page-stack .st-step > .btn { flex: 1 1 220px; min-height: 52px; font-size: 17px; border-radius: 12px; }
+#page-stack .st-step .st-done { flex: 1 1 220px; min-height: 52px; display: flex; align-items: center; justify-content: center; border-radius: 12px; font-weight: 700; background: var(--fill); color: #15803d; }
+#page-stack .st-step .st-done.st-bad { color: #b91c1c; }
+#page-stack .st-step small { flex: 1 1 100%; color: var(--sub); }
 @media (max-width: 980px) { #page-stack .split-r { order: 1; } }
 @media (max-width: 640px) { #page-stack .frow .field.wide { width: 100%; } }`));
   $("#stack-left").append(
@@ -70,16 +73,16 @@
       ST.src, ST.img, ST.res, ST.list),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "탑"),
     el("div", { class: "card" },
-      el("div", { class: "frow" }, el("b", {}, "순서"), el("label", { class: "field wide" }, el("span", {}, "옮길 큐브 번호", el("small", {}, " 차례대로")), ST.order)),
+      el("div", { class: "frow" }, el("b", {}, "순서"), el("label", { class: "field wide" }, el("span", {}, "옮길 큐브 번호", el("small", {}, " 차례대로, 비워도 됨")), ST.order)),
       el("div", { class: "frow" }, el("b", {}, "탑 자리"),
         el("label", { class: "field" }, el("span", {}, "x", el("small", {}, " m")), ST.sx), el("label", { class: "field" }, el("span", {}, "y", el("small", {}, " m")), ST.sy),
         el("label", { class: "field" }, el("span", {}, "각", el("small", {}, " °")), ST.syaw)),
-      el("div", { class: "help", style: "margin:8px 0 0" }, "역기구학 탭과 같은 좌표: 어깨 축 바로 아래가 (0, 0), +x = 로봇 왼쪽, 앞(책상 쪽) = −y. 순서의 첫 큐브를 이 자리 바닥에 놓고 그 위로 쌓는다."),
-      ST.mapSw, ST.map, lvTools(), ST.mapNote, ST.spotNote, ST.lockNote,
-      ST.bGo,
-      el("div", { class: "st-row" }, ST.bStop, ST.bReset),
+      el("div", { class: "help", style: "margin:8px 0 0" }, "역기구학 탭과 같은 좌표: 어깨 축 바로 아래가 (0, 0), +x = 로봇 왼쪽, 앞(책상 쪽) = −y. 순서의 첫 큐브를 이 자리 바닥에 놓고 그 위로 쌓는다. 책상 위에는 큐브를 하나씩 (탑에서 8 cm 넘게, 15 cm 이상 권장) 두면 된다 — 순서의 다음 번호가 없으면 보이는 큐브를 옮긴다."),
+      ST.mapSw, ST.map, lvTools(), ST.mapNote, ST.spotNote,
+      ST.steps,
+      el("div", { class: "st-row" }, ST.bStop),
       ST.note,
-      el("div", { class: "help", style: "margin:8px 0 0" }, "한 번 누르면 큐브 하나: 계획(역기구학 탭과 같은 IK, 손은 수직) → 지금 모드의 팔로 재생할지 확인창 → 놓고 HOME 에 오면 새 프레임으로 놓인 자리를 확인 → 다음 큐브는 실제 맨 위 큐브 위에.")),
+      el("div", { class: "help", style: "margin:8px 0 0" }, "버튼 하나 = 큐브 하나: 계획(역기구학 탭과 같은 IK, 손은 수직) → 지금 모드의 팔로 재생할지 확인창. 다음 층 버튼은 카메라가 아래 층을 탑 자리에서 알아봐야 켜진다 (놓인 큐브 어긋남 2 cm · 기울기 15° · 층 확인). 언제든 이어서 누르면 된다.")),
     el("details", { class: "adv" }, el("summary", {}, "준비 — 인쇄물 · 놓는 법"),
       el("div", { class: "card" },
         el("a", { class: "btn line", href: "/api/stack/sheet", target: "_blank" }, "큐브 마커 PDF 열기 (ID 10~15)"),
@@ -100,8 +103,8 @@
     const sig = JSON.stringify([r.ok, cubes.map((c) => [c.id, Math.round(c.x * 1000), Math.round(c.y * 1000), Math.round(c.yaw_deg), c.level, Math.round(c.tilt_deg || 0)])]);
     ST.mapSw.hidden = !virt; if (!virt && ST.mapMode !== "tower") setMapMode("tower");
     ST.src.textContent = lvSrcText(all);
-    const img = !virt && !all.stale && all.frame_n != null ? "/api/live/frame.jpg?n=" + all.frame_n : "";
-    ST.img.hidden = !img; if (img && ST.img.dataset.src !== img) { ST.img.dataset.src = img; ST.img.src = img; }
+    const live = !virt && !all.stale;   // 그림 = MJPEG 스트림 (한 번 걸고, 영상 있음/없음이 바뀔 때만 다시)
+    if (live !== ST.imgLive) { ST.imgLive = live; ST.img.hidden = !live; if (live) ST.img.src = "/api/live/stream.mjpg?t=" + Date.now(); else ST.img.removeAttribute("src"); }
     ST.det = r; ST.all = all;
     if (sig === ST.sig) { mapDraw(); return; }
     ST.sig = sig;
@@ -130,7 +133,7 @@
     if (ST.det !== det) return;
     g.at = [c.x, c.y];
     ST.grasp[c.id] = g;
-    table(); if (!ST.waitLive && ST.step) note();
+    table();
   }
   function table() {
     const r = ST.det;
@@ -153,37 +156,27 @@
   // ---------- 탑 자리·순서 ----------
   const ids = () => (ST.det && ST.det.ok ? ST.det.cubes.map((c) => c.id).sort((a, b) => a - b) : []);
   function baseUI() {
-    const lk = ST.lock, all = ids();
-    if (!lk) {
-      if (!ST.orderTouched && all.length && ST.orderFor !== all.join(",")) { ST.order.value = all.slice(0, 3).join(", "); ST.orderFor = all.join(","); setTimeout(spot, 0); }   // 층 수가 바뀜 → 그 자리 다시 확인   // 기본 = 번호 오름차순, 3층까지라 앞 3개
-    } else {
-      ST.order.value = lk.order.join(", ");
-      ST.sx.value = lk.base.x.toFixed(3); ST.sy.value = lk.base.y.toFixed(3); ST.syaw.value = String(lk.base.yaw_deg);
-    }
-    ST.order.disabled = ST.sx.disabled = ST.sy.disabled = ST.syaw.disabled = !!lk;
-    ST.lockNote.textContent = lk ? "탑 자리·순서 고정 (쌓는 중) — 바꾸려면 '처음부터'" : "";
-    ST.bReset.disabled = !lk;
     mapDraw();
   }
-  function chosen() {   // 지금 고른 탑 자리·순서 (고정됐으면 그것). 틀리면 { error }
-    if (ST.lock) return ST.lock;
+  function chosen() {   // 지금 고른 탑 자리·순서. 틀리면 { error }
     const seq = ST.order.value.split(/[\s,]+/).filter(Boolean).map(Number);
-    if (!seq.length || seq.some((i) => !Number.isInteger(i)) || new Set(seq).size !== seq.length) return { error: "순서는 큐브 번호를 쉼표로 (예: 12, 10, 11), 같은 번호는 한 번만" };
+    if (seq.some((i) => !Number.isInteger(i)) || new Set(seq).size !== seq.length) return { error: "순서는 큐브 번호를 쉼표로 (예: 12, 10, 11), 같은 번호는 한 번만 — 비우면 보이는 큐브 아무거나" };
     const x = parseFloat(ST.sx.value), y = parseFloat(ST.sy.value), yaw = parseFloat(ST.syaw.value) || 0;
     if (!Number.isFinite(x) || !Number.isFinite(y)) return { error: "탑 자리 x, y 숫자 (m)" };
     return { base: { x, y, yaw_deg: yaw }, order: seq };
   }
-  function listed() {   // 쌓기 전 확인: 순서의 큐브가 다 사진에 있고 집을 수 있나. 문제 글 또는 ""
-    if (ST.lock || !ST.det || !ST.det.ok) return "";
+  function save() {   // 순서·탑 자리 → 서버 (logs/stack_plan.json: 페이지를 다시 열어도, 다른 기기에서도 같은 값)
     const ch = chosen();
-    if (ch.error) return ch.error;
-    if (ch.order.length > 3) return `순서는 3개까지 — 탑은 3층까지만 (지금 ${ch.order.length}개)`;
-    for (const i of ch.order) {
-      const c = ST.det.cubes.find((k) => k.id === i), g = ST.grasp[i];
-      if (!c) return `순서의 큐브 ${i} 가 안 보임 (보이는 큐브: ${ids().join(", ") || "없음"})`;
-      if (c.level === 0 && Math.hypot(c.x - ch.base.x, c.y - ch.base.y) > 0.025 && g && g.ok && !g.graspable) return `큐브 ${i} 는 못 집는 자리: ${g.reason || ""}`;
-    }
-    return "";
+    if (!ch.error) post("/api/stack/plan", ch, true);
+  }
+  async function load() {
+    try {
+      const r = await (await fetch("/api/stack/plan")).json();
+      if (r.order) ST.order.value = r.order.join(", ");
+      if (r.base) { ST.sx.value = (+r.base.x).toFixed(3); ST.sy.value = (+r.base.y).toFixed(3); ST.syaw.value = String(r.base.yaw_deg || 0); }
+    } catch (e) { /* 없으면 기본값 */ }
+    ST.loaded = true; ST.sig = null;
+    baseUI(); spot(); plan();
   }
 
   // ---------- 탑 자리: 지도 (놓을 수 있는 곳) + 그 자리 확인 ----------
@@ -202,7 +195,7 @@
     }).catch(() => { ST.mapBusy = false; ST.mapD = d; });
   }
   function mapDraw() {
-    const g = [], m = ST.mapData, need = (chosen().order || []).length || 1;
+    const g = [], m = ST.mapData, need = (chosen().order || []).length || 3;
     if (m) m.rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) { const n = +row[i]; if (n) g.push(sv("rect", { x: px(m.xs[i] - m.step / 2), y: py(m.ys[j] + m.step / 2), width: m.step * K, height: m.step * K,
       fill: n >= Math.min(need, 3) ? "#16a34a" : "#86efac", "fill-opacity": 0.25 + 0.2 * Math.min(n, 3) })); } });
     g.push(sv("circle", { cx: px(0), cy: py(-0.145), r: 7, fill: "#64748b" }), sv("text", { x: px(0) + 12, y: py(-0.145) + 5, "font-size": 15, fill: "#64748b" }, "로봇 쪽 (어깨 = x 0, y 0)"));
@@ -213,7 +206,6 @@
     ST.map.replaceChildren(...g);
   }
   function towerAt(x, y, near) {   // 지도에서 탑 자리 고르기. 큐브를 누르면 그 큐브 자리 (그 위에 쌓기)
-    if (ST.lock) { toast("쌓는 중에는 탑 자리가 고정 — 바꾸려면 '처음부터'"); return; }
     if (near) { x = near.x; y = near.y; ST.syaw.value = near.yaw_deg.toFixed(0); } else { x = Math.round(x * 100) / 100; y = Math.round(y * 100) / 100; }
     ST.sx.value = x.toFixed(3); ST.sy.value = y.toFixed(3);
     xy();
@@ -230,42 +222,65 @@
     let r;
     try {
       r = await (await fetch("/api/stack/spot", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ x: ch.base.x, y: ch.base.y, yaw_deg: ch.base.yaw_deg, levels: Math.min(8, Math.max(1, ch.order.length)), d: tableD() }) })).json();
+        body: JSON.stringify({ x: ch.base.x, y: ch.base.y, yaw_deg: ch.base.yaw_deg, levels: Math.min(8, ch.order.length || 3), d: tableD() }) })).json();
     } catch (e) { r = { ok: false, text: "탑 자리 확인 못 함 (서버 연결)" }; }
     if (seq !== spotSeq) return;
     ST.spotOk = !!r.ok;
     show(ST.spotNote, `탑 자리 (${ch.base.x.toFixed(3)}, ${ch.base.y.toFixed(3)}): ` + (r.text || ""), r.ok ? "ok" : "bad");
   }
-  function reset() {
-    if (!confirm("탑 자리·순서를 지우고 처음부터 할까요? (팔은 안 움직인다)")) return;
-    ST.lock = null; lsSet(LOCK_KEY, "null"); ST.waitLive = false; ST.played = false; ST.sawRun = false; ST.orderTouched = false; ST.orderFor = null;
-    baseUI(); spot(); plan();
-  }
-
-  // ---------- 다음 한 걸음 (서버가 사진으로 판단) ----------
+  // ---------- 걸음 목록 (서버가 지금 인식으로 판단, 상태 없음) ----------
   let planSeq = 0;
   async function plan() {
     const seq = ++planSeq;
-    ST.step = null;
-    baseUI();
-    if (!ST.det || !ST.det.ok || ST.waitLive) { table(); return; }
+    if (!ST.loaded) return;
+    if (!ST.det || !ST.det.ok) { ST.rows = null; ST.step = null; ST.stepText = ST.det && ST.det.stale ? "영상 없음" : "큐브를 못 찾음"; table(); return; }
     const ch = chosen();
-    if (ch.error) { show(ST.note, ch.error, "warn"); table(); return; }
+    if (ch.error) { ST.rows = null; ST.step = null; ST.stepText = ch.error; table(); return; }
     let r;
     try {
-      r = await (await fetch("/api/stack/next", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cubes: ST.det.cubes, base: ch.base, order: ch.order, placed: (ST.lock && ST.lock.placed) || null }) })).json();
+      r = await (await fetch("/api/stack/steps", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cubes: ST.det.cubes, base: ch.base, order: ch.order }) })).json();
     } catch (e) { r = { ok: false, text: "서버 연결 실패" }; }
     if (seq !== planSeq) return;
-    ST.step = r;
-    if (!ST.waitLive) note();
+    ST.rows = r.ok ? r.steps : null;
+    ST.step = r.next ? { ok: true, done: false, ...r.next } : { ok: false, done: !!r.done };
+    ST.stepText = r.text || ""; ST.stepBad = !r.ok || !!r.bad; ST.stepWarn = (r.warn || []).join(" · ");
     table(); scene(); draw();
   }
-  function note() {
-    const r = ST.step, bad = listed(), warn = (r.warn || []).join(" · ");
-    if (bad) show(ST.note, bad, "bad");
-    else show(ST.note, r.text || "", !r.ok ? "bad" : r.done ? "ok" : warn ? "warn" : "", (r.stop ? "놓인 큐브를 손으로 바로잡거나 '처음부터' · " : "") +
-      (r.placed ? `놓인 큐브 ${r.placed.id} 확인 (${r.placed.x.toFixed(3)}, ${r.placed.y.toFixed(3)}) ${r.placed.yaw_deg.toFixed(0)}° · ` : "") + (r.ok && !r.done ? `탑 지금 ${r.height}층 · ` : "") + warn);
+  const AK4 = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow"];
+  function gate() {   // 다음 걸음 버튼을 막는 화면 쪽 조건 (서버가 본 것 = 탑·큐브 상태, 여기 = 팔·영상·집기). 막으면 이유, 아니면 ""
+    const kind = S.mode && S.mode.kind, st = ST.step;
+    const pb = (kind === "virtual" ? (S.ros.virtual_state || {}) : (S.ros.direct_state || {})).playback || {};
+    if (pb.running) return `재생 중 ${pb.frame}/${pb.frames - 1}`;
+    if (ST.going) return "계획 중…";
+    if (!LQ.r || LQ.r.stale) return "영상 없음";
+    const p = S.pose || {};
+    if (!AK4.every((n) => p[n]) || ARM7.some((n) => p[n] && Math.abs(p[n].deg) >= 5)) return "팔이 HOME 이 아님 (AK45 4개 피드백 + 보낸 서보 값이 0° ±5°)";   // 서보는 보낸 값만 안다 (아직 안 보냈으면 없음)
+    if (LQ.r.mode !== "virtual" && (LQ.r.t_frame || 0) <= ST.endT + 0.3) return "재생이 끝난 뒤의 새 프레임을 기다림";
+    const g = st && st.cube && ST.grasp[st.cube.id];
+    if (!g) return "집을 수 있나 확인 중…";
+    if (g.ok && !g.graspable) return `큐브 ${st.cube.id} 는 못 집는 자리: ${g.reason || ""}`;
+    if (ST.spotOk === false) return "탑 자리에 그 층까지 못 놓음 (위 탑 자리 확인)";
+    if (!cards.pick_dry) return "역기구학 계획 항목이 없다";
+    return "";
+  }
+  function renderSteps() {   // 0.3초마다: 걸음마다 한 줄 (완료 / 버튼 / 막힌 이유)
+    const rows = ST.rows, kind = S.mode && S.mode.kind, why = gate(), sig = JSON.stringify([rows, why, kind]);
+    if (sig === ST.rowSig) return;
+    ST.rowSig = sig;
+    if (!rows) { ST.steps.replaceChildren(el("div", { class: "help" }, ST.stepText || "")); }
+    else ST.steps.replaceChildren(...rows.map((q) => {
+      if (q.state === "bad") return el("div", { class: "st-step" }, el("div", { class: "st-done st-bad" }, `✗ ${q.text} — 문제`), el("small", {}, q.why));
+      if (q.state === "done") return el("div", { class: "st-step" }, el("div", { class: "st-done" }, `✓ ${q.text} — 완료`), el("small", {}, q.why));
+      const on = q.state === "next" && !why;
+      const b = el("button", { class: "btn" + (q.state === "next" ? "" : " line"), disabled: !on, onclick: () => go(q.n) }, q.text + (on ? ` (${kind === "virtual" ? "가상 팔" : "실물 팔"})` : ""));
+      return el("div", { class: "st-step" }, b, el("small", {}, q.state === "next" ? why : q.why));
+    }));
+  }
+  function line() {   // 상태 한 줄
+    if (ST.going || ST.played || Date.now() < (ST.holdUntil || 0)) return;   // 방금 띄운 계획·재생 글은 잠시 둔다
+    const r = ST.step, why = r && r.ok ? gate() : "";
+    show(ST.note, ST.stepText || "", ST.stepBad ? "bad" : r && r.done ? "ok" : why || ST.stepWarn ? "warn" : "", [why, ST.stepWarn].filter(Boolean).join(" · "));
   }
 
   // ---------- 탑 쌓기 = 한 큐브: 역기구학 탭의 칸을 채우고 ▶ 계획 → (통과하면) 그 탭의 재생 버튼 ----------
@@ -274,25 +289,19 @@
     for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200)) if (cond()) return true;
     return false;
   }
-  async function go() {
+  async function go(n) {
     const c = cards.pick_dry, st = ST.step;
-    if (!st || !st.ok || st.done || ST.going || ST.waitLive || !LQ.r || LQ.r.stale) return;
-    if (!c) { toast("역기구학 계획 항목이 없다", "error"); return; }
-    if (listed() || (!ST.lock && ST.spotOk === false)) return;
+    if (!st || !st.ok || st.done || st.n !== n || gate()) return;
     ST.going = true;
     try {
-      if (!ST.lock) {   // 첫 큐브: 탑 자리·순서를 고정 (바닥 큐브는 곧 가려져 사진에 안 보인다)
-        const ch = chosen();
-        if (ch.error) { show(ST.note, ch.error, "warn"); return; }
-        ST.lock = { base: ch.base, order: ch.order }; lsSet(LOCK_KEY, JSON.stringify(ST.lock)); baseUI();
-      }
+      save();   // 누른 순서·탑 자리를 남긴다 (기본값 그대로 눌러도)
       if (!c.fields.stack) c.fields.stack = el("input", { type: "hidden" });   // 역기구학 탭·휴대폰 탭의 계획은 이 칸을 비워 보낸다
       for (const [k, v] of Object.entries(st.params)) c.fields[k].value = v;
       mapUpdate();
       const params = Object.fromEntries(Object.entries(c.fields).map(([k, i]) => [k, i.type === "checkbox" ? (i.checked ? "1" : "") : i.value]));
       c.fields.stack.value = "";
       const m0 = S.traj_mtime, st0 = svcById("pick_dry").started;
-      const head = `큐브 ${st.cube.id} → ${st.level + 1}층`;
+      const head = `${st.level + 1}층: ${st.cube.id}번 옮기기`;
       show(ST.note, head + ": 계획 중…", "run");
       const r = await post("/api/svc/pick_dry/start", { params });
       if (!r.ok) { show(ST.note, head + ": 계획을 못 시작함", "bad", r.error || ""); return; }
@@ -305,7 +314,7 @@
       // 이 계획이 정말 이 걸음(놓는 층·다른 큐브)으로 돌았나 — 아니면 탑 속으로 놓으러 가는 계획일 수 있다
       const real = T.traj.real || {};
       if ((real.place_level || 0) !== st.level || (real.obstacles || []).length !== st.obstacles.length) {
-        show(ST.note, head + ": 계획이 탑 쌓기 값 없이 돌았다 — 재생 안 함", "bad", "다시 '탑 쌓기' (역기구학 탭에서 그 사이 계획을 돌렸는지 확인)"); return;
+        show(ST.note, head + ": 계획이 탑 쌓기 값 없이 돌았다 — 재생 안 함", "bad", "다시 누르기 (역기구학 탭에서 그 사이 계획을 돌렸는지 확인)"); return;
       }
       scene(); T.frame = 0; draw();
       if (T.traj.status !== "playable") { show(ST.note, head + ": 계획이 검사에 걸림 — 재생 안 함", "bad", txt || T.traj.reason || ""); return; }
@@ -316,14 +325,13 @@
       if (!btn) { show(ST.note, pass, cls, "이 모드의 재생은 역기구학 탭에서"); return; }
       if (btn.disabled) { show(ST.note, pass, "warn", "재생은 아직 못 함: " + (btn.title || (kind === "direct" ? "연결 탭에서 팔 연결·원점 먼저" : "이미 재생 중"))); return; }
       show(ST.note, pass, cls, "확인창에서 재생을 고르면 팔이 움직인다");
-      ST.played = true; ST.sawRun = false; ST.head = head;
-      ST.pending = { id: st.cube.id, x: st.target.x, y: st.target.y, yaw_deg: st.target.yaw_deg, level: st.level };   // 끝나면 이 자리에 있나 확인
+      ST.played = true; ST.sawRun = false; ST.head = head; ST.cur = { level: st.level, id: st.cube.id };
       btn.click();   // 원래 버튼 = 원래 확인창 (가상: 1번, 실물: 2번 + 검사 문제면 한 번 더)
       setTimeout(() => {   // 확인창을 취소했거나 원래 검사가 거절하면 (팔 꺼짐·원점 없음 …) 재생이 안 시작된다 — 이유는 화면 위 알림
         const k = S.mode && S.mode.kind, p = (k === "virtual" ? (S.ros.virtual_state || {}) : (S.ros.direct_state || {})).playback || {};
-        if (ST.played && !ST.sawRun && !p.running) { ST.played = false; show(ST.note, pass, "warn", "재생이 시작되지 않았다 — 확인창을 취소했거나 거절됨 (화면 아래 알림). 고친 뒤 다시 '탑 쌓기'"); }
+        if (ST.played && !ST.sawRun && !p.running) { ST.played = false; ST.holdUntil = Date.now() + 15000; show(ST.note, pass, "warn", "재생이 시작되지 않았다 — 확인창을 취소했거나 거절됨 (화면 아래 알림). 고친 뒤 다시 누르기"); }
       }, 4000);
-    } finally { ST.going = false; }
+    } finally { ST.going = false; if (!ST.played) ST.holdUntil = Date.now() + 15000; }
   }
 
   // ---------- 3D: 사진의 큐브들 + 지금 계획 다시 보기 ----------
@@ -405,29 +413,22 @@
     const kind = S.mode && S.mode.kind;
     const pb = (kind === "virtual" ? (S.ros.virtual_state || {}) : (S.ros.direct_state || {})).playback || {};
     if (ST.played && pb.running) ST.sawRun = true;
-    if (ST.played && ST.sawRun && !pb.running) {   // 우리가 누른 재생이 끝남 (다 갔든 멈췄든) → 팔이 HOME 에 오고 새 프레임이 놓인 큐브를 보여야 다음
-      ST.played = false; ST.sawRun = false; ST.waitLive = true; ST.endT = S.t; ST.endReason = pb.reason || "";
-      if (ST.lock && ST.pending) { ST.lock.placed = ST.pending; lsSet(LOCK_KEY, JSON.stringify(ST.lock)); }
-      ST.pending = null;
+    if (ST.played && ST.sawRun && !pb.running) {   // 우리가 누른 재생이 끝남 → 다음 걸음은 지금 인식이 정한다 (실물은 이 뒤의 새 프레임부터)
+      ST.played = false; ST.sawRun = false; ST.endT = S.t || Date.now() / 1000;
+      if (pb.reason === "끝까지 재생" && ST.cur) post("/api/stack/placed", ST.cur, true);   // 힌트 기록 (가려진 층 번호 · 다른 층에 보이면 막기)
+      show(ST.note, `${ST.head}: 재생 끝 (${pb.reason || "?"})`, "run", "놓인 큐브는 실시간 인식으로 확인 — 맞으면 다음 층 버튼이 켜진다");
+      ST.sig = null; if (LQ.r) setDet(LQ.r);
+      ST.holdUntil = Date.now() + 3000;
     }
-    if (ST.waitLive) {
-      const p = S.pose || {}, home = ARM7.every((n) => p[n] && Math.abs(p[n].deg) < 5);
-      const r = LQ.r, fresh = r && !r.stale && (r.mode === "virtual" || (r.t_frame || 0) > ST.endT + 0.3);
-      if (home && fresh) { ST.waitLive = false; ST.sig = null; setDet(r); }
-      else show(ST.note, `${ST.head}: 재생 끝 (${ST.endReason || "?"}) — ` + (!home ? "팔이 HOME 에 오길 기다림" : "새 프레임을 기다림"), "run", "놓인 큐브의 자리·층·기울기를 실시간 인식으로 확인한 뒤 다음 큐브로 간다");
-    }
-    const st = ST.step;
-    const stale = !LQ.r || LQ.r.stale;
-    ST.bGo.disabled = !st || !st.ok || st.done || ST.going || !!pb.running || ST.waitLive || stale || !!listed() || (!ST.lock && ST.spotOk === false);
+    line();
+    renderSteps();
     if (ST.mapD !== tableD()) mapLoad();
-    ST.bGo.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1}` : ST.going ? "계획 중…" : ST.waitLive ? "놓인 큐브 확인 중…" : stale ? "영상 없음" : st && st.stop ? "멈춤 — 놓인 큐브 확인" : st && st.ok && st.done ? "탑 완성"
-      : st && st.ok ? `탑 쌓기: 큐브 ${st.cube.id} → ${st.level + 1}층 (${kind === "virtual" ? "가상 팔" : "실물 팔"})` : "탑 쌓기";
     ST.bStop.disabled = !pb.running;
     draw();
   }
   setInterval(tick, 300);
   setInterval(() => { if (curTab === "stack" && T.playing) draw(); }, 60);
-  baseUI();
+  load();
   if (location.hash === "#stack" && curTab && curTab !== "stack") showTab("stack");
   else if (curTab === "stack") onShow();
 })();

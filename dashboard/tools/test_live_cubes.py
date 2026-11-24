@@ -7,7 +7,7 @@
 2. live.jpg 를 쓰기 시작하면 그것으로 바뀐다 (5 Hz).
 3. 프레임이 끊기면 1.5초 뒤 '영상 없음' (stale, pick 막음), 다시 오면 풀림.
 4. 가상 장면: 놓기·옮기기(위에 쌓기)·지우기 규칙, 재생이 끝까지 가면 옮김, 어긋남 ±1 cm·±5°, 파일에 남음.
-5. stack_api.next_step 의 놓인 큐브 확인 (어긋남·층).
+5. stack_api.steps 의 걸음 목록 (완료·가려짐·어긋남·기울기·층·떨어짐·겹침).
 실패하면 종료코드 1.
 """
 import math
@@ -115,19 +115,39 @@ def scene(tmp):
           S.snapshot()["last_move"]["text"])
     S2 = L.Scene(tmp / "virtual_scene.json")
     check("파일에 남음 (서버를 다시 켜도)", S2.snapshot()["cubes"] == S.snapshot()["cubes"] and S2.jitter)
-    # 탑 쌓기: 놓인 큐브 확인
+    # 탑 쌓기 걸음 목록 (상태 없음: 지금 보이는 것 + 순서·탑 자리만)
     cubes = [{"id": 11, "x": -0.16, "y": -0.28, "yaw_deg": 30.0, "level": 0}, {"id": 10, "x": -0.152, "y": -0.284, "yaw_deg": 33.0, "level": 1},
              {"id": 12, "x": 0.10, "y": -0.21, "yaw_deg": 0.0, "level": 0}]
     base, order = {"x": -0.16, "y": -0.28, "yaw_deg": 30.0}, [11, 10, 12]
-    r = SA.next_step(cubes, base, order, {"id": 10, "x": -0.16, "y": -0.28, "yaw_deg": 30.0, "level": 1})
-    check("next_step: 9 mm 어긋난 큐브 10 → 통과, 다음은 실제 큐브 10 위 (각 33°)", r["ok"] and r["level"] == 2 and r["target"]["x"] == -0.152 and r["target"]["yaw_deg"] == 33.0, r["text"])
-    bad = dict(cubes[1], x=-0.13)
-    r = SA.next_step([cubes[0], bad, cubes[2]], base, order, {"id": 10, "x": -0.16, "y": -0.28, "yaw_deg": 30.0, "level": 1})
-    check("next_step: 3 cm 어긋남 → 멈춤", not r["ok"] and r.get("stop"), r["text"])
-    r = SA.next_step([cubes[0], dict(cubes[1], tilt_deg=25.0), cubes[2]], base, order, {"id": 10, "x": -0.16, "y": -0.28, "yaw_deg": 30.0, "level": 1})
-    check("next_step: 25° 기울어짐 → 멈춤", not r["ok"] and r.get("stop"), r["text"])
-    r = SA.next_step([cubes[0], dict(cubes[1], level=0, x=0.0, y=-0.40), cubes[2]], base, order, {"id": 10, "x": -0.16, "y": -0.28, "yaw_deg": 30.0, "level": 1})
-    check("next_step: 1층으로 떨어짐 → 멈춤", not r["ok"] and r.get("stop"), r["text"])
+    st = lambda r: [q["state"] for q in r["steps"]]   # noqa: E731
+    r = SA.steps([dict(cubes[0], x=0.02, y=-0.27), dict(cubes[1], level=0, x=0.10, y=-0.36), cubes[2]], base, order)
+    check("steps: 처음 → 1층 걸음만 누를 수 있음 (탑 자리 바닥)", st(r) == ["next", "wait", "wait"] and r["next"]["target"]["x"] == -0.16, r["text"])
+    r = SA.steps(cubes, base, order)
+    check("steps: 9 mm 어긋난 큐브 10 → 1·2층 완료, 3층은 실제 큐브 10 위 (각 33°)",
+          st(r) == ["done", "done", "next"] and r["next"]["level"] == 2 and r["next"]["target"]["x"] == -0.152 and r["next"]["target"]["yaw_deg"] == 33.0, r["text"])
+    r = SA.steps(cubes[1:], base, order)
+    check("steps: 카메라는 맨 위만 (11 가려짐) → 1층 완료 (가려짐)", st(r) == ["done", "done", "next"], r["steps"][0]["why"])
+    r = SA.steps([cubes[0], dict(cubes[1], x=-0.13), cubes[2]], base, order)
+    check("steps: 3 cm 어긋남 → 2층 문제 (이유), 3층 막음", st(r) == ["done", "bad", "blocked"] and "어긋남" in r["steps"][1]["why"] and "어긋남" in r["steps"][2]["why"], r["text"])
+    r = SA.steps([cubes[0], dict(cubes[1], tilt_deg=25.0), cubes[2]], base, order)
+    check("steps: 25° 기울어짐 → 막음", st(r) == ["done", "bad", "blocked"] and "기울어짐" in r["text"], r["text"])
+    r = SA.steps([cubes[0], dict(cubes[1], level=2), cubes[2]], base, order, {"0": 11, "1": 10})
+    check("steps: 기록과 다른 층 (2층에 놓았는데 3층으로 보임) → 막음", "bad" in st(r) and "next" not in st(r) and r.get("bad"), r["text"])
+    r = SA.steps([cubes[0], dict(cubes[1], level=0, x=0.0, y=-0.40), cubes[2]], base, order)
+    check("steps: 2층이 책상으로 떨어짐 → 2층 걸음을 다시 누를 수 있음", st(r) == ["done", "next", "wait"], r["text"])
+    r = SA.steps([cubes[0], dict(cubes[1], level=0, x=-0.12, y=-0.30), cubes[2]], base, order)
+    check("steps: 탑 옆 (8 cm 안) 으로 떨어짐 → 겹침으로 막음", st(r) == ["done", "blocked", "wait"] and "겹침" in r["text"], r["text"])
+    r = SA.steps(cubes[:2] + [{"id": 12, "x": -0.152, "y": -0.284, "yaw_deg": 33.0, "level": 2}], base, order)
+    check("steps: 다 쌓임 → 완료 3개", st(r) == ["done", "done", "done"] and r.get("done"), r["text"])
+    r = SA.steps(cubes[:2] + [{"id": 13, "x": -0.152, "y": -0.284, "yaw_deg": 33.0, "level": 2}], base, order)
+    check("steps: 순서에 없는 큐브가 3층에 → 그래도 높이를 믿음 (완료)", st(r) == ["done", "done", "done"], r["text"])
+    one = [cubes[0], dict(cubes[2])]   # 책상 위에 큐브 하나씩 (사용자): 탑 11 + 12 만
+    r = SA.steps(one, base, [11, 10])
+    check("steps: 순서의 10 이 없고 12 만 보임 → '2층: 보이는 큐브 12번'", st(r) == ["done", "next"] and r["steps"][1]["text"] == "2층: 보이는 큐브 12번 옮기기", r["text"])
+    r = SA.steps(one, base, [])
+    check("steps: 순서 비움 → 보이는 큐브 아무거나, 3층까지", st(r) == ["done", "next", "wait"] and r["steps"][1]["text"] == "2층: 보이는 큐브 12번 옮기기", r["text"])
+    r = SA.steps([cubes[1]], base, order, {"0": 11})
+    check("steps: 탑만 보이고 책상 위 큐브 없음 → 3층 막음 (이유), 1층 번호는 기록에서", st(r) == ["done", "done", "blocked"] and r["steps"][0]["id"] == 11, r["text"])
 
 
 def main():
