@@ -42,6 +42,7 @@ MAP_PARTS = max(1, min(8, int(os.environ.get("JAX_DASH_MAP_PARTS") or 0) or (os.
 # 패드: 손가락 판 안쪽 면은 집는 점 −16 ~ +34 mm (손 축 따라). 닿는 곳(판 끝, 큐브 면 1 mm 안) −16 ~ +2 mm → 책상 위 19~37 mm, 큐브 면(0~50) 안.
 GRIP_ABOVE_CENTER = 0.010
 MAP_TIMEOUT_S = 1500.0        # 지도 계산 시간 상한 (집는 점 +1 cm 뒤 이 PC 약 400 초 — 지나는 칸이 많아 판정이 길어짐. 예전 120 s 면 시간 초과)
+WRIST_SERVO_FULL = ("wrist_pitch", "wrist_yaw", "hand_roll")   # 모델 관절 한계(±90 등) 대신 서보 범위 끝까지 쓰는 관절
 NO_TABLE = True               # 2026-11-23 사용자: "책상 없다 생각" — 손가락·팔의 책상 충돌 검사 끔 (over_table 항상 False). 큐브 높이 기준(MAP_D)은 그대로
 TABLE_XY_MARGIN = 0.01        # 책상 발자국 둘레 여유 (m): 손가락 상자가 발자국 + 이만큼 안에 걸치면 책상 높이 검사 (2026-11-21)
 ARM_RADIUS = 0.03             # 팔 기준점(팔꿈치·손목) 둘레 링크 반지름 가정 (m) — 책상 발자국 위에서 책상 면 + 이만큼 위여야
@@ -85,6 +86,8 @@ class _Solver:
         self.fadr = m.jnt_qposadr[env.finger_joint_ids]
         self.site = env.site_id
         self.base_range = m.jnt_range[self.jid].copy()   # env 가 hand_roll 을 서보 범위(±88)로 줄인 뒤
+        for n in WRIST_SERVO_FULL:   # 2026-11-24 사용자: 손목 3 관절은 모델 한계 말고 서보가 갈 수 있는 끝까지 (calibration cmd_range 가 자름)
+            self.base_range[self.arm.index(n)] = [-math.pi, math.pi]
         self.hand_roll = self.arm.index("hand_roll")
         self.finger_geoms = [g for g in range(m.ngeom) if env._is_hand_geom[g] and m.geom_contype[g]]
         self.table_z = float(E.TABLE_SURFACE_Z)
