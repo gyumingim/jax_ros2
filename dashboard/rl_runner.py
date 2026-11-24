@@ -2,6 +2,9 @@
 
     python3 dashboard/rl_runner.py info --ik <IK 폴더>                         # 놓는 범위 표 + 27곳 (stdout JSON)
     python3 dashboard/rl_runner.py run  --ik <IK 폴더> --x 0 --y 0 --yaw 0 --out result.json
+    python3 dashboard/rl_runner.py place --ik <IK 폴더> --lift result.json --tx 0 --ty -0.33 --tyaw 0 --out place.json
+        # '역기구학으로 내리기': 들기(run) 결과의 끝 자세에서 이어 우리 IK 계획(pick_plan.plan_place_from)으로 놓고 HOME.
+        # 결과 = 들기 결과 + 뒤에 붙인 내리기 프레임 (같은 꼴) + place {ok, reason, …}. mujoco 는 IK 레포 motion1 장면(계획기)만 쓴다
 
 서버(rl_api.py)가 부른다. 서버 프로세스에는 mujoco 를 올리지 않는다. 시뮬만 돈다 — 실물 팔과 상관없다.
 
@@ -35,6 +38,9 @@ JOINT_MAP = {   # sim2sim (Isaac 이름) → 대시보드 (motion2 이름). 부�
 }
 ROT_JOINT = "hand_base_to_rotation_base"
 EVERY = 2   # 60 Hz 기록 → 30 Hz 로 낸다
+HZ = 30.0
+PLACE_PHASES = ("CARRY", "LOWER", "OPEN", "RETREAT", "HOME")   # 내리기(우리 IK) 단계 — 들기 단계(chain.PHASES) 뒤에 붙인다
+CUBE_HALF, CUBE_EDGE_IN = 0.025, 0.01
 
 
 def load(ik):
@@ -104,19 +110,83 @@ def run(args):
             "table": table, "table_d": round(float(p0[2] - C.TABLE_TOP), 4)}
 
 
+def place(args):
+    """들기 결과(--lift) 끝 자세·손가락·큐브에서 이어서 놓기 계획. 놓을 자리 tx, ty 는 실좌표 m (= 3D 뷰·역기구학 탭 틀), tyaw °."""
+    lift = json.load(open(args.lift, encoding="utf-8"))
+    for k in ("place",):
+        lift.pop(k, None)
+    tgt = {"x": args.tx, "y": args.ty, "yaw_deg": args.tyaw}
+
+    def fail(why):
+        return dict(lift, place={"ok": False, "target": tgt, "reason": why})
+    s = lift.get("summary") or {}
+    if not s.get("done") or not s.get("still_up_at_end", True):
+        return fail("들기가 성공으로 끝나야 이어서 내린다 (지금 결과는 실패)")
+    tb = lift.get("table")
+    if tb:   # 정우 님 장면의 책상(3D 에 보이는 책상) 위인가 — 우리 계획의 책상은 앞 끝만 있고 뒤·옆은 끝없다
+        e = CUBE_HALF + CUBE_EDGE_IN
+        x0, x1 = tb["pos"][0] - tb["size"][0] / 2 + e, tb["pos"][0] + tb["size"][0] / 2 - e
+        y0, y1 = tb["pos"][1] - tb["size"][1] / 2 + e, tb["pos"][1] + tb["size"][1] / 2 - e
+        if not (x0 <= args.tx <= x1 and y0 <= args.ty <= y1):
+            return fail(f"놓을 자리 ({args.tx:+.3f}, {args.ty:+.3f}) 가 이 장면 책상 밖 — x {x0:+.2f}~{x1:+.2f}, y {y0:+.2f}~{y1:+.2f} m 안이어야")
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    import pick_plan
+    names = lift["joint_names"]
+    deg = {n: math.degrees(v) for n, v in zip(names, lift["q"][-1])}
+    try:
+        r = pick_plan.plan_place_from(deg, deg, lift["cube"][-1], (args.tx, args.ty), args.tyaw, d=lift.get("table_d"), ik=args.ik)
+    except Exception as e:
+        return fail(f"계획 오류: {type(e).__name__}: {e}")
+    info = {"target": tgt, "reason": r.get("reason", ""), "status": r.get("status"), "checks": r.get("checks"),
+            "start_over_limit": r.get("start_over_limit"), "plan_s": r.get("plan_s")}
+    if r.get("status") != "playable":
+        return dict(lift, place=dict(info, ok=False))
+    # 계획 50 Hz → 화면 30 Hz (들기와 같은 간격), 관절 순서는 들기 결과 그대로
+    P, dt, mk = r["positions"], r["dt"], r["marks"]
+    col = [r["joint_names"].index(n) for n in names]
+    n_pl = int(math.ceil((len(P) - 1) * dt * HZ - 1e-9))
+    t_end, base = lift["t"][-1], lift["cube"][-1][2] - lift["rise_cm"][-1] / 100.0
+    ends = [mk["above_place"], mk["place"], mk["opened"], mk["lift2"], len(P) - 1]   # PLACE_PHASES 가 끝나는 계획 프레임
+    n0 = len(lift["phases"])
+    out = dict(lift, phases=list(lift["phases"]) + list(PLACE_PHASES))
+    for key in ("t", "phase", "q", "rot", "cube", "rise_cm"):
+        out[key] = list(lift[key])
+    for k in range(1, n_pl + 1):
+        x = min(k / HZ / dt, len(P) - 1.0)
+        i = min(int(x), len(P) - 2)
+        u = x - i
+        mix = lambda a, b: [a[j] + (b[j] - a[j]) * u for j in range(len(a))]
+        q, c = mix(P[i], P[i + 1]), mix(r["cube"][i], r["cube"][i + 1])
+        nq = math.sqrt(sum(v * v for v in c[3:])) or 1.0
+        c = c[:3] + [v / nq for v in c[3:]]
+        out["t"].append(round(t_end + k / HZ, 3))
+        out["phase"].append(n0 + next(j for j, e in enumerate(ends) if x <= e + 1e-9))
+        out["q"].append([round(q[j], 4) for j in col])
+        out["rot"].append(lift["rot"][-1])   # 엄지 받침은 정책 끝 값 그대로 (우리 계획 모델엔 이 관절이 없다)
+        out["cube"].append([round(v, 4) for v in c])
+        out["rise_cm"].append(round((c[2] - base) * 100, 2))
+    out["place"] = dict(info, ok=True, start_frame=len(lift["t"]) - 1, seconds=round(n_pl / HZ, 1), total_s=out["t"][-1])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=("info", "run"))
+    ap.add_argument("cmd", choices=("info", "run", "place"))
+    ap.add_argument("--lift")
+    ap.add_argument("--tx", type=float, default=0.0)
+    ap.add_argument("--ty", type=float, default=0.0)
+    ap.add_argument("--tyaw", type=float, default=0.0)
     ap.add_argument("--ik", required=True)
     ap.add_argument("--x", type=float, default=0.0)
     ap.add_argument("--y", type=float, default=0.0)
     ap.add_argument("--yaw", type=float, default=0.0)
     ap.add_argument("--out")
     a = ap.parse_args()
-    for v in (a.x, a.y, a.yaw):
+    for v in (a.x, a.y, a.yaw, a.tx, a.ty, a.tyaw):
         if not math.isfinite(v):
             raise SystemExit("x, y, 각도는 숫자")
-    out = info(a) if a.cmd == "info" else run(a)
+    out = info(a) if a.cmd == "info" else run(a) if a.cmd == "run" else place(a)
     text = json.dumps(out, ensure_ascii=False)
     if a.out:
         tmp = a.out + ".tmp"

@@ -1142,6 +1142,258 @@ def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
             "seconds": round(len(frames) * DT, 1)}
 
 
+PLACE_FROM_PULL_DEG = 5.0   # plan_place_from: 시작 자세가 우리 관절 한계를 이 각(°) 안으로 넘으면 먼저 한계 안으로 (검사함), 더 넘으면 거절
+PLACE_FROM_GAP = 0.002      # 놓을 때 손에 든 큐브의 가장 낮은 모서리가 책상 위 이만큼 (m) 에서 손을 편다
+PLACE_FROM_HAND_M = 0.10    # 큐브 중심이 집는 점에서 이보다 멀면 '손에 없음'
+
+
+def plan_place_from(q_start_deg, fingers_start_deg, cube_real, target_xy, target_yaw=0.0, d=None, ik=None, cal_file=None, max_speed=30.0):
+    """손에 큐브를 든 아무 자세(강화학습 '들기' 가 끝난 ㄴ자 자세)에서 이어서: 놓을 자리 위로 → 내려감 → 손가락 열기 → 들기 → HOME.
+    plan() 의 놓기 쪽과 같은 조각(candidates·approaches·transit·descent·exit_frames)을 쓴다. plan()·plan_home() 은 그대로다 (2026-11-24).
+
+    q_start_deg {팔 관절: sim °}, fingers_start_deg {손가락 관절: °} — 들고 가는 동안 손가락은 이 값 그대로(정책이 쥔 값), 놓을 때 우리 벌림 값으로.
+    cube_real = 지금 큐브 [x, y, z, qx, qy, qz, qw] (실좌표 = 3D 뷰 틀). 큐브는 시작 자세의 손(집는 점 틀)에 굳게 붙었다고 본다 (물리 없음):
+    손이 돌면 같이 돈다. 놓는 자세 = 그 큐브의 중심이 target_xy(실좌표 m) 위, 가장 낮은 모서리가 책상 위 PLACE_FROM_GAP, 수평으로 눕혔을 때
+    yaw ≡ target_yaw (mod 90). 손 안에서 기운 큐브(정책이 쥐면 10~15°)는 그 기울기로 놓인다 → release_tilt_deg 로 알린다.
+    돌려주는 것은 plan() 과 같은 꼴(status·reason·joint_names·positions rad·dt) + cube(프레임마다 큐브 실좌표 자세) + marks."""
+    t0 = time.time()
+    cal_file = cal_file or (REPO / "arm_control" / "calibration.json")
+    ranges = _cmd_ranges(cal_file)
+    tx, ty = (float(v) for v in target_xy)
+    tyaw = float(target_yaw or 0.0)
+    out = {"planner": "analytic", "kind": "place_from", "real": {"target": [tx, ty], "target_yaw": tyaw}}
+
+    def no(why):
+        return {**out, "status": "unreachable", "reason": why}
+    ik_dir = _find_ik(ik)
+    if d is not None and not (math.isfinite(d) and D_RANGE[0] - 1e-9 <= d <= D_RANGE[1] + 1e-9):
+        import hand_ik
+        return no(d_range_text(d, hand_ik._map_d(ik_dir)))
+    P = Planner(ik_dir, ranges, d=d)
+    s, np = P.s, P.np
+    R = s.R
+    out["real"]["d"] = P.table_d
+    names = list(s.arm) + list(s.fingers)
+    miss = [n for n in names if n not in {**q_start_deg, **fingers_start_deg}]
+    if miss:
+        return no("시작 각을 모르는 관절: " + ", ".join(miss))
+    q0 = np.radians([float(q_start_deg[n]) for n in s.arm])
+    F = np.radians([float(fingers_start_deg[n]) for n in s.fingers])
+    # 1) 시작 자세 ↔ 우리 관절 한계 (calibration). shoulder_yaw 는 계획이 0 에 고정 → 먼저 그것만 0 으로
+    sy = s.arm.index("shoulder_yaw")
+    lim = P.lim.copy()
+    if "shoulder_yaw" in ranges:
+        lim[sy] = np.radians(ranges["shoulder_yaw"])
+    tol = math.radians(0.5)
+    over = [(n, math.degrees(float(q0[k])), math.degrees(float(lim[k, 0])), math.degrees(float(lim[k, 1])),
+             math.degrees(float(max(lim[k, 0] - q0[k], q0[k] - lim[k, 1]))))
+            for k, n in enumerate(s.arm) if q0[k] < lim[k, 0] - tol or q0[k] > lim[k, 1] + tol]
+    out["start_over_limit"] = [{"joint": n, "deg": round(v, 2), "range_deg": [round(lo, 1), round(hi, 1)], "over_deg": round(e, 2)} for n, v, lo, hi, e in over]
+    if any(e > PLACE_FROM_PULL_DEG for *_, e in over):
+        return no("들기 끝 자세가 우리 관절 한계 밖: " + ", ".join(f"{n} {v:+.1f}° (한계 {lo:+.0f}~{hi:+.0f}°)" for n, v, lo, hi, e in over)
+                  + f" — {PLACE_FROM_PULL_DEG:g}° 넘게 벗어나 이어서 계획하지 않음")
+    q1 = np.clip(q0, lim[:, 0], lim[:, 1])
+    q1[sy] = 0.0
+    pre = [[q0, q1]] if float(np.degrees(np.abs(q1 - q0)).max()) > 0.05 else []   # 0.05° 안이면 그대로 시작 (정책 끝 shoulder_yaw −0.003° 같은 것)
+    if not P.exit_ok:
+        return no(P.exit_why)
+    # 2) 손에 든 큐브: 시작 자세의 집는 점 틀에 붙인다
+    a = math.radians(R.SIM_FROM_REAL_YAW)
+    Rz = np.array([[math.cos(a), -math.sin(a), 0.0], [math.sin(a), math.cos(a), 0.0], [0.0, 0.0, 1.0]])   # sim = Rz · real
+    cq = np.array([cube_real[6], cube_real[3], cube_real[4], cube_real[5]], dtype=float)
+    cq /= float(np.linalg.norm(cq)) or 1.0
+    m9 = np.zeros(9)
+    s.mj.mju_quat2Mat(m9, cq)
+    pc0, rc0 = np.asarray(s.to_sim([float(v) for v in cube_real[:3]]), dtype=float), Rz @ m9.reshape(3, 3)
+    ps0, rs0 = s.fk(q0)
+    rel_p, rel_r = rs0.T @ (pc0 - ps0), rs0.T @ rc0
+    half = float(s.E.OBJECT_HALF_SIZE)
+    if float(np.linalg.norm(rel_p)) > PLACE_FROM_HAND_M:
+        return no(f"큐브가 손에 없음 (집는 점에서 {np.linalg.norm(rel_p) * 100:.1f} cm)")
+
+    def cube_at(q):
+        p, r = s.fk(q)
+        return p + r @ rel_p, r @ rel_r
+
+    def low_ext(rc):   # 큐브 중심에서 가장 낮은 모서리까지 (m)
+        return half * float(np.abs(rc[2]).sum())
+
+    def flat(rc):      # 기운 큐브를 눕혔을 때: (수직에서 기울기 °, yaw ° — 90° 마다 같음)
+        k = int(np.abs(rc[2]).argmax())
+        c = rc[:, (k + 1) % 3]
+        return math.degrees(math.acos(min(1.0, abs(float(rc[2, k]))))), math.degrees(math.atan2(c[1], c[0]))
+    # 3) 놓을 자리
+    pt = np.asarray(s.to_sim([tx, ty, half - P.table_d]), dtype=float)   # 놓인 뒤 큐브 중심 (sim)
+    if not P.on_table(pt):
+        return no(f"놓을 자리 ({tx:+.3f}, {ty:+.3f}): {P.off_table_why()}")
+    yplace = tyaw + R.SIM_FROM_REAL_YAW
+    w90 = lambda v: ((v + 45.0) % 90.0) - 45.0
+
+    def err(q):
+        c, rc = cube_at(q)
+        want = np.array([pt[0], pt[1], s.table_z + low_ext(rc) + PLACE_FROM_GAP])
+        return want - c, w90(yplace - flat(rc)[1])
+
+    def refine(q, p, yaw):
+        """놓는 자세: 집는 점 p·손 yaw 를 큐브 오차만큼 고쳐 가며 다시 푼다 (손이 기운 만큼 큐브 자리가 달라져서)."""
+        for _ in range(8):
+            ep, ey = err(q)
+            if float(np.linalg.norm(ep)) < 5e-4 and abs(ey) < 0.3:
+                return q
+            p, yaw = p + ep, yaw + ey
+            cs = P.candidates(p, yaw)
+            if not cs:
+                return None
+            q = min(cs, key=lambda c: float(np.abs(c - q).max()))
+        ep, ey = err(q)
+        return q if float(np.linalg.norm(ep)) <= TIP_TOL and abs(ey) <= YAW_TOL else None
+    p_first = P.grip_target(pt)
+    Pl = []
+    for q in P.family(P.candidates(p_first, yplace)):
+        q = refine(q, p_first.copy(), yplace)
+        if q is not None and not any(float(np.abs(q - o).max()) < 1e-3 for o in Pl):
+            Pl.append(q)
+    if not Pl:
+        return no(f"놓을 자리 ({tx:+.3f}, {ty:+.3f}): 손에 든 큐브를 그 자리·각도로 놓는 자세가 없음 (팔이 안 닿거나 손 방향을 못 맞춤)")
+    Pl.sort(key=lambda q: float(np.abs(q - q1).max()))
+    hx = P.exit[-1]
+    sp = float(max_speed)
+    O, OX = P.open, P.open_exit
+    home_exit = len(P.exit) > 1
+
+    def cube_low(qs):
+        return min(c[2] - low_ext(rc) for c, rc in (cube_at(q) for q in qs)) - s.table_z
+
+    def build(qb, qp, d2):
+        t2 = P.transit(q1, qb, f_home=True) or P.via_home(q1, qb)   # f_home: 시작(ㄴ자, 손이 앞을 봄) 손목 값에서 옆으로 가는 동안 손 아래로
+        t3 = P.transit(qb, hx if home_exit else P.home0, t_home=P.exit_fh if home_exit else True)
+        fb = ([] if t2 else ["들기 끝 자세→놓을 자리 위"]) + ([] if t3 else ["놓을 자리 위→HOME"])
+        fr, mk = [(q0.copy(), F.copy())], {"start": 0}
+
+        def add(qs, fa, fz, key, min_s=0.0):
+            fr.extend(P.frames(qs, fa, fz, sp, min_s))
+            mk[key] = len(fr) - 1
+        for qs in pre:
+            add(qs, F, F, "into_limits")
+        add(t2 or [q1, qb], F, F, "above_place")
+        add(d2, F, F, "place")
+        add([qp, qp], F, O, "open", GRIP_S)
+        add([qp, qp], O, O, "opened", GRIP_HOLD_S)
+        add(d2[::-1], O, O, "lift2")
+        if home_exit:
+            add(t3 or [qb, hx], O, OX, "exit_back")
+            fr.extend(P.exit_frames(OX, sp, back=True))
+            mk["home0"] = len(fr) - 1
+        else:
+            add(t3 or [qb, P.home0], O, OX, "home0")
+        _, yaw_flat = flat(cube_at(qp)[1])
+        hit = P.cube_hits(fr, range(mk["opened"], len(fr)), pt, yaw_flat)
+        carry = cube_low([q for q, _ in fr[:mk["above_place"] + 1]])
+        down = cube_low([q for q, _ in fr[mk["above_place"]:mk["place"] + 1]])
+        bad = bool(hit or fb or P.below_table(fr) or carry < TABLE_MARGIN or down < 0.0)
+        return {"bad": bad, "frames": fr, "marks": mk, "hit": hit, "fb": fb, "carry": carry, "down": down, "qp": qp, "qb": qb, "yaw_flat": yaw_flat}
+    best = first = None
+    tries = 0
+    for qp in Pl:
+        for bp in P.approaches(P.grip(qp), [qp], P.hand_axis(qp)):
+            tries += 1
+            qb, _, d2 = bp["pairs"][0]
+            r = build(qb, qp, d2)
+            r["bp"] = bp
+            first = first or r
+            if not r["bad"]:
+                best = r
+                break
+            if tries >= MAX_TRIES:
+                break
+        if best or tries >= MAX_TRIES:
+            break
+    r = best or first
+    if r is None:
+        return no(f"놓을 자리 위 {min(ABOVE_CM):g}~{max(ABOVE_CM):g} cm 에서 손을 아래로 둔 채 곧게 내려가는 길이 없음")
+    frames, mk, qp, bp = r["frames"], r["marks"], r["qp"], r["bp"]
+    # 4) 검사 (plan() 과 같은 것 + 손에 든 큐브 높이)
+    low = [P.finger_low(q, f) for q, f in frames]
+    arm_lo = [P.arm_low(q) for q, _ in frames]
+    below = [i for i, z in enumerate(low) if z < s.table_z + TABLE_MARGIN or arm_lo[i] < s.table_z]
+    col = [P.column_low(q, f) for q, f in frames]
+    near_col = [i for i, c in enumerate(col) if c < COLUMN_MARGIN]
+    i0 = mk.get("into_limits", 0)   # 한계 안으로 들어온 뒤부터 한계 검사
+    over_j = [n for k, n in enumerate(s.arm) if any(not (P.lim[k, 0] - 1e-4 <= q[k] <= P.lim[k, 1] + 1e-4) for q, _ in frames[i0:])]
+    ep, ey = err(qp)
+    tilt, yaw_flat = flat(cube_at(qp)[1])
+    problems = []
+    if r["hit"]:
+        problems.append(f"손가락이 놓은 큐브에 닿음 (빠질 때): 프레임 {r['hit'][0]}~{r['hit'][-1]} ({len(r['hit'])}개)")
+    if below:
+        problems.append(f"손가락·팔이 책상 위 여유 {TABLE_MARGIN * 1000:.0f} mm 보다 낮게 감: 프레임 {below[0]}~{below[-1]} ({len(below)}개)")
+    if over_j:
+        problems.append("관절 한계 밖: " + ", ".join(over_j))
+    if near_col:
+        problems.append(f"팔·손이 기둥에 {COLUMN_MARGIN * 1000:.0f} mm 보다 가까이 감: 프레임 {near_col[0]}~{near_col[-1]} ({len(near_col)}개), 가장 가까이 {min(col) * 1000:+.1f} mm")
+    if r["carry"] < TABLE_MARGIN or r["down"] < 0.0:
+        problems.append(f"들고 가는 큐브의 가장 낮은 모서리가 책상 위 {min(r['carry'], r['down']) * 1000:+.1f} mm")
+    if r["fb"]:
+        problems.append("손목 높이 유지 길을 못 찾아 관절 공간 직선으로 감: " + ", ".join(r["fb"]))
+    if float(np.linalg.norm(ep)) > TIP_TOL or abs(ey) > YAW_TOL:
+        problems.append(f"놓는 자세의 큐브가 목표에서 {np.linalg.norm(ep) * 1000:.1f} mm, {ey:+.1f}°")
+    # 5) 큐브 자세 (실좌표): 손 펴기 전까지 손에 붙음 → 펴는 동안 책상에 눕힘 → 그 자리
+    mj = s.mj
+
+    def pose(c, rc):
+        qq = np.zeros(4)
+        mj.mju_mat2Quat(qq, np.ascontiguousarray(Rz.T @ rc).reshape(-1))
+        return np.array(list(s.to_real(c)) + [qq[1], qq[2], qq[3], qq[0]], dtype=float)
+    held = pose(*cube_at(qp))
+    # 눕힌 자세와 같은 큐브(24 가지 회전) 중 놓는 순간 자세에 가장 가까운 것으로 — 화면에서 큐브가 휙 돌지 않게
+    c_, rc_ = cube_at(qp)
+    k = int(np.abs(rc_[2]).argmax())
+    up = np.zeros(3); up[2] = 1.0 if rc_[2, k] > 0 else -1.0
+    ax = np.cross(rc_[:, k], up)
+    sn, cs_ = float(np.linalg.norm(ax)), float(rc_[:, k] @ up)
+    if sn > 1e-9:
+        ax /= sn
+        K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+        rot_flat = (np.eye(3) + sn * K + (1 - cs_) * K @ K) @ rc_
+    else:
+        rot_flat = rc_
+    rest = pose(pt, rot_flat)
+    if float(rest[3:] @ held[3:]) < 0:
+        rest[3:] *= -1
+    cube = []
+    for i, (q, _) in enumerate(frames):
+        if i <= mk["place"]:
+            cube.append(pose(*cube_at(q)))
+        elif i < mk["open"]:
+            u = (i - mk["place"]) / max(1, mk["open"] - mk["place"])
+            u = min(1.0, 2.5 * u)   # 손가락이 벌어지기 시작하면 곧 눕는다
+            v = held + (rest - held) * u
+            v[3:] /= float(np.linalg.norm(v[3:]))
+            cube.append(v)
+        else:
+            cube.append(rest)
+    traj_q = [list(map(float, q)) + list(map(float, f)) for q, f in frames]
+    spd = np.degrees(np.abs(np.diff(np.array(traj_q), axis=0)).max(axis=0)) / DT
+    status = "playable" if not problems else ("finger below table" if below else "finger hits cube" if r["hit"] else "check failed")
+    labels = {"start": "들기 끝 자세 (큐브 쥠)", "into_limits": "관절 한계 안으로", "above_place": f"놓을 자리 위 (+{bp['cm']:g} cm, 수직에서 {bp['tilt_deg']}°)",
+              "place": "내려감: 놓는 자세", "open": "손가락 열기", "opened": "기다림", "lift2": "들기", "exit_back": "HOME 들어가기 전 경유점 (책상 위)", "home0": "HOME"}
+    return {**out, "status": status, "playable": status == "playable",
+            "reason": "해석 IK 계획 (손에 든 큐브는 붙었다고 봄, 물리·쥐기 시뮬 없음)" if not problems else "; ".join(problems),
+            "joint_names": names, "dt": DT, "unit": "rad", "positions": traj_q, "problems": problems,
+            "cube": [[round(float(x), 5) for x in v] for v in cube], "marks": mk,
+            "waypoints": [{"label": labels[k_], "frame": i, "t_s": round(i * DT, 2)} for k_, i in mk.items()],
+            "peak_speed_deg_s": {"joint": names[int(spd.argmax())], "value": float(spd.max())},
+            "seconds": round((len(frames) - 1) * DT, 1),
+            "checks": {"cube_in_hand_mm": [round(float(v) * 1000, 1) for v in rel_p], "release_tilt_deg": round(tilt, 1),
+                       "release_cube_error_mm": round(float(np.linalg.norm(ep)) * 1000, 2), "release_yaw_error_deg": round(ey, 2),
+                       "carry_cube_bottom_min_above_table_mm": round(r["carry"] * 1000, 1),
+                       "lowest_finger_above_table_mm": round((min(low) - s.table_z) * 1000, 1), "column_min_mm": round(min(col) * 1000, 1),
+                       "finger_cube_hits": len(r["hit"]), "joint_space_fallback": r["fb"],
+                       "approach": {"cm": bp["cm"], "tilt_deg": bp["tilt_deg"], "azimuth_deg": bp["azimuth_deg"], "tried": tries},
+                       "n_candidates": len(Pl), "start_into_limits": bool(pre and over)},
+            "plan_s": round(time.time() - t0, 2)}
+
+
 def main(argv=None):
     try:
         sys.stdout.reconfigure(encoding="utf-8")   # 로그(procman)는 utf-8 로 읽는다

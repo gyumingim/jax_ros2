@@ -1,10 +1,13 @@
 // '강화학습' 탭: 팀원이 학습한 집기 정책(team-jax/IK sim2sim, MuJoCo)을 한 곳에서 돌려 보고 3D 로 다시 본다.
+// 버튼 둘: [강화학습으로 들기] = 그 정책(끝 = 큐브를 쥔 ㄴ자 자세), [역기구학으로 내리기] = 거기서 이어 우리 IK 계획(pick_plan.plan_place_from)으로
+// 놓을 자리에 내려놓고 HOME. 3D 는 들기 + 내리기를 이어서 재생한다.
 // 서버: rl_api.py (/api/rl/*) → rl_runner.py. 시뮬만 — 실물·가상 팔에는 아무것도 안 보낸다.
 // app.js 다음에 읽혀 탭 하나를 덧붙인다(app.js 는 그대로). 이 파일이 실패해도 다른 탭은 그대로 돈다.
 "use strict";
 (function () {
   const R = { info: null, res: null, frame: 0, playing: false, last: 0, view: null, busy: false, timer: null };
-  const PH = { RAISE: "들어올리기", SETTLE: "대기", INSERT: "밀어 넣기", GRASP_LIFT: "쥐고 들기(정책)", RETURN: "ㄴ자 복귀", DONE: "완료" };
+  const PH = { RAISE: "들어올리기", SETTLE: "대기", INSERT: "밀어 넣기", GRASP_LIFT: "쥐고 들기(정책)", RETURN: "ㄴ자 복귀", DONE: "완료",
+    CARRY: "놓을 자리 위로(IK)", LOWER: "내려놓기(IK)", OPEN: "손 펴기", RETREAT: "손 빼기", HOME: "HOME 으로" };
   const WHY = {
     "not all three digits touched the cube": "손가락 셋이 다 닿지 않음",
     "cube never 4 cm up": "큐브가 4 cm 못 올라감",
@@ -29,7 +32,11 @@
   R.y = el("input", { type: "number", step: "1", value: "0" });
   R.yaw = el("input", { type: "number", step: "5", value: "0" });
   R.reach = el("div", { class: "note" });
-  R.run = el("button", { class: "btn", onclick: run }, "▶ 실행");
+  R.run = el("button", { class: "btn", onclick: run }, "강화학습으로 들기");
+  R.tx = el("input", { type: "number", step: "0.01", value: "0" });
+  R.ty = el("input", { type: "number", step: "0.01", value: "-0.33" });
+  R.tyaw = el("input", { type: "number", step: "5", value: "0" });
+  R.place = el("button", { class: "btn", onclick: place, disabled: true, title: "들기가 성공한 뒤에 누른다" }, "역기구학으로 내리기");
   R.out = el("div", { class: "result" }, "아직 안 돌림");
   R.evalBtn = el("button", { class: "btn line small", onclick: evalAll }, "평가 (27곳)");
   R.evalOut = el("div", { class: "note" });
@@ -42,7 +49,11 @@
       el("label", { class: "field", title: "기준 자리에서 좌우. + = 로봇 오른쪽" }, "y (cm)", R.y),
       el("label", { class: "field", title: "큐브가 세로축으로 돈 각도 −45~45°" }, "각도 (°)", R.yaw)),
     R.reach,
-    el("div", { class: "row" }, R.run),
+    el("div", { class: "frow" },
+      el("label", { class: "field", title: "놓을 자리, 역기구학 탭과 같은 좌표: 어깨에서 로봇 왼쪽 +" }, "놓을 자리 x (m)", R.tx),
+      el("label", { class: "field", title: "어깨에서 뒤 + (책상은 앞 = −)" }, "y (m)", R.ty),
+      el("label", { class: "field", title: "놓인 큐브가 세로축으로 돈 각도" }, "각도 (°)", R.tyaw)),
+    el("div", { class: "row" }, R.run, R.place),
     R.out,
     el("details", { class: "log" }, el("summary", {}, "더보기"),
       el("p", { class: "help" }, "x·y 는 정우 님 기준 자리(책상 앞 모서리에서 6 cm 안, 어깨에서 10 cm 바깥)에서 벗어난 양. 27곳 평가는 1분쯤 걸린다."),
@@ -89,6 +100,7 @@
   function setBusy(b, text) {
     R.busy = b;
     R.run.disabled = b; R.evalBtn.disabled = b;
+    R.place.disabled = b || !(R.res && R.res.summary.done);
     if (b && text) { R.out.className = "result run"; R.out.textContent = text; }
   }
   async function loadInfo() {
@@ -115,6 +127,15 @@
     if (![b.x_cm, b.y_cm, b.yaw_deg].every(Number.isFinite)) { toast("x, y, 각도에 숫자를 넣는다", "error"); return; }
     setBusy(true, "돌리는 중… (몇 초)");
     const r = await post("/api/rl/run", b, true);
+    if (!r.ok) { setBusy(false); R.out.className = "result bad"; R.out.textContent = r.error || "실패"; return; }
+    wait();
+  }
+  async function place() {
+    if (R.busy) return;
+    const b = { x: num(R.tx), y: num(R.ty), yaw_deg: num(R.tyaw) };
+    if (![b.x, b.y, b.yaw_deg].every(Number.isFinite)) { toast("놓을 자리 x, y, 각도에 숫자를 넣는다", "error"); return; }
+    setBusy(true, "내리기 계획 중… (몇 초)");
+    const r = await post("/api/rl/place", b, true);
     if (!r.ok) { setBusy(false); R.out.className = "result bad"; R.out.textContent = r.error || "실패"; return; }
     wait();
   }
@@ -152,12 +173,21 @@
     const s = d.summary, p = s.phase_t_s, sec = (v) => v == null ? "—" : v.toFixed(1) + "초";
     const where = `(${d.spot.x_cm}, ${d.spot.y_cm}) cm ${d.spot.yaw_deg}°`;
     const steps = `닫기 ${sec(p.GRASP_LIFT)} → 복귀 ${sec(p.RETURN)} → 완료 ${sec(p.DONE)}`;
-    R.out.className = "result " + (s.done ? "ok" : "bad");
-    R.out.textContent = (s.done ? `성공 ${where} — 큐브 ${(s.max_rise_m * 100).toFixed(1)} cm 들림 · ${steps}`
+    const pl = d.place;
+    R.out.className = "result " + (s.done && (!pl || pl.ok) ? "ok" : "bad");
+    if (pl) {
+      const at = `(${pl.target.x}, ${pl.target.y}) m`;
+      R.out.textContent = pl.ok ? `들기 성공 → 내리기 계획 OK ${at} · 총 ${pl.total_s.toFixed(0)}초 (들기 ${(pl.total_s - pl.seconds).toFixed(0)} + 내리기 ${pl.seconds.toFixed(0)})`
+          + (pl.checks && pl.checks.release_tilt_deg > 5 ? ` · 큐브가 손 안에서 ${pl.checks.release_tilt_deg.toFixed(0)}° 기운 채 놓임` : "")
+        : `들기 ${s.done ? "성공" : "실패"} → 내리기 안 됨 ${at}: ${pl.reason}`;
+    } else R.out.textContent = (s.done ? `성공 ${where} — 큐브 ${(s.max_rise_m * 100).toFixed(1)} cm 들림 · ${steps}`
       : `실패 ${where} — ${WHY[s.fail_reason] || s.fail_reason} · 최대 ${(s.max_rise_m * 100).toFixed(1)} cm 들림 · ${steps}`)
       + (s.valid_spot ? "" : " · 놓는 범위 밖");
     R.slider.max = d.t.length - 1;
-    R.frame = 0; R.playing = !!autoplay; R.last = performance.now();
+    R.frame = autoplay && pl && pl.ok ? pl.start_frame : 0;   // 내리기를 막 계획했으면 들기 끝에서부터 재생 (처음부터는 슬라이더·다시 재생)
+    R.playing = !!autoplay; R.last = performance.now();
+    if (pl) { R.tx.value = pl.target.x; R.ty.value = pl.target.y; R.tyaw.value = pl.target.yaw_deg; }
+    R.place.disabled = R.busy || !s.done;
     scene();
     show();
   }
@@ -202,6 +232,9 @@
     v.cube.visible = true;
     v.cube.position.set(c[0], c[1], c[2]);
     v.cube.quaternion.set(c[3], c[4], c[5], c[6]);
+    const pt = d.place && d.place.ok && d.place.target;   // 놓을 자리 표시 (초록)
+    v.target.visible = !!pt;
+    if (pt) { v.target.position.set(pt.x, pt.y, -d.table_d + 0.025); v.target.rotation.set(0, 0, pt.yaw_deg * Math.PI / 180); }
     v.dirty();
   }
   function tick(now) {
