@@ -95,7 +95,7 @@ DEFAULTS = {
     "temp_stop": 75.0,        # ℃    그 관절 힘 뺌
     "temp_hyst": 5.0,         # ℃    경고는 temp_warn − 이 값 아래로 식어야 풀림. 온도로 힘 뺀 관절은 temp_warn 아래에서만 원점 다시
     "max_command_deg": 360.0,  # °   ak45_node.yaml 과 같음
-    "servo_resend_hz": 1.0,   # Hz   서보 마지막 값 재전송 (0 = 안 함). 펌웨어는 마지막 펄스를 유지한다
+    "servo_resend_hz": 20.0,  # Hz   서보 마지막 값 재전송 (0 = 안 함). 펌웨어는 마지막 펄스를 유지한다. 2026-11-24 1 → 20: CAN 에서 빠진 프레임을 0.05 s 안에 메움 (어제 실물 손목이 끊기며 느렸다)
     "calib_step_max": 10.0,   # °    보정에서 한 번에 움직일 수 있는 양
 }
 
