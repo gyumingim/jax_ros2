@@ -429,6 +429,20 @@ def install(app, log_dir, mode):
             return Response(status_code=404)
         return Response(j, media_type="image/jpeg", headers={"cache-control": "no-store"})
 
+    @app.get("/api/live/inference.png")
+    def _inference():
+        """폰 프로그램이 저장한 뎁스·세그 결과 그림 (inference.png: 객체 세그 + 뎁스 색) — 화면에 원본 영상 아래 같이 보인다 (2026-11-24 사용자)."""
+        if LIVE.mode() == "virtual":
+            return Response(status_code=404)
+        try:
+            path = os.path.join(DP.run_dir(DP.load_cfg(LIVE.log_dir / "phone_depth.json")), "inference.png")
+        except Exception:
+            return Response(status_code=404)
+        if not os.path.isfile(path):
+            return Response(status_code=404)
+        with open(path, "rb") as f:
+            return Response(f.read(), media_type="image/png", headers={"cache-control": "no-store"})
+
     @app.post("/api/live/scene")
     async def _scene(req: Request):
         if mode() != "virtual":

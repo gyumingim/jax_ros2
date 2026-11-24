@@ -147,6 +147,11 @@ function phLive(all) {
   const src = !fresh || all.frame_n == null ? "" : "/api/live/frame.jpg?n=" + all.frame_n;
   PH.img.hidden = !src;
   if (src && PH.imgSrc !== src) { PH.imgSrc = src; PH.img.src = src; }
+  // 뎁스·세그 결과 (폰 프로그램의 inference.png: 객체 세그 + 뎁스 색) — 원본 영상 아래 (2026-11-24 사용자)
+  if (!PH.inf) { PH.inf = el("img", { class: "ph-img", alt: "뎁스·세그", title: "폰 프로그램의 뎁스·세그 결과 (1초쯤마다)" }); PH.img.after(PH.inf); }
+  PH.inf.hidden = !src;
+  const now = Date.now();
+  if (src && (!PH.infT || now - PH.infT > 1000)) { PH.infT = now; PH.inf.src = "/api/live/inference.png?t=" + now; }
   const tail = (r.note || []).concat(r.warn || []).join(" · ");
   if (!r.ok) {
     PH.cube = null; PH.grasp = null; PH.block = ""; PH.last = null; PH.grasp_el.hidden = true;
