@@ -303,7 +303,7 @@ SERVICES = [
                     Param("target_x", "target x", "0.0", "m"),
                     Param("target_y", "target y", "-0.33", "m"),
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
-                    Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.53"),
+                    Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.60"),
                     Param("grasp", "집는 방향", "auto", "auto 자동(수직 → 수평 → 기울임) / vertical 수직(위에서) / horizontal 수평(옆에서 밀어 넣기)"),
                     Param("stack", "탑 쌓기 (탑 쌓기 탭이 채움)", "", "JSON: 놓는 층·다른 큐브 — 이번 큐브·놓을 자리와 같을 때만 쓴다"),
                     Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),

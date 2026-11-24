@@ -37,7 +37,7 @@ CAM_PITCH_DEG = 45.0                    # 아래로 기운 각 (CAD)
 _S = math.sqrt(0.5)
 R_OPT = ((0.0, _S, -_S), (1.0, 0.0, 0.0), (0.0, -_S, -_S))            # CAMERA.md 2.1: 광학 → 카메라 좌표 (정우 축)
 R_CAD = ((-1.0, 0.0, 0.0), (0.0, _S, -_S), (0.0, -_S, -_S))           # 광학 → 우리 로봇 좌표 = [[0,−1,0],[1,0,0],[0,0,1]] · R_OPT
-D_RANGE = (0.44, 0.53)                  # 계획이 받는 범위 (hand_ik.D_RANGE 와 같게 — phone_api 가 그쪽 값으로 덮어쓴다)
+D_RANGE = (0.44, 0.60)                  # 계획이 받는 범위 (hand_ik.D_RANGE 와 같게 — phone_api 가 그쪽 값으로 덮어쓴다)
 TILT_WARN_DEG = 2.0
 MIN_REFS = 3                            # 초점거리까지 맞추려면 마커 3개 이상
 DEPTH_MAX_AGE_S = 20.0                  # rgbd.npz 는 5초마다 저장된다
