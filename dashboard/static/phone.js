@@ -33,6 +33,7 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
   PH.map.setAttribute("viewBox", `0 0 ${(PH_BOX[1] - PH_BOX[0]) * 1000} ${(PH_BOX[3] - PH_BOX[2]) * 1000}`);
   lvMapAttach(PH.map, { box: PH_BOX, redraw: phMapDraw, edit: () => LQ.virtual(), onCube: () => { PH.cube = null; } });
   PH.src = el("div", { class: "lv-src" });
+  PH.mark = el("div", { class: "lv-mark", hidden: true });
   PH.res = el("div", { class: "result", hidden: true });
   PH.grasp_el = el("div", { class: "result", hidden: true });
   PH.bGo = el("button", { class: "btn ph-big", disabled: true, onclick: phGo }, "집으러 가기");
@@ -48,7 +49,7 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
   page.append(
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브 찾기"),
     el("div", { class: "card" },
-      PH.bOn, PH.dStat, PH.img, PH.src, PH.map, lvTools(), PH.res, PH.grasp_el,
+      PH.bOn, PH.dStat, PH.mark, PH.img, PH.src, PH.map, lvTools(), PH.res, PH.grasp_el,
       PH.help = el("div", { class: "help", style: "margin:10px 0 0" }, "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다 (기준 종이는 없어도 된다 — 없으면 거치 자세와 책상 높이로). 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.")),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "집으러 가기"),
     el("div", { class: "card" },
@@ -122,6 +123,7 @@ function phLive(all) {
   PH.dp = r;
   phMapDraw();
   PH.src.textContent = lvSrcText(all);
+  lvMarkSet(PH.mark, all);
   if (virt) PH.bOn.hidden = PH.dStat.hidden = true;
   PH.thH.hidden = PH.thCard.hidden = virt;
   PH.help.textContent = virt ? "가상 모드: 카메라는 안 쓴다. 지도의 빈 곳을 누르면 가상 큐브를 놓고, 끌어서 옮기고, 누르면 그 큐브를 집는다. 가상 팔로 끝까지 재생하면 큐브가 놓을 자리로 옮겨진다."
@@ -136,14 +138,14 @@ function phLive(all) {
     if (!c0 || Math.hypot(c0.x - r.cube.x, c0.y - r.cube.y) > 0.003 || Math.abs(c0.yaw_deg - r.cube.yaw_deg) > 2 || PH.d !== d) { PH.d = d; phGrasp(r.cube, " — 큐브를 옮기기"); }
     return;
   }
-  const pl = r.pipeline || {}, fresh = !!r.fresh;
-  PH.bPipe.textContent = pl.alive ? "폰 프로그램 끄기" : "폰 프로그램 켜기";
-  PH.bPipe.classList.toggle("red", !!pl.alive); PH.bPipe.classList.toggle("line", !pl.alive);
-  PH.bOn.hidden = !!pl.alive || fresh;
-  PH.pipeNote.textContent = pl.alive ? `폰 프로그램 켜짐 (pid ${pl.pid})` + (fresh ? "" : " — 아직 결과 없음: 폰 잠금을 풀고 몇 초 가만히. " + (pl.log || []).slice(-1).join(""))
+  const pl = r.pipeline || {}, fresh = !!r.fresh, on = !!(pl.alive || pl.watching);
+  PH.bPipe.textContent = on ? "폰 프로그램 끄기" : "폰 프로그램 켜기";
+  PH.bPipe.classList.toggle("red", on); PH.bPipe.classList.toggle("line", !on);
+  PH.bOn.hidden = on || fresh;
+  PH.pipeNote.textContent = pl.watch ? pl.watch : pl.alive ? `폰 프로그램 켜짐 (pid ${pl.pid})` + ((pl.orphan || []).length && pl.pid === pl.orphan[0] ? " — 이 서버가 띄운 것이 아님 (끄기·켜기로 정리)" : "") + (fresh ? "" : " — 아직 결과 없음: 폰 잠금을 풀고 몇 초 가만히. " + (pl.log || []).slice(-1).join(""))
     : fresh ? "결과가 들어오는 중 (다른 곳에서 켠 프로그램)" : "폰 프로그램 꺼짐" + ((PH.missing || []).length ? " — 이 PC 에 없는 것: " + PH.missing.join(" / ") : "") + ((pl.log || []).length > 1 ? " · 마지막 기록: " + pl.log.slice(-1)[0] : "");
-  PH.dStat.hidden = fresh;
-  PH.dStat.textContent = pl.alive ? "폰 프로그램 켜는 중 — 폰 잠금을 풀고 몇 초 가만히 (끄기는 아래 준비)" : PH.pipeNote.textContent;
+  PH.dStat.hidden = fresh && !pl.watch;
+  PH.dStat.textContent = pl.watch ? pl.watch : pl.alive ? "폰 프로그램 켜는 중 — 폰 잠금을 풀고 몇 초 가만히 (끄기는 아래 준비)" : PH.pipeNote.textContent;
   // 영상: MJPEG 스트림 하나를 열어 둔다 (새 프레임마다 바로 보임, 최대 15 Hz). 끊기면(영상 없음) 닫았다가 다시 열기
   const src = !fresh || all.frame_n == null ? "" : "/api/live/stream.mjpg";
   PH.img.hidden = !src;
@@ -249,7 +251,7 @@ async function phSaveDepthCfg() {
 }
 
 async function phPipe() {
-  const on = PH.dp && PH.dp.pipeline && PH.dp.pipeline.alive;
+  const pl = (PH.dp && PH.dp.pipeline) || {}, on = !!(pl.alive || pl.watching);
   PH.bPipe.disabled = true;
   await post(on ? "/api/phone/depth/stop" : "/api/phone/depth/start");
   PH.bPipe.disabled = false;

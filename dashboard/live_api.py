@@ -408,8 +408,7 @@ def cubes(td=None, pick_id=None):
     lim = LIVE.stale_s()
     age = None if res is None or "t_frame" not in res else now - res["t_frame"]
     stale = age is None or age > lim
-    pid = pipe.pid() if pipe else None
-    pl = {"alive": pid is not None, "pid": pid, "log": (pipe.tail() if pid is None else pipe.tail(3)) if pipe else []}
+    pl = pipe.status() if pipe else {"alive": False, "pid": None, "log": []}
     out = {"ok": not stale, "mode": "camera", "stale": stale, "age_s": None if age is None else round(age, 2), "stale_s": round(lim, 2),
            "src": res.get("src") if res else None, "rate_hz": LIVE.rate(), "t_frame": res.get("t_frame") if res else None,
            "frame_n": res.get("frame_n") if res else None, "table": table, "pipeline": pl, "scene": None,

@@ -130,9 +130,27 @@ function lvBoxes(v, d, skip) {
   document.head.append(el("style", {}, `
 .lv-tools { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 8px; font-size: 14px; }
 .lv-tools label { display: inline-flex; align-items: center; gap: 4px; }
-.lv-src { font-size: 13px; color: var(--sub); margin-top: 6px; }`));
+.lv-src { font-size: 13px; color: var(--sub); margin-top: 6px; }
+.lv-mark { margin-top: 10px; padding: 8px 12px; border-radius: 10px; font-size: 15px; background: var(--fill); }
+.lv-mark small { display: block; font-size: 13px; margin-top: 2px; }
+.lv-mark.ok { background: var(--green-soft); color: #028a55; }
+.lv-mark.warn { background: var(--amber-soft); color: var(--amber-d); }
+.lv-mark.bad { background: var(--red-soft); color: var(--red-d); }`));
 })();
 // 지금 인식 상태 한 줄 (출처·빠르기·나이)
+// 마커 한 줄 (휴대폰·탑 쌓기 탭 영상 위): "마커: 큐브 0번 ✓, 1번 ✓ · 기준 종이 n개" / "마커 안 보임" + 집기가 막힌 이유 한 줄
+function lvMarkSet(node, r) {
+  if (!r || r.mode === "virtual") { node.hidden = true; return; }
+  node.hidden = false;
+  const ids = [...new Set((r.cubes || []).filter((c) => c.id != null).map((c) => c.id))].sort((a, b) => a - b);
+  const nref = (r.refs || []).length;
+  const line = r.stale ? "마커: 영상 없음" : !ids.length && !nref ? "마커 안 보임"
+    : "마커: " + (ids.length ? "큐브 " + ids.map((i) => i + "번 ✓").join(", ") : "큐브 없음") + ` · 기준 종이 ${nref}개`;
+  const p = r.pick || {};
+  const why = !r.stale && ids.length ? [p.blocked ? "집기 막힘: " + p.block : "", ...(p.warn || r.warn || []).slice(0, 2)].filter(Boolean).join(" · ") : "";
+  node.className = "lv-mark " + (r.stale || !ids.length ? "bad" : why ? "warn" : "ok");
+  node.replaceChildren(el("b", {}, line), why ? el("small", {}, why) : "");
+}
 function lvSrcText(r) {
   if (!r) return "";
   if (r.mode === "virtual") return "가상 모드 — 카메라는 안 쓴다 (가상 큐브만)";

@@ -74,9 +74,9 @@ def phone_model():
     return v
 
 
-def calib_choice(cfg):
-    """{file, model, note}: 붙은 폰 모델로 고른 보정 파일 (저장소 기준 상대 경로)."""
-    model = phone_model()
+def calib_choice(cfg, model=False):
+    """{file, model, note}: 붙은 폰 모델로 고른 보정 파일 (저장소 기준 상대 경로). model 을 주면 그 모델로 (자동 다시 켜기가 방금 읽은 것)."""
+    model = phone_model() if model is False else model
     name = CALIB_BY_MODEL.get(model or "")
     if name and not (Path(cfg["repo_dir"]) / name).exists():
         return {"file": CALIB_DEFAULT, "model": model, "note": f"{model} 용 {name} 이 저장소에 없어 기본 파일 — 다른 폰 보정이면 정류 검사에서 멈춘다"}
@@ -168,6 +168,33 @@ def _table_height(image, depth_cfg, cam_cfg=None, d_now=None):
     return r
 
 
+PROBE = {"why": ""}          # 마지막 phone_probe 가 None 인 까닭 (화면 한 줄)
+
+
+def phone_probe():
+    """자동 다시 켜기 전 확인 (캐시 없이): adb devices 에 'device' 로 보이고 getprop 모델이 3초 안에 오면 그 모델, 아니면 None.
+    adb 명령은 전부 3초 타임아웃 — 멈춘 adb 를 붙잡고 기다리지 않는다. force-stop 같은 것은 여기서 안 부른다
+    (실기 2026-11-24: force-stop 직후 adb shell 이 멈춰 케이블을 다시 꽂아야 하는 일이 잦음)."""
+    PROBE["why"] = "USB·adb 에 폰이 안 보임"
+    try:
+        r = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=3)
+        if not any(ln.split()[1:2] == ["device"] for ln in r.stdout.splitlines()[1:]):
+            return None
+        PROBE["why"] = "adb shell 이 3초 안에 답 없음 — 계속 이러면 USB 케이블을 뽑았다 꽂기"
+        r = subprocess.run(["adb", "shell", "getprop", "ro.product.model"], capture_output=True, text=True, timeout=3)
+        v = r.stdout.strip().splitlines()[-1].strip() if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+    if v:
+        _MODEL.update(t=time.monotonic(), v=v, ok_t=time.monotonic(), last=v)
+    return v or None
+
+
+WD_BACKOFF = (5.0, 60.0)    # 자동 다시 켜기 간격: 5, 10, 20, … 최대 60 초
+WD_RESET_S = 30.0           # 다시 켠 뒤 이만큼 넘게 돌면 횟수·간격 처음부터
+WD_WAIT_S = 5.0             # 폰이 안 보이면 이 간격으로 다시 본다 (횟수는 안 셈)
+
+
 class Pipeline:
     """폰 스테레오 프로그램 (SteroDepthSeg z_phone_stereo.py) 한 개를 켜고 끈다. 새 프로세스 그룹으로 띄우고 끌 때 그룹에 SIGINT
     (터미널 Ctrl+C 와 같음 — 그 프로그램이 폰 카메라·adb 포워딩을 풀고 끝난다) → 8초 뒤에도 살아 있으면 SIGTERM → 3초 뒤 SIGKILL.
@@ -178,6 +205,13 @@ class Pipeline:
         self.pid_file = Path(log_dir) / "phone_depth_pid.json"
         self.proc = None
         self.lock = threading.Lock()
+        self.cfg_fn = None          # 자동 다시 켜기가 쓸 지금 설정 (_install_depth 가 채움)
+        # 감시 (2026-11-24 사용자 '카메라가 자꾸 끊김'): '켜기' 뒤 '끄기' 전까지 폰 프로그램이 죽으면 폰이 보일 때 다시 켠다
+        self.want = False
+        self.wd = {"n": 0, "next": None, "started": None, "text": ""}
+        self._orph = {"t": 0.0, "v": []}
+        self.want = self.pid() is not None      # 대시보드를 껐다 켰을 때 우리 것이 돌고 있으면 감시를 이어 간다
+        threading.Thread(target=self._watch, daemon=True, name="phone-watchdog").start()
 
     @staticmethod
     def _stime(pid):
@@ -200,6 +234,97 @@ class Pipeline:
         except (OSError, ValueError, KeyError, TypeError):
             pass
         return None
+
+    def orphans(self, cfg=None, cache=True):
+        """이 서버가 띄운 게 아닌 z_phone_stereo.py (같은 --out 폴더) 의 pid 목록 — /proc 에서 찾는다 (pkill -f 안 씀). 1초 캐시."""
+        if cache and time.monotonic() - self._orph["t"] < 1.0:
+            return self._orph["v"]
+        cfg = cfg or (self.cfg_fn() if self.cfg_fn else None)
+        out, mine = [], self.pid()
+        if cfg is not None:
+            want = os.path.realpath(DP.run_dir(cfg))
+            for d in os.listdir("/proc"):
+                if not d.isdigit() or int(d) in (mine, os.getpid()):
+                    continue
+                try:
+                    a = Path(f"/proc/{d}/cmdline").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                a = [x.decode("utf-8", "replace") for x in a]
+                if not any(x.endswith("z_phone_stereo.py") for x in a) or "--out" not in a or self._stime(int(d)) is None:
+                    continue
+                o = a[a.index("--out") + 1] if a.index("--out") + 1 < len(a) else ""
+                try:
+                    o = os.path.realpath(os.path.join(os.readlink(f"/proc/{d}/cwd"), o))
+                except OSError:
+                    o = os.path.realpath(o)
+                if o == want:
+                    out.append(int(d))
+        self._orph.update(t=time.monotonic(), v=out)
+        return out
+
+    def _kill_orphans(self, cfg):
+        """고아에 SIGINT → 5초 뒤에도 살아 있으면 SIGTERM → 3초 뒤 SIGKILL. 정리한 pid 목록."""
+        pids = self.orphans(cfg, cache=False)
+        for sig, wait in ((signal.SIGINT, 5.0), (signal.SIGTERM, 3.0), (signal.SIGKILL, 1.0)):
+            left = [p for p in pids if self._stime(p) is not None]
+            if not left:
+                break
+            for p in left:
+                try:
+                    os.killpg(p, sig) if os.getpgid(p) == p else os.kill(p, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < wait and any(self._stime(p) is not None for p in left):
+                time.sleep(0.2)
+        self._orph["t"] = 0.0
+        return pids
+
+    def status(self):
+        """화면용 {alive, pid, log, orphan, watching, watch}. alive 는 고아도 포함 (끄기 버튼이 그것도 끈다)."""
+        pid = self.pid()
+        orph = self.orphans()
+        alive = pid is not None or bool(orph)
+        return {"alive": alive, "pid": pid if pid is not None else (orph[0] if orph else None), "orphan": orph,
+                "log": self.tail() if not alive else self.tail(3), "watching": self.want, "watch": self.wd["text"]}
+
+    def _watch(self):
+        while True:
+            time.sleep(1.0)
+            try:
+                self._watch_once()
+            except Exception as e:      # 감시가 죽지 않게
+                self.wd["text"] = f"감시 오류: {type(e).__name__}: {e}"
+
+    def _watch_once(self):
+        wd, now = self.wd, time.monotonic()
+        if not self.want:
+            wd.update(next=None, text="")
+            return
+        if self.pid() is not None:
+            if wd["started"] is not None and now - wd["started"] > WD_RESET_S:
+                wd.update(n=0, started=None)
+            wd.update(next=None, text="")
+            return
+        if wd["next"] is None:          # 방금 죽은 것을 봄
+            wd["next"] = now + min(WD_BACKOFF[0] * 2 ** wd["n"], WD_BACKOFF[1])
+        if now < wd["next"]:
+            wd["text"] = f"폰 끊김 — {wd['next'] - now:.0f}초 뒤 다시 켬 ({wd['n'] + 1}번째)"
+            return
+        model = phone_probe()
+        cfg = self.cfg_fn() if self.cfg_fn else None
+        calib = calib_choice(cfg, model) if (model and cfg) else None
+        if calib is None or model not in CALIB_MODELS or calib["file"] != (CALIB_BY_MODEL.get(model) or CALIB_DEFAULT) \
+                or not (Path(cfg["repo_dir"]) / calib["file"]).exists():
+            why = PROBE["why"] if not model else f"모델 {model} 의 보정 파일을 못 고름"
+            wd.update(next=now + WD_WAIT_S, text=f"폰 끊김 — 폰 기다리는 중 ({why}) · {wd['n'] + 1}번째 다시 켜기 대기")
+            return
+        r = self.start(cfg, auto=True, calib=calib)
+        wd.update(n=wd["n"] + 1, next=None, started=time.monotonic() if r.get("ok") else None,
+                  text="" if r.get("ok") else "폰 끊김 — 다시 켜기 실패: " + str(r.get("error")))
+        if not r.get("ok"):
+            wd["next"] = time.monotonic() + min(WD_BACKOFF[0] * 2 ** wd["n"], WD_BACKOFF[1])
 
     @staticmethod
     def live_jpg_supported(cfg):
@@ -224,11 +349,17 @@ class Pipeline:
                 (repo / calib, f"{calib} (이 폰의 두 렌즈 보정 파일)")]
         return [f"{what} — {p} 없음" for p, what in need if not p.exists()]
 
-    def start(self, cfg):
+    def start(self, cfg, auto=False, calib=None):
+        if not auto:
+            self.want = True
+            self.wd.update(n=0, next=None, started=None, text="")
         with self.lock:
+            if auto and not self.want:        # 그 사이 '끄기'
+                return {"ok": False, "error": "꺼 둠"}
             if self.pid() is not None:
-                return {"ok": False, "error": "이미 켜져 있음"}
-            calib = calib_choice(cfg)
+                return {"ok": True, "msg": "이미 켜져 있음"}
+            killed = self._kill_orphans(cfg)
+            calib = calib or calib_choice(cfg)
             miss = self.missing(cfg, calib["file"])
             if miss:
                 return {"ok": False, "error": "켤 수 없음: " + " / ".join(miss)}
@@ -241,13 +372,18 @@ class Pipeline:
                 self.proc = subprocess.Popen(cmd, cwd=cfg["repo_dir"], stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                              start_new_session=True)
             self.pid_file.write_text(json.dumps({"pid": self.proc.pid, "stime": self._stime(self.proc.pid)}))
-            return {"ok": True, "calib": calib, "msg": f"폰 스테레오 프로그램 켬 ({calib['file']}) — 폰 잠금을 풀고, 처음 몇 초는 가만히"}
+            self._orph["t"] = 0.0
+            return {"ok": True, "calib": calib, "msg": ("다시 켬 (자동) " if auto else "") + f"폰 스테레오 프로그램 켬 ({calib['file']}) — 폰 잠금을 풀고, 처음 몇 초는 가만히"
+                    + (f" · 서버가 띄우지 않은 것 (pid {', '.join(map(str, killed))}) 먼저 끔" if killed else "")}
 
     def stop(self):
+        self.want = False                 # 감시도 멈춤 (자물쇠 전에 — 감시가 그 사이 다시 켜지 않게)
+        self.wd.update(n=0, next=None, started=None, text="")
         with self.lock:
             pid = self.pid()
+            killed = self._kill_orphans(self.cfg_fn()) if self.cfg_fn else []
             if pid is None:
-                return {"ok": True, "msg": "이미 꺼져 있음"}
+                return {"ok": True, "msg": f"서버가 띄우지 않은 폰 프로그램 (pid {', '.join(map(str, killed))}) 끔" if killed else "이미 꺼져 있음"}
             for sig, wait in ((signal.SIGINT, 8.0), (signal.SIGTERM, 3.0), (signal.SIGKILL, 2.0)):
                 try:
                     os.killpg(pid, sig)
@@ -330,6 +466,7 @@ def _install_depth(app, log_dir):
     global PIPE
     cfg_file = Path(log_dir) / "phone_depth.json"
     pipe = PIPE = Pipeline(log_dir)
+    pipe.cfg_fn = lambda: DP.load_cfg(cfg_file)
     prev = {"pos": None, "t": 0.0}     # 직전에 고른 자리 (3초 지나면 잊음) — 후보가 여럿일 때 프레임마다 바뀌지 않게
 
     def _td(d):
@@ -349,8 +486,7 @@ def _install_depth(app, log_dir):
             r["image_mtime"] = os.stat(os.path.join(DP.run_dir(cfg), "inference.png")).st_mtime
         except OSError:
             r["image_mtime"] = None
-        pid = pipe.pid()
-        r["pipeline"] = {"alive": pid is not None, "pid": pid, "log": pipe.tail() if pid is None else pipe.tail(3)}
+        r["pipeline"] = pipe.status()
         return r
 
     @app.get("/api/phone/depth")

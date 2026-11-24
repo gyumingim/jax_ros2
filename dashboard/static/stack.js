@@ -23,6 +23,7 @@
   const show = (node, text, cls, small) => { node.hidden = false; node.className = "result " + (cls || ""); node.replaceChildren(text, small ? el("small", {}, small) : ""); };
   ST.img = el("img", { class: "st-img", hidden: true, alt: "지금 프레임" });
   ST.src = el("div", { class: "lv-src" });
+  ST.mark = el("div", { class: "lv-mark", hidden: true });
   ST.res = el("div", { class: "result", hidden: true });
   ST.list = el("div", { class: "st-list", hidden: true });
   ST.order = el("input", { placeholder: "비우면 보이는 큐브 아무거나", inputmode: "numeric", onchange: () => { save(); mapDraw(); spot(); plan(); } });
@@ -70,7 +71,7 @@
   $("#stack-left").append(
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브 인식"),
     el("div", { class: "card" },
-      ST.src, ST.img, ST.res, ST.list),
+      ST.src, ST.mark, ST.img, ST.res, ST.list),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "탑"),
     el("div", { class: "card" },
       el("div", { class: "frow" }, el("b", {}, "순서"), el("label", { class: "field wide" }, el("span", {}, "옮길 큐브 번호", el("small", {}, " 차례대로, 비워도 됨")), ST.order)),
@@ -103,6 +104,7 @@
     const sig = JSON.stringify([r.ok, cubes.map((c) => [c.id, Math.round(c.x * 1000), Math.round(c.y * 1000), Math.round(c.yaw_deg), c.level, Math.round(c.tilt_deg || 0)])]);
     ST.mapSw.hidden = !virt; if (!virt && ST.mapMode !== "tower") setMapMode("tower");
     ST.src.textContent = lvSrcText(all);
+    lvMarkSet(ST.mark, all);
     const live = !virt && !all.stale;   // 그림 = MJPEG 스트림 (한 번 걸고, 영상 있음/없음이 바뀔 때만 다시)
     if (live !== ST.imgLive) { ST.imgLive = live; ST.img.hidden = !live; streamSet(ST.img, live); }
     ST.det = r; ST.all = all;
