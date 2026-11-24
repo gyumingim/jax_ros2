@@ -42,7 +42,7 @@
   R.evalOut = el("div", { class: "note" });
   R.card = el("div", { class: "card" },
     el("h3", {}, "정책 돌려보기"),
-    el("p", { class: "help" }, "팀원이 학습한 집기 정책 ", el("b", {}, "grasp_lift_23025"), " 을 MuJoCo 시뮬에서 돌린다. 실물 팔은 안 움직인다."),
+    el("p", { class: "help" }, "팀원이 학습한 집기 정책 ", (R.policy = el("b", {}, "grasp_lift_25550")), " 을 MuJoCo 시뮬에서 돌린다. 실물 팔은 안 움직인다."),
     el("div", { class: "frow" },
       el("label", { class: "field", style: "width:auto" }, "미리 정한 자리", R.preset),
       el("label", { class: "field", title: "기준 자리에서 앞뒤. − = 책상 안쪽(로봇에서 멀리)" }, "x (cm)", R.x),
@@ -115,6 +115,7 @@
       return;
     }
     R.info = i;
+    if (i.policy) R.policy.textContent = i.policy;
     i.spots.forEach((s, k) => R.preset.append(el("option", { value: k }, `${k + 1}. x ${s[0]}, y ${s[1]}, ${s[2]}°`)));
     reach();
     showEval(i.status.eval);
@@ -164,7 +165,8 @@
   function showEval(e) {
     if (!e) { R.evalOut.textContent = ""; return; }
     const bad = e.rows.filter((r) => !r.done).map((r) => `(${r.x_cm}, ${r.y_cm}, ${r.yaw_deg}°) ${WHY[r.fail] || r.fail}`);
-    R.evalOut.textContent = `완료 ${e.done}/${e.runs}곳 (${new Date(e.mtime * 1000).toLocaleString("ko-KR")})` + (bad.length ? " — 실패: " + bad.join(" · ") : "");
+    const old = R.info && e.policy && e.policy !== R.info.policy ? ` — 예전 정책 ${e.policy} 결과, 다시 돌려야 함` : "";
+    R.evalOut.textContent = `완료 ${e.done}/${e.runs}곳 (${new Date(e.mtime * 1000).toLocaleString("ko-KR")})` + old + (bad.length ? " — 실패: " + bad.join(" · ") : "");
   }
   async function loadResult(autoplay) {
     const d = await get("/api/rl/result");

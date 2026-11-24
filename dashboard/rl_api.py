@@ -88,7 +88,8 @@ def _eval_summary():
         return None
     rows = [{"x_cm": r["spot_cm"][0], "y_cm": r["spot_cm"][1], "yaw_deg": r["cube_yaw_deg"], "done": bool(r["done"]),
              "fail": r.get("fail_reason")} for r in d.get("runs", [])]
-    return {"done": d["aggregate"]["done"], "runs": d["aggregate"]["runs"], "rows": rows, "mtime": p.stat().st_mtime}
+    return {"done": d["aggregate"]["done"], "runs": d["aggregate"]["runs"], "rows": rows, "mtime": p.stat().st_mtime,
+            "policy": d["aggregate"].get("policy") or "grasp_lift_23025"}   # 옛 결과 파일에는 정책 이름이 없다 (23025 때)
 
 
 def _job(kind, cmd, timeout):

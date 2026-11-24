@@ -11,8 +11,16 @@
 좌표: 입력 x, y(cm)·각도(°)는 정우 님 기준(기준 큐브 (−0.285, 0.26) m 에서 벗어난 양, 월드 x·y). 결과의 큐브·책상은 대시보드
 3D 틀(viewer.js: 원점 = 어깨 관절, x 로봇 왼쪽, y 뒤, z 위)로 바꿔 낸다: 장면의 Shoulder_Pitch 몸체 틀 + x 0.052 m.
 
+정책·사양: sim2sim/chain.py 의 기본 사양(2026-11-24 부터 팀 최종 `grasp_lift_25550`: URDF_1109, 어깨축 → 책상 47.25 cm, 팔 서보
+(처짐 보정 없는 기하 자세 명령), 실물 모터 토크 한계, 관측 = 보낸 목표각, 손가락·큐브 마찰 2.0). 정책 이름은 chain 에서 읽어 info 로 낸다.
+환경 변수 SIM2SIM_SPEC=23025 면 예전 판(11-08 사양). 결과의 table_d(어깨축 → 책상 윗면, 25550 은 0.4725 m)는 장면에서 재서 내고,
+내리기 계획(pick_plan.plan_place_from)의 책상 높이 d 로 그대로 넘긴다.
+
 관절: sim2sim 장면(deploy/robot_v3 URDF, V2 부호)과 대시보드 3D 모델(motion2/arm/arm.xml)은 이름만 다르고 각도·부호가 같다
-(JOINT_MAP). 무작위 자세 20개에서 두 모델의 몸체 14개 원점이 0.00 mm 로 같음을 확인했다(2026-11-23). 하나 다른 곳:
+(JOINT_MAP). 과제용 URDF 는 1109 판도 V2 부호 그대로다(원본 URDF_1109 에서 4번 부호가 바뀐 것은 과제용 URDF 가 흡수 — 실물로 보낼
+때만 1번 어깨 롤 하나를 뒤집으면 된다). 무작위 자세 20개에서 두 모델의 몸체 원점 비교(2026-11-24, 1109 장면): 어깨~아래팔 4개 0.00 mm,
+손목부터 손가락 끝까지 10개는 정확히 1.00 mm (1109 가 under_arm_to_wrist_pitch 원점을 1 mm 옮겼고 arm.xml 은 URDF_1108 치수) —
+화면 재생에는 안 보이는 크기라 그대로 둔다. 1108 장면(23025)과는 14개 모두 0.00 mm. 하나 다른 곳:
 엄지 받침(hand_base_to_rotation_base)은 arm.xml 에 관절이 없고 −180° 에 굳어 있다 → 따로 `rot` 로 내고 화면(rl.js)이 돌린다.
 """
 import argparse
@@ -56,12 +64,13 @@ def info(args):
     d, C = load(args.ik)
     import run_eval
     t = C.Tables()
+    sp = C.spec_of() if hasattr(C, "spec_of") else {"policy": "grasp_lift_23025", "name": "23025", "d": 0.4775}   # 옛 chain.py 도
     meta = {}
     try:
-        meta = json.load(open(os.path.join(C.DEPLOY, "grasp_lift_23025_meta.json"), encoding="utf-8"))
+        meta = json.load(open(os.path.join(C.DEPLOY, sp["policy"] + "_meta.json"), encoding="utf-8"))
     except Exception:
         pass
-    return {"ok": True, "sim2sim": d, "policy": "grasp_lift_23025", "checkpoint": meta.get("checkpoint"),
+    return {"ok": True, "sim2sim": d, "policy": sp["policy"], "spec": sp["name"], "table_d": sp["d"], "checkpoint": meta.get("checkpoint"),
             "gx_cm": [round(float(v) * 100, 3) for v in t.gx], "gy_cm": [round(float(v) * 100, 3) for v in t.gy],
             "valid": [[int(bool(v)) for v in row] for row in t.mask["valid"]],
             "spots": [[round(x * 100, 2), round(y * 100, 2), yaw] for x, y, yaw in run_eval.spots()]}
