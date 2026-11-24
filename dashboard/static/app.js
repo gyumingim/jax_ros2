@@ -726,6 +726,8 @@ function buildMap(c) {
   G.box3d = el("input", { type: "checkbox", checked: "" });
   G.box3d.addEventListener("change", () => { if (VW.ik && VW.ik.setGraspVisible) VW.ik.setGraspVisible(G.box3d.checked); });
   G.note = el("span", { class: "help", style: "margin:0" }, "집을 수 있는 곳 계산 중…");
+  G.wide = el("input", { type: "checkbox", checked: "" });
+  G.wide.addEventListener("change", () => { if (G.wide.checked && !Object.keys(G.other).length) graspLoad(); else graspPaint(); });
   RX.chk = el("input", { type: "checkbox" });
   RX.chk.addEventListener("change", () => { RX.on = RX.chk.checked; M.gGrasp.style.display = RX.on ? "none" : ""; reachLoad(); });
   RX.note = el("span", { class: "help", style: "margin:0" }, "");
@@ -736,7 +738,9 @@ function buildMap(c) {
     el("div", { class: "mctl" }, seg, el("label", { class: "chk" }, snap, "칸 중심에 붙이기"),
       el("label", { class: "chk", title: "−40° 고정 파지로 만든 옛 reachmap_real_yaw.npz 색칠·판정 (다시 만들지 않음)" }, old, "옛 도달 지도 보기")),
     el("div", { class: "mctl" }, el("span", { class: "mlabel" }, "큐브 yaw"), M.yaw, M.yawNum),
-    el("div", { class: "mlegend" }, el("span", {}, el("i", { class: "sw ok" }), "집을 수 있음"), el("span", {}, el("i", { class: "sw no" }), "못 집음"),
+    el("div", { class: "mlegend" }, el("span", {}, "집을 수 있음 · 손 기울기"), el("span", {}, "0° 수직", el("i", { class: "sw tiltbar" }), "90° 수평"),
+      el("span", {}, el("i", { class: "sw ok gother" }), "다른 방향이면 됨"), el("label", { class: "chk", title: "지금 고른 집는 방향으로는 안 되지만 자동·기울임·수평 중 하나로 되는 칸을 옅게 (방향마다 지도를 한 번씩 더 계산, 서버가 기억)" }, G.wide, "다른 방향도"),
+      el("span", {}, el("i", { class: "sw no" }), "못 집음"),
       el("label", { class: "chk", title: "3D 뷰 책상에 집을 수 있는 곳을 반투명 초록으로" }, G.box3d, "3D 에 초록으로"), G.note),
     el("div", { class: "mlegend" }, el("label", { class: "chk", title: "집기 조건 없이: 아래 '손 위치로 보내기'의 높이·기준점으로 x, y 마다 같은 역기구학(위치만)이 풀리면 초록" },
       RX.chk, "갈 수 있는 곳 보기 (손 위치 높이에서 IK 풀림)"), el("span", {}, el("i", { class: "sw reach" }), "갈 수 있음"), RX.note),
@@ -854,7 +858,17 @@ function mapVision(o) {
 // 정의(서버 hand_ik.grasp_eval → pick_plan.Planner.point_check, 2026-11-21): '대시보드 계획이 여기서 집기·놓기 가능' —
 // 손끝을 큐브 중심에 + 손가락이 책상 위 8 mm 이상 + 큐브 위 3 cm 에서 곧게 내려가는 길(손가락이 큐브에 안 닿음), 큐브 yaw 모두.
 // 지도 = 1 cm 격자, 비전 큐브 = 그 점 그대로.
-const G = { data: null, seq: 0, vis: null, visKey: null, visBusy: false };
+const G = { data: null, seq: 0, vis: null, visKey: null, visBusy: false, other: {} };
+// 칸 색 = 그 자리에서 고른 집기 자세의 손 기울기 (서버 d.tilts, 수직 0° → 수평 90°): 진한 파랑 → 보라 → 주황 (2026-11-24 사용자)
+const TILT_STOPS = [[0, [29, 78, 216]], [45, [147, 51, 234]], [90, [234, 88, 12]]];
+function tiltColor(t) {
+  t = Math.max(0, Math.min(90, t));
+  const k = t <= 45 ? 0 : 1, [a, ca] = TILT_STOPS[k], [b, cb] = TILT_STOPS[k + 1], u = (t - a) / (b - a);
+  return `rgb(${ca.map((v, i) => Math.round(v + (cb[i] - v) * u)).join(",")})`;
+}
+const TILT_BIN = 5;   // 색 단계 (°) — 같은 단계 칸은 한 path 로
+// 다른 집는 방향이면 되는 칸 (옅게): 지금 방향 지도 다음에 하나씩 받는다 (서버가 기억). 수직은 자동에 들어 있어 안 받음
+const graspOthers = (g) => ["auto", "tilted", "horizontal"].filter((m) => m !== g);
 const graspSy = () => (HK.f && HK.f.fix.checked ? parseFloat(HK.f.fixv.value) || 0 : 0);
 async function graspLoad() {
   const my = ++G.seq, sy = graspSy();
@@ -865,32 +879,53 @@ async function graspLoad() {
       (gq.yaw != null ? `&yaw=${encodeURIComponent(gq.yaw)}` : ""))).json();
     if (my !== G.seq) return;
     if (!d.ok) { G.data = null; if (G.note) G.note.textContent = "⚠ 집을 수 있는 곳 계산 실패: " + (d.reason || "?"); graspPaint(); return; }
-    G.data = d;
+    G.data = d; G.other = {};
     if (G.note) G.note.textContent = `${d.counts.graspable}칸 (1 cm) · ` + (d.grasp && d.grasp !== "auto" ? `집는 방향 ${GRASP_KO[d.grasp]}${d.yaw != null ? ` (큐브 yaw ${d.yaw}°)` : ""} · ` : "") +
       `손끝(집는 점)을 책상 위 ${d.grip_above_table_m != null ? +(d.grip_above_table_m * 100).toFixed(1) : 3.5} cm 에 · 어깨 옆 ${d.shoulder_yaw}°` + (d.d != null && Math.abs(d.d - 0.4775) > 1e-6 ? ` · 책상 높이 ${d.d} m` : "");
     graspPaint();
+    if (!G.wide || !G.wide.checked) return;
+    const base = G.note.textContent;
+    for (const m of graspOthers(d.grasp)) {
+      G.note.textContent = base + ` · 다른 방향(${GRASP_KO[m]}) 계산 중…`;
+      const o = await (await fetch(`/api/ik/graspmap?shoulder_yaw=${encodeURIComponent(sy)}&d=${encodeURIComponent(tableD())}&grasp=${m}`)).json();
+      if (my !== G.seq) return;
+      if (o.ok && o.xs.length === d.xs.length && o.ys.length === d.ys.length) { G.other[m] = o; graspPaint(); }
+    }
+    const n = graspCells().filter((c) => c.other).length;
+    G.note.textContent = base + ` · 다른 방향이면 +${n}칸 (옅게)`;
   } catch (e) { if (my === G.seq && G.note) G.note.textContent = "⚠ 집을 수 있는 곳을 못 받음 (서버)"; }
+}
+function graspCell(i, j) {   // {tilt, mode, other} 또는 null: 지금 방향으로 되면 그 기울기, 아니면 다른 방향 중 가장 수직에 가까운 것
+  const d = G.data;
+  if (d.rows[j][i] === "2") return { tilt: d.tilts ? d.tilts[j][i] : null, mode: d.grasp, other: false };
+  let best = null;
+  if (G.wide && G.wide.checked) for (const [m, o] of Object.entries(G.other)) {
+    if (o.rows[j][i] !== "2") continue;
+    const t = o.tilts ? o.tilts[j][i] : null;
+    if (!best || (t != null && (best.tilt == null || t < best.tilt))) best = { tilt: t, mode: m, other: true };
+  }
+  return best;
+}
+function graspCells() {
+  const d = G.data, out = [];
+  if (d) d.rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) { const c = graspCell(i, j); if (c) out.push({ ...c, i, j }); } });
+  return out;
 }
 function graspPaint() {
   const d = G.data;
-  if (VW.ik && VW.ik.setGraspArea) { VW.ik.setGraspArea(d); VW.ik.setGraspVisible(!G.box3d || G.box3d.checked); }
+  try { if (VW.ik && VW.ik.setGraspArea) { VW.ik.setGraspArea(d); VW.ik.setGraspVisible(!G.box3d || G.box3d.checked); } } catch (e) { console.error("3D 지도", e); }   // 3D 가 안 돼도 2D 지도는 칠한다
   if (!M.gGrasp) return;
   if (!d) { M.gGrasp.replaceChildren(); return; }
-  const h = d.step * MS;
-  let ok = "";
-  d.rows.forEach((row, j) => {
-    const y = msy(d.ys[j]) - h / 2;
-    for (let i = 0; i < row.length;) {
-      if (row[i] !== "2") { i++; continue; }
-      let k = i; while (k < row.length && row[k] === "2") k++;
-      ok += `M${(msx(d.xs[i]) - h / 2).toFixed(1)},${y.toFixed(1)}h${((k - i) * h).toFixed(1)}v${h.toFixed(1)}h${(-(k - i) * h).toFixed(1)}z`;
-      i = k;
-    }
-  });
+  const h = d.step * MS, paths = {};   // "b|other" -> path d (기울기 단계·옅음별로 한 path)
+  for (const c of graspCells()) {
+    const b = c.tilt == null ? -1 : Math.round(c.tilt / TILT_BIN) * TILT_BIN, k = `${b}|${c.other ? 1 : 0}`;
+    paths[k] = (paths[k] || "") + `M${(msx(d.xs[c.i]) - h / 2).toFixed(1)},${(msy(d.ys[c.j]) - h / 2).toFixed(1)}h${h.toFixed(1)}v${h.toFixed(1)}h${(-h).toFixed(1)}z`;
+  }
   const x0 = msx(d.xs[0]) - h / 2, y0 = msy(d.ys[d.ys.length - 1]) - h / 2;
   M.gGrasp.replaceChildren(
     sv("rect", { x: x0.toFixed(1), y: y0.toFixed(1), width: (d.xs.length * h).toFixed(1), height: (d.ys.length * h).toFixed(1), class: "gno" }),
-    sv("path", { d: ok, class: "gok" }));
+    ...Object.entries(paths).map(([k, p]) => { const [b, o] = k.split("|").map(Number);
+      return sv("path", { d: p, class: o ? "gok gother" : "gok", style: b < 0 ? "" : `fill:${tiltColor(b)}` }); }));
 }
 function graspAt(p) {   // 격자 칸 코드: 2 됨, 1 손목만 닿음, 0 안 닿음, null 지도 밖
   const d = G.data; if (!d || !p) return null;
@@ -899,7 +934,10 @@ function graspAt(p) {   // 격자 칸 코드: 2 됨, 1 손목만 닿음, 0 안 �
 }
 function graspHover(p) {
   const c = graspAt(p);
-  return c == null ? "" : c === 2 ? " · ✅ 집을 수 있음" : c === 1 ? " · ❌ 못 집음 (손이 기울어 손가락이 책상에 닿거나, 곧게 내려가는 길 없음)" : " · ❌ 못 집음 (팔이 안 닿음)";
+  const d = G.data, i = c == null ? 0 : Math.round((p.x - d.xs[0]) / d.step), j = c == null ? 0 : Math.round((p.y - d.ys[0]) / d.step);
+  const g = c == null ? null : graspCell(i, j), tt = g && g.tilt != null ? ` · 손 기울기 ${g.tilt}° (${g.tilt <= 15 ? "수직에 가까움" : g.tilt >= 75 ? "수평에 가까움" : "기울여"})` : "";
+  if (g && g.other) return ` · ⚪ 지금 방향으론 못 집음 — ${GRASP_KO[g.mode]}(으)로는 됨` + tt;
+  return c == null ? "" : c === 2 ? " · ✅ 집을 수 있음" + tt : c === 1 ? " · ❌ 못 집음 (손이 기울어 손가락이 책상에 닿거나, 곧게 내려가는 길 없음)" : " · ❌ 못 집음 (팔이 안 닿음)";
 }
 async function graspVision(o) {   // 비전 큐브 자리 그대로 판정 (격자 칸 아님). 1 mm·어깨 옆 값이 바뀌면 다시.
   if (!o) { G.vis = null; G.visKey = null; return; }

@@ -434,7 +434,7 @@ class Planner:
                     continue
                 need -= got
                 if not need:
-                    return True, "집을 수 있음", min(tilts)
+                    return True, "집을 수 있음", t   # 고른 해(마지막으로 yaw 를 채운 해)의 손 기울기 — 지도 색 (2026-11-24)
             if need != set(samples):
                 why = ("큐브 yaw " + ", ".join(f"{y - s.R.SIM_FROM_REAL_YAW:+.0f}°" for y in sorted(need))
                        + " (실좌표) 에선 곧게 내려가는 길에서 손가락이 큐브·책상 여유에 걸림")

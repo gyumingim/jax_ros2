@@ -1023,19 +1023,25 @@ class _Solver:
         parts = int(b.get("parts") or MAP_PARTS)
         grasp, yaws = self._grasp_req(b)
         if parts > 1 and len(ys) >= 2 * parts:
-            rows = self._graspmap_parts(b, ys, parts)
+            rows, tilts = self._graspmap_parts(b, ys, parts)
         else:
             S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
-            rows = []
+            rows, tilts = [], []
             for y in ys:
-                rows.append("".join(str(self.grasp_eval(S, x, y, verify=False, grasp=grasp, yaws=yaws)[0]) for x in xs))
+                row, tr = "", []
+                for x in xs:
+                    c, t, _ = self.grasp_eval(S, x, y, verify=False, grasp=grasp, yaws=yaws)
+                    row += str(c)
+                    tr.append(round(t) if c == 2 and t is not None else None)   # 집는 자세 손 기울기 ° (수직 0 ~ 수평 90), 지도 색 (2026-11-24)
+                rows.append(row)
+                tilts.append(tr)
         n = [sum(r.count(c) for r in rows) for c in "012"]
         import pick_plan
         which = ("큐브 yaw %+g°" % float(b["yaw"])) if yaws is not None else ("큐브 면이 팔 쪽을 보게 두면 (yaw 하나라도)" if grasp == "horizontal" else "모든 큐브 yaw")
         return {"ok": True, "xs": xs, "ys": ys, "step": st, "rows": rows, "z_table_m": self.grasp_z(), "d": self.table_d,
                 "grip_above_table_m": float(self.E.OBJECT_HALF_SIZE) + pick_plan.H_GRIP_ABOVE if grasp == "horizontal" else self.grip_above_table(),
                 "grasp": grasp, "yaw": None if yaws is None else float(b["yaw"]),
-                "counts": {"graspable": n[2], "wrist_only": n[1], "no": n[0]}, "tilt_tol_deg": GRASP_TILT_TOL,
+                "counts": {"graspable": n[2], "wrist_only": n[1], "no": n[0]}, "tilt_tol_deg": GRASP_TILT_TOL, "tilts": tilts,
                 "meaning": f"초록(2) = 대시보드 계획(pick_plan)이 그 자리에서 집기·놓기 가능 — 집는 방향 {pick_plan.STYLE_KO[grasp]}, {which}",
                 "shoulder_yaw": float(b.get("shoulder_yaw") or 0.0), "ms": round((time.time() - t0) * 1000), "parts": parts}
 
@@ -1053,22 +1059,24 @@ class _Solver:
                 r = helpers[i - 1].call(self.ik_dir, rq, timeout=MAP_TIMEOUT_S)
                 if not r.get("ok"):
                     raise RuntimeError(r.get("reason"))
-                res[i] = r["rows"]
+                res[i] = (r["rows"], r.get("tilts"))
             except Exception as e:
                 errs.append(f"{type(e).__name__}: {e}")
         ts = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(1, parts)]
         for t in ts:
             t.start()
-        res[0] = (self.reachxyz if b.get("op") == "reachxyz" else self.graspmap)({**b, "parts": 1, "y_list": groups[0]})["rows"]
+        r0 = (self.reachxyz if b.get("op") == "reachxyz" else self.graspmap)({**b, "parts": 1, "y_list": groups[0]})
+        res[0] = (r0["rows"], r0.get("tilts"))
         for t in ts:
             t.join()
         if errs:
             raise RuntimeError("지도 도우미 실패: " + "; ".join(errs))
-        rows = [None] * len(ys)
+        rows, tilts = [None] * len(ys), [None] * len(ys)
         for i in range(parts):
-            for k, r in enumerate(res[i]):
+            for k, r in enumerate(res[i][0]):
                 rows[i + k * parts] = r
-        return rows
+                tilts[i + k * parts] = res[i][1][k] if res[i][1] else None
+        return rows, tilts
 
     def reachxyz(self, b):
         """op reachxyz (2026-11-21 '갈 수 있는 곳'): 집기 조건 없이, 높이 z 에서 격자 (x, y) 마다 기준점(손끝 사이 = 집는 점 / 손목 중앙)을
@@ -1083,7 +1091,7 @@ class _Solver:
             ys = [float(v) for v in b["y_list"]]
         parts = int(b.get("parts") or MAP_PARTS)
         if parts > 1 and len(ys) >= 2 * parts:   # 지도처럼 y 줄을 도우미 worker 들에 나눠 (칸마다 해석 IK 반복이라 한 줄 수백 ms)
-            rows = self._graspmap_parts({**b, "op": "reachxyz"}, ys, parts)
+            rows = self._graspmap_parts({**b, "op": "reachxyz"}, ys, parts)[0]
             n = sum(r.count("2") for r in rows)
             zt = float(b["z_table_m"])
             ref = "wrist" if b.get("ref") == "wrist" else "grip"
