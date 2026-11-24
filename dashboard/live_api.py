@@ -195,6 +195,7 @@ class Live:
         self.lock = threading.Lock()
         self.res = None            # 마지막 프레임의 인식 결과
         self.jpeg = None           # 그 프레임 (마커를 그린 것)
+        self.raw_jpeg, self.raw_t = None, 0.0   # live.jpg 받은 그대로 (스트림용, 인식 전)
         self.frame = None          # 다시 계산용 (책상 높이가 바뀌면)
         self.key = None
         self.td = TD_DEFAULT
@@ -223,6 +224,7 @@ class Live:
     def _grab(self, dcfg):
         """새 프레임이 있으면 (BGR, 프레임 시각, 출처 이름), 없으면 None."""
         import cv2
+        import numpy as np
         if self.inject is not None:
             img, t = self.inject
             self.inject = None
@@ -240,10 +242,17 @@ class Live:
             key = (name, st.st_mtime_ns, st.st_size)
             if key == self.key:
                 return None
-            img = cv2.imread(p, cv2.IMREAD_COLOR)
+            try:
+                with open(p, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                return None
+            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
             if img is None:          # 쓰는 중 — 다음 번에
                 return None
             self.key = key
+            if name == "live.jpg":   # 화면 스트림은 인식(ArUco·뎁스)을 기다리지 않고 받은 그대로 바로 (들쭉날쭉 줄임, 2026-11-24)
+                self.raw_jpeg, self.raw_t = raw, time.time()
             return (left_panel(img) if name == "inference.png" else img), st.st_mtime, name
         return None
 
@@ -440,7 +449,7 @@ def install(app, log_dir, mode):
         async def gen():
             last = None
             while not await req.is_disconnected():
-                j = LIVE.jpeg
+                j = LIVE.raw_jpeg if LIVE.raw_jpeg is not None and time.time() - LIVE.raw_t < 1.5 else LIVE.jpeg
                 if j is not None and j is not last:
                     last = j
                     yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(j)).encode() + b"\r\n\r\n" + j + b"\r\n"
