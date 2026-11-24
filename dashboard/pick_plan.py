@@ -103,6 +103,9 @@ HOME_EXIT_WRIST_X = 0.0      # 그다음 경유점: 손목 중앙 sim x (책상 
 HOME_EXIT_WRIST_DY = -0.05   # 그 경유점 sim y = HOME 손목 y + 이만큼
 HOME_EXIT_LIFT = 0.0        # 그 경유점 손목 높이 = z_clear + 이만큼. 0 이면 책상 앞 끝 가까이(실좌표 y −0.18) 놓은 큐브를 빠질 때 ③→② 에서
                              # 손가락이 건드렸다 (plan_check 3/30). 0.07 은 손목이 안 닿음. 0.04 면 그 해 elbow −133° (한계 135 에 2° 남음)
+EXIT_SHIFTS = tuple((dx, dy) for dx in (0.0, 0.03, 0.06) for dy in (-0.09, -0.06, -0.03, 0.0, 0.03, 0.06, 0.09) if (dx, dy) != (0.0, 0.0))
+# ↑ 탑 쌓기(다른 큐브 위에 놓기)가 기본 경유점으로 안 될 때만: 경유점 손목 sim (x, y) 를 이만큼 옮겨 본다 (2026-11-24, 3층. 풀리는 것만, exit_ok 검사 그대로)
+EXIT_SHIFT_GAIN = 0.02      # 그중 탑 자리에서 지금보다 이만큼(m) 넘게 먼 것만
 MAP_SLACK = 0.0003       # m 지도 판정의 책상 여유 덤: hand_roll 만 돌린 근사·중간 프레임 차이 (계획은 덤 없이 TABLE_MARGIN)
 MAP_TILTS = (15, 30)        # 지도가 보는 비스듬한 내려가기 (수직에서 °, APPROACH_TILTS 의 앞쪽). 계획은 45·60 도 보지만 지도는 시간 때문에 여기까지
 # 집는 방향 (2026-11-24): 자동 = 수직 → 수평 → 기울임(예전 방식: 손목이 되는 만큼 아래) 순서로 되는 것, 수직·수평 = 그것만
@@ -240,7 +243,8 @@ class Planner:
         for n, v in HOME_EXIT_SEED_DEG.items():
             seed[s.arm.index(n)] = math.radians(v)
         w = self.wrist(self.home0)
-        sols, _ = s.analytic_position(np.array([HOME_EXIT_WRIST_X, w[1] + HOME_EXIT_WRIST_DY, self.z_clear + HOME_EXIT_LIFT]), seed, self.lim)
+        dx, dy = getattr(self, "exit_shift", (0.0, 0.0))   # 탑 쌓기만 (plan 이 줌): 경유점을 탑에서 먼 쪽으로
+        sols, _ = s.analytic_position(np.array([HOME_EXIT_WRIST_X + dx, w[1] + HOME_EXIT_WRIST_DY + dy, self.z_clear + HOME_EXIT_LIFT]), seed, self.lim)
         sols = [c for c in sols if (c[ie] < 0) == (ELBOW_BRANCH < 0)]
         if not sols:
             self.exit_ok = False
@@ -261,6 +265,26 @@ class Planner:
         self.exit_why = (None if self.exit_ok else
                          f"HOME 에서 나가는 경유점 길에서 손가락이 책상 위 {low * 1000:+.1f} mm (여유 {TABLE_MARGIN * 1000:.0f} mm)" if low < TABLE_MARGIN else
                          f"HOME 에서 나가는 경유점 길에서 팔이 기둥에서 {col * 1000:+.1f} mm (여유 {COLUMN_MARGIN * 1000:.0f} mm)")
+
+    def exit_shifts_away(self, target_sim, z, n=2):
+        """탑 쌓기: HOME 나가기 경유점(손목 sim x, y)을 EXIT_SHIFTS 만큼 옮긴 것 중 풀리고(exit_ok) 탑 자리(target_sim xy)에서 지금보다
+        EXIT_SHIFT_GAIN 넘게 먼 것, 먼 순서로 n 개. 옮겨 가는 높이 z (z_clear) 기준으로 보고, 끝나면 경유점·z_clear 를 원래대로 돌려 놓는다."""
+        np = self.np
+        old, oz = getattr(self, "exit_shift", (0.0, 0.0)), self.z_clear
+        self.z_clear = z
+        dist = lambda: float(np.hypot(*(self.grip(self.exit[-1])[:2] - np.asarray(target_sim)[:2])))   # noqa: E731
+        self.exit_shift = (0.0, 0.0)
+        self._home_exit()
+        d0 = dist() if self.exit_ok else 0.0
+        out = []
+        for sh in EXIT_SHIFTS:
+            self.exit_shift = sh
+            self._home_exit()
+            if self.exit_ok and dist() > d0 + EXIT_SHIFT_GAIN:
+                out.append((dist(), sh))
+        self.exit_shift, self.z_clear = old, oz
+        self._home_exit()
+        return [sh for _, sh in sorted(out, reverse=True)[:n]]
 
     def _column_init(self):
         """기둥 검사용: 관절에 따라 움직이는 팔·손 메시 geom 과 그 꼭짓점 (geom 틀). 기둥·Holder·base_link 처럼 안 움직이는 것은 뺀다."""
@@ -1131,9 +1155,14 @@ def plan(a):
         P.stack_standoff = (0.20, 0.16, 0.12, 0.08)
     z0 = P.z_clear
     tried, r, first = {}, None, None
-    for lift in lifts:
+    tries = [((0.0, 0.0), lift) for lift in lifts]
+    k = 0
+    while k < len(tries):
+        shift, lift = tries[k]
+        k += 1
         P.z_clear = z0 + lift
-        if len(lifts) > 1:
+        P.exit_shift = shift
+        if len(tries) > 1:
             # HOME 나가기·들어가기 경유점(손목 높이 z_clear + HOME_EXIT_LIFT)도 같이 올린다. 예전엔 계획기를 만들 때의 높이 그대로라
             # z_clear 를 올려도 오가는 길이 그 낮은 경유점(탑 자리 바로 앞)을 지나 탑에 걸렸다. 못 풀면 exit_ok False → 그 높이는 거절
             P._home_exit()
@@ -1147,7 +1176,16 @@ def plan(a):
             tried[style] = r.get("reason")
         first = first or (r, tried)
         if r["status"] == "playable":
+            if shift != (0.0, 0.0):
+                r.setdefault("checks", {})["home_exit_shift_sim_m"] = list(shift)
             break
+        if k == len(tries) and level and shift == (0.0, 0.0):
+            # 다른 큐브 위에 놓는데 안 됨 (2026-11-24, 3층): HOME 나가기·들어가기 경유점이 탑 자리 바로 앞(기본 자리에서 6 cm)이고 탑 윗면보다 낮다.
+            # 3층은 위로 4~5.5 cm 밖에 못 빠지고 그 높이로는 경유점 쪽으로 못 가서 (어깨 가까이는 그 높이에 손목이 못 감) 돌아가는 길이 비스듬히
+            # 내려가며 놓은 큐브를 스친다 → 탑 쌓기일 때만 경유점을 탑에서 먼 쪽으로 옮겨 다시 (검사·여유는 그대로)
+            for sh in P.exit_shifts_away(P.s.to_sim([float(a.target[0]), float(a.target[1]), 0.0]), z0):
+                tries += [(sh, lift) for lift in lifts]
+    P.exit_shift = (0.0, 0.0)
     if r["status"] != "playable":
         r, tried = first   # 둘 다 안 되면 낮은 길의 결과 (이유가 더 알기 쉽다)
     if r["status"] != "playable" and grasp == "auto":
