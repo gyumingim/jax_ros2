@@ -40,9 +40,23 @@
   R.out = el("div", { class: "result" }, "아직 안 돌림");
   R.evalBtn = el("button", { class: "btn line small", onclick: evalAll }, "평가 (27곳)");
   R.evalOut = el("div", { class: "note" });
+  // 지도: 눌러서 자리 고르기. '큐브 자리' / '놓을 자리' 중 고른 쪽을 누른 곳으로 옮긴다 (숫자 칸과 같이 움직임)
+  R.mode = "cube";
+  R.bCube = el("button", { onclick: () => setMode("cube") }, el("i", { class: "sw cube" }), "큐브 자리");
+  R.bPlace = el("button", { onclick: () => setMode("place") }, el("i", { class: "sw tgt" }), "놓을 자리");
+  R.map = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  R.map.setAttribute("class", "rl-map");
+  R.map.addEventListener("click", mapClick);
+  R.mapNote = el("div", { class: "help", style: "margin:6px 0 0" }, "지도를 눌러 자리를 고른다 (위 = 로봇, 아래 = 앞, 오른쪽 = 로봇 왼쪽 +x).");
+  document.head.append(el("style", {}, `
+#page-rl .rl-map { display: block; width: 100%; max-width: 460px; margin: 10px auto 0; border-radius: 12px; background: var(--fill); touch-action: manipulation; cursor: crosshair; }
+#page-rl .rl-seg { margin-top: 4px; }
+#page-rl .rl-seg i.sw.tgt { border-color: #1d4ed8; }`));
   R.card = el("div", { class: "card" },
     el("h3", {}, "정책 돌려보기"),
     el("p", { class: "help" }, "팀원이 학습한 집기 정책 ", (R.policy = el("b", {}, "grasp_lift_25550")), " 을 MuJoCo 시뮬에서 돌린다. 실물 팔은 안 움직인다."),
+    el("div", { class: "modesw seg rl-seg", role: "group", "aria-label": "지도를 누르면 옮길 것" }, R.bCube, R.bPlace),
+    R.map, R.mapNote,
     el("div", { class: "frow" },
       el("label", { class: "field", style: "width:auto" }, "미리 정한 자리", R.preset),
       el("label", { class: "field", title: "기준 자리에서 앞뒤. − = 책상 안쪽(로봇에서 멀리)" }, "x (cm)", R.x),
@@ -60,9 +74,10 @@
       el("div", { class: "row" }, R.evalBtn), R.evalOut));
   $("#rl-left").append(R.card);
   for (const i of [R.x, R.y, R.yaw]) i.addEventListener("input", () => { R.preset.value = ""; reach(); });
+  for (const i of [R.tx, R.ty, R.tyaw]) i.addEventListener("input", mapDraw);
   R.preset.addEventListener("change", () => {
     const s = R.info && R.info.spots[parseInt(R.preset.value, 10)];
-    if (s) { R.x.value = s[0]; R.y.value = s[1]; R.yaw.value = s[2]; reach(); }
+    if (s) { R.x.value = s[0]; R.y.value = s[1]; R.yaw.value = s[2]; setMode("cube"); }
   });
 
   // ---------- 재생 막대 ----------
@@ -83,6 +98,7 @@
     return false;
   }
   function reach() {
+    mapDraw();
     if (!R.info) return;
     const x = num(R.x), y = num(R.y), a = num(R.yaw);
     if (![x, y, a].every(Number.isFinite)) { R.reach.className = "note bad"; R.reach.textContent = "x, y, 각도에 숫자를 넣는다"; return; }
@@ -90,6 +106,89 @@
     R.reach.className = "note" + (ok ? "" : " warn");
     R.reach.textContent = (ok ? "✓ 놓는 범위 안 (학습한 곳)" : "⚠ 놓는 범위 밖 — 학습하지 않은 곳이라 실패할 수 있다 (돌려 볼 수는 있음)")
       + (Math.abs(a) > 45 ? " · 각도는 −45~45° 로 학습" : "");
+  }
+
+  // ---------- 지도 (위에서 본 책상) ----------
+  // 틀 = 대시보드 실좌표 (역기구학·탑 쌓기 탭 지도와 같은 방향): 원점 = 어깨, 오른쪽 = +x(로봇 왼쪽), 아래 = −y(앞).
+  // 큐브 칸(정우 님 틀: 기준 큐브에서 dx, dy cm)은 서버가 준 변환으로 옮긴다: 실좌표 = ref + dx·ax + dy·ay (rl_runner.info 의 map — 3D 의 큐브와 같은 변환)
+  const MX0 = -0.38, MX1 = 0.30, MY0 = -0.50, MY1 = 0.03, K = 1000, EDGE = 0.035;   // EDGE = 놓을 자리가 책상 끝에서 떨어져야 하는 거리 (rl_runner.place 와 같게)
+  const sv = (tag, at, ...kids) => { const e = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k, v] of Object.entries(at)) e.setAttribute(k, v); e.append(...kids); return e; };
+  const px = (x) => (x - MX0) * K, py = (y) => (MY1 - y) * K;
+  R.map.setAttribute("viewBox", `0 0 ${(MX1 - MX0) * K} ${(MY1 - MY0) * K}`);
+  function toReal(xc, yc) { const m = R.info.map; return [m.ref[0] + (xc * m.ax[0] + yc * m.ay[0]) / 100, m.ref[1] + (xc * m.ax[1] + yc * m.ay[1]) / 100]; }
+  function toSpot(x, y) {   // 실좌표 m → 정우 님 dx, dy cm (ax, ay 는 서로 수직인 단위 벡터)
+    const m = R.info.map, u = x - m.ref[0], v = y - m.ref[1];
+    return [(u * m.ax[0] + v * m.ax[1]) * 100, (u * m.ay[0] + v * m.ay[1]) * 100];
+  }
+  function placeBox() {   // 놓을 수 있는 책상 안쪽 (실좌표) — 정우 님 장면의 책상에서 EDGE 만큼 안
+    const t = R.info && R.info.map && R.info.map.table;
+    return t ? [t.pos[0] - t.size[0] / 2 + EDGE, t.pos[0] + t.size[0] / 2 - EDGE, t.pos[1] - t.size[1] / 2 + EDGE, t.pos[1] + t.size[1] / 2 - EDGE] : [-9, 9, -9, 9];
+  }
+  function placeOk(x, y) {   // 그 자리가 초록인가 (지도 칸 + 책상 안). 지도가 아직 없으면 null
+    const g = R.gmap, b = placeBox();
+    if (!g) return null;
+    const i = Math.round((x - g.xs[0]) / g.step), j = Math.round((y - g.ys[0]) / g.step);
+    return x >= b[0] - 1e-9 && x <= b[1] + 1e-9 && y >= b[2] - 1e-9 && y <= b[3] + 1e-9 && j >= 0 && j < g.rows.length && g.rows[j][i] === "2";
+  }
+  function setMode(m) {
+    R.mode = m;
+    R.bCube.classList.toggle("on", m === "cube"); R.bPlace.classList.toggle("on", m === "place");
+    R.bCube.setAttribute("aria-pressed", m === "cube"); R.bPlace.setAttribute("aria-pressed", m === "place");
+    if (m === "place") gmapLoad();
+    reach();
+  }
+  function gmapLoad() {   // 놓을 수 있는 곳 = 역기구학 탭의 지도 (계획기 판정, /api/ik/graspmap) 를 이 장면의 책상 높이로. 서버가 기억한다
+    if (R.gmap || R.gmapBusy || !R.info) return;
+    R.gmapBusy = true; mapDraw();
+    fetch("/api/ik/graspmap?shoulder_yaw=0&grasp=auto&d=" + encodeURIComponent(R.info.table_d)).then((r) => r.json()).then((r) => {
+      R.gmapBusy = false;
+      if (r.ok) R.gmap = r; else R.gmapErr = r.reason || r.error || "실패";
+      mapDraw();
+    }).catch(() => { R.gmapBusy = false; R.gmapErr = "서버 연결 실패"; mapDraw(); });
+  }
+  function mapDraw() {
+    const I = R.info, g = [];
+    if (!I || !I.map) { R.map.replaceChildren(); return; }
+    const t = I.map.table, cube = R.mode === "cube";
+    if (t) g.push(sv("rect", { x: px(t.pos[0] - t.size[0] / 2), y: py(t.pos[1] + t.size[1] / 2), width: t.size[0] * K, height: t.size[1] * K, fill: "#fff", "fill-opacity": 0.55, stroke: "#94a3b8", "stroke-width": 2 }),
+      sv("text", { x: px(MX1) - 10, y: py(t.pos[1] + t.size[1] / 2) + 20, "font-size": 19, fill: "#64748b", "text-anchor": "end" }, "책상 (로봇 쪽 끝)"));
+    if (cube) {   // 초록 = 정책이 학습한 곳 (reach_mask_v65: 네 꼭짓점이 모두 유효한 2 cm 칸)
+      const gx = I.gx_cm, gy = I.gy_cm, m = I.valid;
+      for (let i = 0; i < gx.length - 1; i++) for (let j = 0; j < gy.length - 1; j++) {
+        if (!(m[i][j] && m[i + 1][j] && m[i][j + 1] && m[i + 1][j + 1])) continue;
+        const a = toReal(gx[i], gy[j]), b = toReal(gx[i + 1], gy[j + 1]);
+        g.push(sv("rect", { x: px(Math.min(a[0], b[0])), y: py(Math.max(a[1], b[1])), width: Math.abs(a[0] - b[0]) * K, height: Math.abs(a[1] - b[1]) * K, fill: "#16a34a", "fill-opacity": 0.55 }));
+      }
+      for (const s of I.spots) { const p = toReal(s[0], s[1]); g.push(sv("circle", { cx: px(p[0]), cy: py(p[1]), r: 4, fill: "#14532d", "fill-opacity": 0.6 })); }
+    } else if (R.gmap) {   // 초록 = 우리 IK 계획이 놓을 수 있는 곳 (책상 안쪽만)
+      const m = R.gmap, b = placeBox();
+      m.rows.forEach((row, j) => { for (let i = 0; i < row.length; i++) {
+        if (row[i] !== "2" || m.xs[i] < b[0] - 1e-9 || m.xs[i] > b[1] + 1e-9 || m.ys[j] < b[2] - 1e-9 || m.ys[j] > b[3] + 1e-9) continue;
+        g.push(sv("rect", { x: px(m.xs[i] - m.step / 2), y: py(m.ys[j] + m.step / 2), width: m.step * K, height: m.step * K, fill: "#16a34a", "fill-opacity": 0.55 }));
+      } });
+    }
+    g.push(sv("circle", { cx: px(0), cy: py(0), r: 9, fill: "#64748b" }), sv("text", { x: px(0) + 15, y: py(0) + 5, "font-size": 19, fill: "#64748b" }, "로봇 (어깨 = x 0, y 0)"));
+    const tx = num(R.tx), ty = num(R.ty), x = num(R.x), y = num(R.y);
+    if (Number.isFinite(tx) && Number.isFinite(ty)) g.push(sv("rect", { x: px(tx) - 29, y: py(ty) - 29, width: 58, height: 58, fill: "none", stroke: "#1d4ed8", "stroke-width": cube ? 3 : 5, "stroke-dasharray": "9 5", rx: 4,
+      transform: `rotate(${-(num(R.tyaw) || 0)} ${px(tx)} ${py(ty)})` }), sv("text", { x: px(tx), y: py(ty) + 48, "font-size": 19, "font-weight": 700, fill: "#1d4ed8", "text-anchor": "middle" }, "놓을 자리"));
+    if (Number.isFinite(x) && Number.isFinite(y)) { const p = toReal(x, y);
+      g.push(sv("rect", { x: px(p[0]) - 25, y: py(p[1]) - 25, width: 50, height: 50, fill: "#f97316", stroke: "#fff", "stroke-width": cube ? 3 : 0, rx: 3, transform: `rotate(${-(num(R.yaw) || 0)} ${px(p[0])} ${py(p[1])})` }),
+        sv("text", { x: px(p[0]), y: py(p[1]) - 32, "font-size": 19, "font-weight": 700, fill: "#c2410c", "text-anchor": "middle" }, "큐브")); }
+    R.map.replaceChildren(...g);
+    const ok = cube ? null : (Number.isFinite(tx) && Number.isFinite(ty) ? placeOk(tx, ty) : null);
+    R.mapNote.textContent = cube ? "지도를 눌러 큐브 자리를 고른다. 초록 = 정책이 집을 수 있는 곳(학습한 범위), 점 = 평가 27곳. 위 = 로봇 · 아래 = 앞 · 오른쪽 = 로봇 왼쪽(+x)."
+      : R.gmapBusy ? "놓을 수 있는 곳 계산 중… (처음 한 번 10~40초)" : R.gmap ? "지도를 눌러 놓을 자리를 고른다. 초록 = 역기구학 계획이 놓을 수 있는 곳 (초록 가장자리는 손에 든 큐브가 기울어 안 될 수도 있다)."
+        + (ok === false ? " ⚠ 지금 놓을 자리는 초록 밖 — 계획이 안 될 수 있다." : "") : "놓을 수 있는 곳 지도를 못 만듦: " + (R.gmapErr || "");
+  }
+  function mapClick(ev) {
+    if (!R.info || !R.info.map) return;
+    const b = R.map.getBoundingClientRect();
+    const x = MX0 + (ev.clientX - b.left) / b.width * (MX1 - MX0), y = MY1 - (ev.clientY - b.top) / b.height * (MY1 - MY0);
+    if (R.mode === "cube") {   // 1 cm 칸에 맞춤 (정우 님 틀)
+      const s = toSpot(x, y);
+      R.x.value = Math.round(s[0]); R.y.value = Math.round(s[1]); R.preset.value = "";
+      reach();
+    } else { R.tx.value = (Math.round(x * 100) / 100).toFixed(2); R.ty.value = (Math.round(y * 100) / 100).toFixed(2); mapDraw(); }
   }
 
   // ---------- 서버 ----------
@@ -117,7 +216,7 @@
     R.info = i;
     if (i.policy) R.policy.textContent = i.policy;
     i.spots.forEach((s, k) => R.preset.append(el("option", { value: k }, `${k + 1}. x ${s[0]}, y ${s[1]}, ${s[2]}°`)));
-    reach();
+    setMode(R.mode);
     showEval(i.status.eval);
     if (i.status.busy) { setBusy(true, "돌리는 중…"); wait(); }
     else if (i.status.has_result) loadResult();
@@ -189,6 +288,8 @@
     R.frame = autoplay && pl && pl.ok ? pl.start_frame : 0;   // 내리기를 막 계획했으면 들기 끝에서부터 재생 (처음부터는 슬라이더·다시 재생)
     R.playing = !!autoplay; R.last = performance.now();
     if (pl) { R.tx.value = pl.target.x; R.ty.value = pl.target.y; R.tyaw.value = pl.target.yaw_deg; }
+    if (!R.preset.value) { R.x.value = d.spot.x_cm; R.y.value = d.spot.y_cm; R.yaw.value = d.spot.yaw_deg; }   // 지도의 큐브 = 3D 의 큐브 (다시 열었을 때도)
+    if (autoplay && s.done && !pl) setMode("place"); else reach();   // 들기가 막 성공했으면 다음은 놓을 자리 고르기
     R.place.disabled = R.busy || !s.done;
     scene();
     show();

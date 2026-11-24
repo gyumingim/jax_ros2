@@ -60,6 +60,30 @@ def load(ik):
     return d, chain
 
 
+def frame(C):
+    """장면(월드) → 대시보드 3D 틀. (to_dash, 회전 R, 모델, 데이터, 어깨 원점 p0) — run 과 info(지도) 가 같은 변환을 쓴다."""
+    import mujoco
+    import numpy as np
+    m = mujoco.MjModel.from_xml_path(C.SCENE)
+    dd = mujoco.MjData(m)
+    mujoco.mj_kinematics(m, dd)
+    b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "Shoulder_Pitch")
+    R, p0 = dd.xmat[b].reshape(3, 3).copy(), dd.xpos[b].copy()
+    off = np.array([0.052, 0.0, 0.0])
+    return (lambda p: (np.asarray(p) - p0) @ R + off), R, m, dd, p0          # R^T (p − p0) + off
+
+
+def table_of(m, dd, R, to_dash):
+    """정우 님 장면의 책상 상자 (대시보드 틀: 중심 pos, 크기 size). 없으면 None."""
+    import mujoco
+    import numpy as np
+    tb = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "table")
+    if tb < 0:
+        return None
+    ax = np.abs(R.T @ np.diag(m.geom_size[tb] * 2)).sum(axis=1)             # 축에 나란한 상자 (틀 바꿈이 90° 회전)
+    return {"pos": [round(float(v), 4) for v in to_dash(dd.geom_xpos[tb])], "size": [round(float(v), 4) for v in ax]}
+
+
 def info(args):
     d, C = load(args.ik)
     import run_eval
@@ -70,10 +94,18 @@ def info(args):
         meta = json.load(open(os.path.join(C.DEPLOY, sp["policy"] + "_meta.json"), encoding="utf-8"))
     except Exception:
         pass
-    return {"ok": True, "sim2sim": d, "policy": sp["policy"], "spec": sp["name"], "table_d": sp["d"], "checkpoint": meta.get("checkpoint"),
+    # 지도(rl.js)용: 정우 님 틀(기준 큐브에서 dx, dy m) → 대시보드 실좌표 xy = ref + dx·ax + dy·ay (run 의 큐브와 같은 변환)
+    to_dash, R, m, dd, p0 = frame(C)
+    z = C.TABLE_TOP + 0.025
+    ref = to_dash([C.CUBE_REF[0], C.CUBE_REF[1], z])
+    ax = to_dash([C.CUBE_REF[0] + 1.0, C.CUBE_REF[1], z]) - ref
+    ay = to_dash([C.CUBE_REF[0], C.CUBE_REF[1] + 1.0, z]) - ref
+    r4 = lambda v: [round(float(v[0]), 4), round(float(v[1]), 4)]
+    return {"ok": True, "sim2sim": d, "policy": sp["policy"], "spec": sp["name"], "table_d": round(float(p0[2] - C.TABLE_TOP), 4), "checkpoint": meta.get("checkpoint"),
             "gx_cm": [round(float(v) * 100, 3) for v in t.gx], "gy_cm": [round(float(v) * 100, 3) for v in t.gy],
             "valid": [[int(bool(v)) for v in row] for row in t.mask["valid"]],
-            "spots": [[round(x * 100, 2), round(y * 100, 2), yaw] for x, y, yaw in run_eval.spots()]}
+            "spots": [[round(x * 100, 2), round(y * 100, 2), yaw] for x, y, yaw in run_eval.spots()],
+            "map": {"ref": r4(ref), "ax": r4(ax), "ay": r4(ay), "table": table_of(m, dd, R, to_dash)}}
 
 
 def run(args):
@@ -81,13 +113,7 @@ def run(args):
     import numpy as np
     d, C = load(args.ik)
     s, tr = C.run(args.x / 100.0, args.y / 100.0, args.yaw)
-    m = mujoco.MjModel.from_xml_path(C.SCENE)
-    dd = mujoco.MjData(m)
-    mujoco.mj_kinematics(m, dd)
-    b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "Shoulder_Pitch")
-    R, p0 = dd.xmat[b].reshape(3, 3).copy(), dd.xpos[b].copy()
-    off = np.array([0.052, 0.0, 0.0])
-    to_dash = lambda p: (np.asarray(p) - p0) @ R + off          # R^T (p − p0) + off
+    to_dash, R, m, dd, p0 = frame(C)
     qT = np.zeros(4)
     mujoco.mju_mat2Quat(qT, R.T.reshape(-1).copy())
     idx = list(range(0, len(tr["t"]), EVERY))
@@ -104,19 +130,13 @@ def run(args):
     close_t = s["phase_t_s"]["GRASP_LIFT"]
     ci = int(np.searchsorted(tr["t"], close_t - 1e-9))
     z0 = float(tr["cube_pos"][min(ci, len(tr["t"]) - 1), 2])
-    tb = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "table")
-    table = None
-    if tb >= 0:
-        sz = m.geom_size[tb] * 2
-        ax = np.abs(R.T @ np.diag(sz)).sum(axis=1)             # 축에 나란한 상자 (틀 바꿈이 90° 회전)
-        table = {"pos": [round(float(v), 4) for v in to_dash(dd.geom_xpos[tb])], "size": [round(float(v), 4) for v in ax]}
     return {"ok": True, "spot": {"x_cm": args.x, "y_cm": args.y, "yaw_deg": args.yaw}, "summary": s,
             "phases": list(C.PHASES), "joint_names": names,
             "t": [round(float(tr["t"][k]), 3) for k in idx], "phase": [int(tr["phase"][k]) for k in idx],
             "q": [[round(float(tr["q"][k][c]), 4) for c in cols] for k in idx],
             "rot": [round(float(tr["q"][k][C.ISAAC.index(ROT_JOINT)]), 4) for k in idx],
             "cube": cube, "rise_cm": [round((float(tr["cube_pos"][k, 2]) - z0) * 100, 2) for k in idx],
-            "table": table, "table_d": round(float(p0[2] - C.TABLE_TOP), 4)}
+            "table": table_of(m, dd, R, to_dash), "table_d": round(float(p0[2] - C.TABLE_TOP), 4)}
 
 
 def place(args):
