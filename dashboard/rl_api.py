@@ -138,7 +138,7 @@ NAMES = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow", "wrist_pitc
          "finger1_joint1", "finger1_joint2", "finger2_joint1", "finger2_joint2", "finger3_joint1", "finger3_joint2"]   # pick_plan 궤적과 같은 순서
 FINGER_HOME = [-0.26, 0.0, -0.26, 0.0, -0.26, 0.0]   # HOME 의 손가락 (IK env FINGER_OPEN = pick_plan open_exit), 내리기 끝 프레임이 없을 때만
 OLDEST_OK = 23025
-BUILD = 2          # build_traj 규칙 판 — 바꾸면 올린다 (옛 rl_traj.json 을 다시 만들게)  # 정책 grasp_lift_<번호>: 이 번호 이하(옛 사양 11-08)는 실물 재생 거절
+BUILD = 3          # build_traj 규칙 판 (3: phase_marks) — 바꾸면 올린다 (옛 rl_traj.json 을 다시 만들게)  # 정책 grasp_lift_<번호>: 이 번호 이하(옛 사양 11-08)는 실물 재생 거절
 
 
 def _policy_no(name):
@@ -183,9 +183,14 @@ def build_traj(d, speed=RL_SPEED):
     # 시작하므로 그 자리(책상 옆에 늘어진 손, 빈 곳)에서 손가락만 0 으로 오므리는 1 초를 앞에 붙인다 — 안 붙이면 HOME 뒤에도 시작 자세
     # 검사(5°)에 걸린다. 벌림 값은 내리기 끝 프레임(같은 계획기의 HOME 도착 = open_exit)에서 읽는다
     fin = q[-1][7:] if all(abs(v) < 1e-6 for v in q[-1][:7]) else list(FINGER_HOME)
+    names_ph = list(d.get("phases") or [])      # 단계 이름 (체인 RAISE… + 내리기 CARRY…), d["phase"] = 프레임마다 그 번호
+    ph = [names_ph[i] if 0 <= i < len(names_ph) else None for i in (int(v) for v in (d.get("phase") or []))]
+    if len(ph) != len(q):
+        ph = [None] * len(q)
     if any(abs(v) > 1e-6 for v in fin):
         q.insert(0, [0.0] * 7 + [float(v) for v in fin])
         t_sim.insert(0, t_sim[0] - 1.0)
+        ph.insert(0, "FINGERS")
     # 시간 다시 맞추기: 사이 i 의 길이 = max(원래, 가장 큰 움직임 / speed)
     w = math.radians(speed)
     T = [0.0]
@@ -205,12 +210,21 @@ def build_traj(d, speed=RL_SPEED):
         u = min(max(u, 0.0), 1.0)
         pos.append([round(a + (b - a) * u, 6) for a, b in zip(q[i], q[i + 1])])
     pos[-1] = [round(v, 6) for v in q[-1]]
+    # 재생 중 '지금 무슨 동작' (play_phase): 단계가 바뀌는 원래 프레임 i → 재생 프레임 round(T[i] / DT)
+    import play_phase
+    marks, last = [], object()
+    for i, name in enumerate(ph):
+        if name != last:
+            text = "손가락 오므리는 중 (시작 자세)" if name == "FINGERS" else play_phase.RL_TEXT.get(name, f"{name} 중" if name else "재생 중")
+            marks.append({"frame": min(n, int(round(T[i] / DT))), "text": text, "name": name})
+            last = name
     peak = max((abs(math.degrees(b - a)) / DT for p0, p1 in zip(pos, pos[1:]) for a, b in zip(p0, p1)), default=0.0)
     sim_s, play_s = t_sim[-1] - t_sim[0], n * DT
     return {"planner": "analytic", "source": "rl", "kind": "rl_lift_place",   # planner analytic: direct_api.analytic_fatal 이 status·checks 를 본다
             "status": "playable", "playable": True, "delivered_in_sim": True,
             "reason": f"강화학습 들기({d.get('policy')}) + 역기구학 내리기, 시뮬 결과 그대로 (열린 루프)",
             "joint_names": NAMES, "dt": DT, "unit": "rad", "positions": pos, "peak_speed_deg_s": round(peak, 1),
+            "phase_marks": marks,
             "checks": pl.get("checks") or {},     # 내리기 계획의 joint_space_fallback 을 analytic_fatal 이 본다
             "rl": {"policy": d.get("policy"), "spot": d.get("spot"), "target": pl.get("target"), "speed_deg_s": speed,
                    "sim_s": round(sim_s, 2), "play_s": round(play_s, 2), "factor": round(play_s / sim_s, 2) if sim_s > 0 else None,

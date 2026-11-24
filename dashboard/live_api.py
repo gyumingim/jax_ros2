@@ -3,7 +3,8 @@
 사진 올리기는 없다. 두 모드:
 
     실물 (직접 CAN / ROS)  서버 스레드(Live)가 거치한 폰의 폰 스테레오 프로그램(SteroDepthSeg z_phone_stereo.py)의 결과 폴더를 20 Hz 로 보고
-                           새 프레임이 생길 때마다 인식한다 — 프레임의 ArUco (phone_detect.detect_cubes: ID 10~15 + 층 + 기울기)
+                           새 프레임이 생길 때마다 인식한다 — 프레임의 ArUco (phone_detect.detect_cubes: ID 10~15 + 층 + 기울기;
+                           기준 종이가 안 보이면 CAD 거치 자세 + 폰 보정값 + 책상 높이 d 로)
                            + 그때의 뎁스 결과 (phone_depth.evaluate) → phone_fuse 로 합친 '집을 큐브 하나' (휴대폰 탭) 와 큐브 목록.
                            프레임:  <결과 폴더>/live.jpg   — 손대지 않은 왼쪽 렌즈 그림 (그 프로그램에 --live-jpg 를 넣은 판, README) ≥ 5 Hz
                                     <결과 폴더>/inference.png — 없으면 이것 (그 프로그램이 1초쯤마다 저장, 객체 테두리·글자가 덧그려짐,
@@ -275,7 +276,8 @@ class Live:
         import phone_detect as PD
         import phone_fuse as PF
         td = self.td
-        cam_cfg = phone_api._load(self.log_dir / "phone_cam.json")
+        # 기준 종이가 안 보이면 CAD 거치 자세 + 폰 보정값 + 책상 높이 (화면의 d 칸) 로 큐브 자리 (phone_detect)
+        cam_cfg = {**phone_api._load(self.log_dir / "phone_cam.json"), "intr": phone_api.intrinsics(dcfg), "td": td}
         now = time.monotonic()
         dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None)
         if dep.get("ok"):

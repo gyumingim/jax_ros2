@@ -421,7 +421,7 @@
     A.btn.disabled = !!why; A.btn.title = why;
     const plan = i && i.ok ? `재생 ${i.play_s.toFixed(0)}초 (시뮬 ${i.sim_s.toFixed(0)}초의 ${i.factor.toFixed(1)}배 — 빠른 구간 최대 ${i.stretch_max.toFixed(1)}배 늘림, ${i.speed_deg_s}°/s)` : "재생 안 됨: " + ((i && i.error) || "…");
     A.out.className = "note" + (i && i.ok ? "" : " warn");
-    A.out.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1} (${(pb.slow || 1).toFixed(1)}배 더 느리게, 약 ${(pb.seconds || 0).toFixed(0)}초) · 멈춤 = ■ STOP / Esc`
+    A.out.textContent = pb.running ? (pb.phase ? phaseText(pb) + " · " : "") + `재생 중 ${pb.frame}/${pb.frames - 1} (${(pb.slow || 1).toFixed(1)}배 더 느리게, 약 ${(pb.seconds || 0).toFixed(0)}초) · 멈춤 = ■ STOP / Esc`
       : (A.msg ? A.msg + " · " : "") + (pb.reason ? "마지막 재생: " + pb.reason + " · " : "") + plan;
   }
   async function armPlay() {

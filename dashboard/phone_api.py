@@ -5,7 +5,7 @@ server.py 는 install(app, log_dir) 한 줄만 가진다. 계획·재생은 화�
 (/api/svc/pick_dry/start → 역기구학 탭의 재생 버튼과 같은 확인창)를 그대로 쓴다.
 
     GET  /api/phone/live?d=&pick=   live_api.py 로 옮김 (2026-11-24): 서버 스레드가 프레임마다 미리 계산한 것을 준다 (GET /api/live/cubes 의 pick)
-    GET  /api/phone/config   기준 종이가 놓인 자리 {x, y, rot_deg, cube_h}
+    GET  /api/phone/config   기준 종이가 놓인 자리 {x, y, rot_deg, cube_h} (종이는 없어도 된다 — 그때는 CAD 거치 자세 + 책상 높이로 큐브 자리)
     POST /api/phone/config   {x, y, rot_deg, cube_h} 저장 (logs/phone_cam.json)
     GET  /api/phone/sheet    인쇄물 PDF (dashboard/phone_markers/phone_markers.pdf)
 
@@ -18,8 +18,9 @@ server.py 는 install(app, log_dir) 한 줄만 가진다. 계획·재생은 화�
                                           → config 의 calib {file, model, note}
 
 '책상 높이 재기' (phone_table.py: 거치대의 폰이 CAD 자리에 있다고 보고 책상 높이 d 를 잰다 — 보정 없음):
-    POST /api/phone/table_height          본문 없음. 지금 프레임의 기준 종이 (ArUco) 와 뎁스 맵 (<결과 폴더>/rgbd/rgbd.npz 가 새것일 때) 으로
-                                          → {ok, d, source, text, in_range, tilt_deg, aruco{…}, depth{…}, diff_mm, warn, image}
+    POST /api/phone/table_height          본문 없음. 지금 프레임의 큐브 윗면 마커 (폰 보정값 + CAD 자세), 기준 종이 (있으면 — 이것을 먼저 쓴다),
+                                          뎁스 맵 (<결과 폴더>/rgbd/rgbd.npz 가 새것일 때) 으로
+                                          → {ok, d, source 'aruco'|'cubes'|'depth', text, in_range, tilt_deg, aruco{…}, cubes{…}, depth{…}, diffs, warn, image}
 """
 import asyncio
 import base64
@@ -79,6 +80,23 @@ def calib_choice(cfg):
     return {"file": CALIB_DEFAULT, "model": model, "note": f"{model} → 기본 {CALIB_DEFAULT} (S25 SM-S931N" + (" — 이 폰 것" if model == "SM-S931N" else " 것 — 이 폰 보정이 아니면 정류 검사에서 멈춘다") + ")"}
 
 
+_INTR = {"t": 0.0, "key": None, "v": None}
+
+
+def intrinsics(dcfg):
+    """붙은 폰의 왼쪽 렌즈 보정값 {K, dist, size, file} (calib_choice 로 고른 파일) 또는 None. 30초 캐시 (실시간 인식이 프레임마다 부른다)."""
+    key = dcfg.get("repo_dir")
+    if _INTR["key"] == key and time.monotonic() - _INTR["t"] < 30.0:
+        return _INTR["v"]
+    v = None
+    try:
+        v = PT.load_intrinsics(str(Path(dcfg["repo_dir"]) / calib_choice(dcfg)["file"]))
+    except Exception:
+        pass
+    _INTR.update(t=time.monotonic(), key=key, v=v)
+    return v
+
+
 def _load(path):
     cfg = dict(PD.DEFAULT_CFG)
     try:
@@ -103,24 +121,34 @@ def _jpeg(r):
     return r
 
 
-def _table_height(image, depth_cfg):
-    """프레임 (BGR 배열 | None) 의 기준 종이로, 폰 뎁스 맵이 새것이면 그것으로도 재서 한 줄로 (phone_table.combine)."""
+def _table_height(image, depth_cfg, cam_cfg=None):
+    """프레임 (BGR 배열 | None) 의 큐브 윗면 마커·기준 종이로, 폰 뎁스 맵이 새것이면 그것으로도 재서 한 줄로 (phone_table.combine).
+    기준 종이는 없어도 된다 (2026-11-24 사용자: 큐브 윗면 마커로 책상 높이도)."""
     try:
         import hand_ik
         PT.D_RANGE = tuple(hand_ik.D_RANGE)     # 계획이 받는 범위 한 곳
     except Exception:
         pass
-    aruco = _jpeg(PT.measure_aruco(image)) if image is not None else None
+    cam_cfg = cam_cfg or dict(PD.DEFAULT_CFG)
+    intr = intrinsics(depth_cfg)
+    aruco = _jpeg(PT.measure_aruco(image, intr)) if image is not None else None
+    cubes = _jpeg(PT.measure_cubes(image, intr, cam_cfg.get("cube_h"))) if image is not None else None
     depth = PT.measure_depth(DP.run_dir(depth_cfg), time.time())
-    if aruco is None and depth.get("missing"):
-        return {"ok": False, "warn": [], "reason": "폰 프로그램의 새 프레임이 없음 — 폰 프로그램을 켜고 (거치한 폰이 책상의 기준 종이를 보게) 다시"}
-    if aruco is not None and aruco["ok"] and not depth["ok"] and (depth.get("missing") or depth.get("stale")):
+    if image is None and depth.get("missing"):
+        return {"ok": False, "warn": [], "reason": "폰 프로그램의 새 프레임이 없음 — 폰 프로그램을 켜고 (거치한 폰이 책상 위 큐브를 보게) 다시"}
+    marker_ok = any(r is not None and r["ok"] for r in (aruco, cubes))
+    if marker_ok and not depth["ok"] and (depth.get("missing") or depth.get("stale")):
         depth = None                            # 프레임으로 쟀고 뎁스 맵은 안 켜져 있음 — 말할 것 없음
-    if aruco is not None and not aruco["ok"] and depth["ok"]:
-        aruco = None                            # 종이가 안 보여 뎁스 맵으로만
-    r = PT.combine(aruco, depth)
-    if aruco is not None and "image" in aruco:
-        r["image"] = aruco.pop("image")
+    if aruco is not None and not aruco["ok"] and not aruco.get("refs"):
+        aruco = None                            # 기준 종이가 아예 없음 — 없어도 된다, 말하지 않는다
+    r = PT.combine(aruco, depth, cubes)
+    main = {"aruco": aruco, "cubes": cubes}.get(r.get("source"))
+    pic = next((x["image"] for x in (main, cubes, aruco) if x and "image" in x), None)     # 쓴 것의 그림 먼저
+    for x in (aruco, cubes):
+        if x is not None:
+            x.pop("image", None)
+    if pic:
+        r["image"] = pic
     return r
 
 
@@ -263,7 +291,7 @@ def install(app, log_dir, mode=lambda: "direct"):
         try:
             dcfg = DP.load_cfg(Path(log_dir) / "phone_depth.json")
             frame = DP.read_frame(dcfg, time.time())[0]
-            r = await asyncio.to_thread(_table_height, frame, dcfg)
+            r = await asyncio.to_thread(_table_height, frame, dcfg, _load(cfg_file))
             if r.get("ok"):
                 LAST_TABLE["r"] = {"d": r.get("d"), "source": r.get("source"), "in_range": r.get("in_range"), "t": time.time()}
             return JSONResponse(r)

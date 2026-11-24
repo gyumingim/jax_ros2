@@ -1534,7 +1534,7 @@ def _plan_style(a, P, style, out):
             "playable": status == "playable", "delivered_in_sim": None, "retries": [], "final_error_m": None,
             "joint_names": names, "dt": DT, "positions": traj_q, "unit": "rad",
             "peak_speed_deg_s": {"joint": names[int(spd.argmax())], "value": float(spd.max())},
-            "waypoints": wp, "problems": problems,
+            "waypoints": wp, "marks": dict(mk), "problems": problems,   # marks = {경유점: 닿는 프레임} → 재생 중 '지금 무슨 동작' (play_phase)
             "checks": {"grasp_grip_error_mm": round(grip_err * 1000, 2), "place_grip_error_mm": round(place_err * 1000, 2),
                        "pad_face_deg": {"pick": round(pad_face(qg, ycube), 1), "place": round(pad_face(qp, yplace), 1)},
                        "lowest_finger_above_table_mm": round((min(low) - s.table_z) * 1000, 1),
@@ -1627,8 +1627,16 @@ def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
     for route, legs in cands:
         legs = pre + legs
         frames = [(q0.copy(), f0.copy())]
+        ends = []                   # 구간마다 끝 프레임 → marks (재생 중 '지금 무슨 동작', play_phase.HOME_TEXT)
         for i, qs in enumerate(legs):
             frames += P.frames(qs, f0 if i == 0 else P.open_exit, P.open_exit, sp)
+            ends.append(len(frames) - 1)
+        mk = {"start": 0}
+        if pre:
+            mk["yaw0"] = ends[0]
+        if len(ends) > len(pre) + 1:
+            mk["exit_back"] = ends[len(pre)]   # 첫 길(손목 길·경유점 길 위)의 끝 = 나가기 경유점, 그 뒤는 경유점을 거꾸로
+        mk["home"] = ends[-1]
         low = [P.finger_low(q, f) for q, f in frames]
         arm_lo = [P.arm_low(q) for q, _ in frames]
         below = [i for i, z in enumerate(low) if z < s.table_z + TABLE_MARGIN or arm_lo[i] < s.table_z]
@@ -1644,7 +1652,7 @@ def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
                             f"가장 낮게 책상 위 {(min(low) - s.table_z) * 1000:+.1f} mm" + (" — 지금 자세부터 이미 낮음" if below[0] == 0 else ""))
         if over:
             problems.append("관절 한계 밖: " + ", ".join(over))
-        r = {"route": route, "legs": legs, "frames": frames, "low": low, "below": below, "problems": problems, "col": col}
+        r = {"route": route, "legs": legs, "frames": frames, "low": low, "below": below, "problems": problems, "col": col, "marks": mk}
         first = first or r
         if not problems:
             break
@@ -1658,7 +1666,7 @@ def _plan_home(now_deg, ik=None, cal_file=None, max_speed=30.0, d=None):
     status = "playable" if not problems else ("finger below table" if r["below"] else "check failed")
     return {**out, "status": status, "playable": status == "playable",
             "reason": f"HOME 으로 ({route}, {len(frames) * DT:.1f}초)" if not problems else "; ".join(problems),
-            "positions": traj_q, "problems": problems,
+            "positions": traj_q, "problems": problems, "marks": r["marks"],
             "checks": {"joint_space_fallback": [], "lowest_finger_above_table_mm": round((min(r["low"]) - s.table_z) * 1000, 1),
                        "column_min_mm": round(min(r["col"]) * 1000, 1), "route": route, "legs": len(r["legs"])},
             "seconds": round(len(frames) * DT, 1)}
