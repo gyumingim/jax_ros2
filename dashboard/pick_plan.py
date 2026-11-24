@@ -115,6 +115,9 @@ H_GRIP_ABOVE = 0.018        # 수평: 집는 점 = 큐브 중심 + 이만큼 (m)
                             # (손가락 2 가 아래) 내려온다 (손 세로 폭 75 mm > 큐브 50 mm) → 큐브 중심 높이(2.5 cm)로는 손가락이 책상 속. 4.3 cm 면 4~7 mm 위.
                             # 손목도 같은 높이라 팔 길이(어깨↔손목 46 cm)가 빠듯: 기본 책상(d 0.4775)에서 손목이 어깨 바로 아래 반지름 약 15 cm 안일 때만 닿는다
 H_TABLE_MARGIN = 0.003      # 수평: 손가락 충돌 상자가 책상 면보다 이만큼(m) 위 — 책상 검사(hand_ik.NO_TABLE)를 꺼도 지킨다
+STACK_GAP = 0.002           # 탑 쌓기(--place-level ≥ 1): 큐브 바닥을 아래 큐브 윗면보다 이만큼(m) 위에서 놓는다 (IK 오차로 누르지 않게)
+OBST_MARGIN = 0.008         # 다른 큐브(--obstacle)와 팔·손 메시 꼭짓점 사이 여유 (m, 책상 여유 TABLE_MARGIN 과 같은 값)
+OBST_CARRY_MARGIN = 0.005   # 들고 가는 큐브 ↔ 다른 큐브 여유 (m). 내려놓는 구간(놓을 자리 위 → 놓기)은 파고들지만 않으면 됨
 REASON = {1: "손목은 닿지만 손끝(집는 점)을 큐브에 못 맞춤", 0: "팔이 안 닿음"}   # hand_ik.graspcheck 와 같은 말
 
 
@@ -796,6 +799,12 @@ class Planner:
         np = self.np
         w0, w1 = self.wrist(qf), self.wrist(qt)
         for dz in TRANSIT_LIFTS:
+            if dz is None:   # 탑 쌓기만 (plan 이 stack_standoff 를 줌): 곧은 선 전에 '높은 쪽 끝 가까이에서는 그 높이 그대로' 길
+                for sd in (getattr(self, "stack_standoff", None) or ()):
+                    pts = self._standoff_pts(w0, w1, sd)
+                    r = self._track(pts, qf, qt, f_home, t_home) if pts else None
+                    if r is not None:
+                        return r
             for arc in ((False, True) if dz is not None else (False,)):
                 if dz is None:
                     legs = ((w0, w1, 1),)
@@ -819,6 +828,27 @@ class Planner:
                 if r is not None:
                     return r
         return None
+
+    def _standoff_pts(self, w0, w1, sd):
+        """탑 쌓기: 두 끝 중 높은 쪽(탑 위)에서 수평으로 sd (m) 까지는 그 높이를 지키고, 나머지를 곧은 선으로 (손목 중앙 길).
+        위로 먼저 올라가는 길(TRANSIT_LIFTS)이 팔 길이로 안 될 때, 곧은 선은 탑 옆을 비스듬히 스친다 — 탑 가까이에서만 높이를 지킨다."""
+        np = self.np
+        h = w1[:2] - w0[:2]
+        L = float(np.linalg.norm(h))
+        if L < 0.03 or abs(float(w1[2] - w0[2])) < 0.01:
+            return None
+        f = min(sd, 0.85 * L) / L
+        if w0[2] >= w1[2]:   # 탑에서 떠남: 수평으로 먼저, 그다음 비스듬히 아래로
+            m = np.array([w0[0] + h[0] * f, w0[1] + h[1] * f, w0[2]])
+            legs = ((w0, m, 0), (m, w1, 1))
+        else:                # 탑으로 감: 비스듬히 위로 먼저, 마지막은 수평으로
+            m = np.array([w1[0] - h[0] * f, w1[1] - h[1] * f, w1[2]])
+            legs = ((w0, m, 1), (m, w1, 2))
+        pts = []
+        for a, b, leg in legs:
+            n = max(1, int(math.ceil(float(np.linalg.norm(b - a)) / STEP_TRANSIT)))
+            pts += [(a + (b - a) * (k / n), leg, k / n) for k in range(1, n + 1)]
+        return pts
 
     def _arc_pts(self, a, b):
         """높이 유지 옆 이동을 어깨 아래 세로축(ARC 중심 = HOME 손목 xy) 둘레로: 반지름·각을 선형으로 (2026-11-21, 팔꿈치 ±100).
@@ -1000,6 +1030,50 @@ class Planner:
             low = min(low, float(c[2] - half * np.abs(rr[2]).sum()))
         return low
 
+    # ---- 다른 큐브 (탑 쌓기, 2026-11-24): 상자 = (중심 sim, 회전 3x3, 반 변). plan() 의 --obstacle 만 쓴다
+    @staticmethod
+    def _box_gap(np, V, c, R, half):
+        """점들 V 와 상자 사이 가장 짧은 거리 (m, 점이 상자 안이면 음수 = 파고든 깊이)."""
+        a = np.abs((V - c) @ R) - half
+        inside = (a < 0).all(axis=1)
+        if inside.any():
+            return -float((-a[inside]).min(axis=1).max())
+        o = np.maximum(a, 0.0)
+        return float(np.sqrt((o * o).sum(axis=1)).min())
+
+    def obstacle_gap(self, q, f, boxes):
+        """팔·손 메시 꼭짓점(기둥 검사와 같은 솎은 꼭짓점)과 상자들 사이 가장 짧은 거리 (m)."""
+        if not boxes:
+            return 9.0
+        s, np = self.s, self.np
+        d = s.d
+        d.qpos[s.fadr] = f
+        s.fk(q)
+        V = np.concatenate([self.col_verts[g] @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g] for g in self.col_geoms])
+        return min(self._box_gap(np, V, c, R, h) for c, R, h in boxes)
+
+    def carried_cube_gap(self, qg, pc, yaw_deg, qs, boxes):
+        """잡는 자세 qg 에서 손에 붙인 큐브(carried_cube_low 와 같은 가정)와 상자들 사이 가장 짧은 거리 (m, 겹치면 음수).
+        두 상자의 겉면 점(5x5x5 격자)을 서로의 상자에 대 본다."""
+        if not boxes:
+            return 9.0
+        np = self.np
+        ps, rs = self.s.fk(qg)
+        h = math.radians(yaw_deg)
+        rc = np.array([[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]])
+        rel_r, rel_p = rs.T @ rc, rs.T @ (np.asarray(pc) - ps)
+        half = float(self.s.E.OBJECT_HALF_SIZE)
+        g = np.linspace(-1.0, 1.0, 5)
+        pts = np.array([(x, y, z) for x in g for y in g for z in g if max(abs(x), abs(y), abs(z)) == 1.0])
+        best = 9.0
+        for q in qs:
+            p, r = self.s.fk(q)
+            c, rr = p + r @ rel_p, r @ rel_r
+            mine = c + (pts * half) @ rr.T
+            for bc, bR, bh in boxes:
+                best = min(best, self._box_gap(np, mine, bc, bR, bh), self._box_gap(np, bc + (pts * bh) @ bR.T, c, rr, half))
+        return best
+
     def finger_low(self, q, f):
         """손가락 충돌 상자 가장 낮은 z. 닫는 값이 CUBE_GRIP(패드 사이 = 큐브 50 mm, env) 을 넘는 프레임은 큐브가 손가락을
         거기서 막으므로 CUBE_GRIP 자세로 잰다 (명령은 팀처럼 1.0 — 남는 만큼이 쥐는 힘)."""
@@ -1029,19 +1103,54 @@ def plan(a):
     P = Planner(ik_dir, _cmd_ranges(cal_file), d=a.d, grasp=grasp)
     out = {"planner": "analytic",
            "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": P.table_d, "grasp": grasp}}
-    tried, r = {}, None
-    for style in (("vertical", "horizontal", "tilted") if grasp == "auto" else (grasp,)):
-        r = _plan_style(a, P, style, out)
-        g = r.get("grasp") or {"style": style, "tilt_deg": None, "text": f"집는 방향: {STYLE_KO[style]}"}
-        r["grasp"] = {"mode": grasp, **g, "tried": dict(tried)}
+    level, obst_real, _ = _stack_args(a, P)   # 탑 쌓기 (--place-level, --obstacle): 안 주면 0, [] — 예전과 똑같다
+    lifts = [0.0]
+    if level or obst_real:
+        side_m = 2.0 * float(P.s.E.OBJECT_HALF_SIZE)
+        out["real"].update(place_level=level, obstacles=obst_real, target_yaw=float(a.cube[2] if a.target_yaw is None else a.target_yaw))
+        # 옮겨 가는 높이 하한(z_clear)은 큐브 한 층 기준. 그 높이로 탑에 걸리면 한 번 더: 가장 높은 큐브(다른 큐브들·이번에 놓고 난 탑) 윗면 기준으로
+        # 올려서 (올리면 팔이 못 닿는 자리가 늘어 먼저 낮게 해 본다)
+        top = max([(o[3] + 1) * side_m for o in obst_real] + [(level + 1) * side_m])
+        if top > side_m + 1e-9:
+            lifts.append(top - side_m)
+        P.stack_standoff = (0.20, 0.16, 0.12, 0.08)
+    z0 = P.z_clear
+    tried, r, first = {}, None, None
+    for lift in lifts:
+        P.z_clear = z0 + lift
+        tried = {}
+        for style in (("vertical", "horizontal", "tilted") if grasp == "auto" else (grasp,)):
+            r = _plan_style(a, P, style, out)
+            g = r.get("grasp") or {"style": style, "tilt_deg": None, "text": f"집는 방향: {STYLE_KO[style]}"}
+            r["grasp"] = {"mode": grasp, **g, "tried": dict(tried)}
+            if r["status"] == "playable":
+                break
+            tried[style] = r.get("reason")
+        first = first or (r, tried)
         if r["status"] == "playable":
             break
-        tried[style] = r.get("reason")
+    if r["status"] != "playable":
+        r, tried = first   # 둘 다 안 되면 낮은 길의 결과 (이유가 더 알기 쉽다)
     if r["status"] != "playable" and grasp == "auto":
         r["grasp"]["tried"] = tried
         r["reason"] = f"{r.get('reason')} · 자동: 수직·수평도 안 됨 (수직: {tried.get('vertical')} / 수평: {tried.get('horizontal')})"
     r["plan_s"] = round(time.time() - t0, 2)
     return r
+
+
+def _stack_args(a, P):
+    """탑 쌓기 인자 (2026-11-24, 덧붙임): (놓는 층 K, 다른 큐브 [[x, y, yaw°, 층] 실좌표], 그 상자들 (중심 sim, 회전, 반 변)).
+    --place-level K = 큐브 바닥을 책상 위 K·5 cm (+ STACK_GAP) 에 놓는다. --obstacle 의 층 0 = 책상 위."""
+    s, np = P.s, P.np
+    level = int(getattr(a, "place_level", 0) or 0)
+    obst = [[float(v) for v in o] for o in (getattr(a, "obstacle", None) or [])]
+    side_m = 2.0 * float(s.E.OBJECT_HALF_SIZE)
+    boxes = []
+    for ox, oy, oyaw, olv in obst:
+        h = math.radians(oyaw + s.R.SIM_FROM_REAL_YAW)
+        boxes.append((np.asarray(s.to_sim([ox, oy, (olv + 0.5) * side_m - P.table_d]), dtype=float),
+                      np.array([[math.cos(h), -math.sin(h), 0.0], [math.sin(h), math.cos(h), 0.0], [0.0, 0.0, 1.0]]), side_m / 2))
+    return level, obst, boxes
 
 
 def _plan_style(a, P, style, out):
@@ -1054,20 +1163,27 @@ def _plan_style(a, P, style, out):
     cx, cy, cyaw = a.cube
     tx, ty = a.target
     tyaw = cyaw if a.target_yaw is None else a.target_yaw
+    level, _, boxes = _stack_args(a, P)
+    lift_z = level * 2.0 * float(s.E.OBJECT_HALF_SIZE) + (STACK_GAP if level else 0.0)   # 놓을 때 큐브 중심이 책상 위 큐브보다 이만큼 위
+    if hz and (level or boxes):
+        return {**out, "status": "unreachable", "reason": "탑 쌓기(다른 큐브 위·옆)는 수평 집기로 계획하지 않음 — 수직 또는 자동"}
     # 1) 지도와 같은 판정 (그 점 그대로, MuJoCo FK 검증 포함)
     for what, x, y in (("큐브", cx, cy), ("놓을 자리", tx, ty)):
+        up = lift_z if what == "놓을 자리" else 0.0
+        if up:
+            what = f"놓을 자리 {level + 1}층 (책상 위 {up * 100:.1f} cm)"
         if not P.on_table(s.to_sim([x, y, 0.0])):
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {P.off_table_why()}"}
-        code = 2 if hz else s.grasp_eval(P.S, x, y, verify=True, check=False)[0]   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로). 수평은 손목이 큐브 위가 아니라 옆
+        code = 2 if (hz or up) else s.grasp_eval(P.S, x, y, verify=True, check=False)[0]   # 팔이 닿나만 (2026-11-23: 집기 판정은 아래 실제 방향으로). 수평은 손목이 큐브 위가 아니라 옆
         if code == 0:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {REASON[code]}"}
-        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - D])),
+        ok, why, _ = P.point_check(np.asarray(s.to_sim([x, y, float(s.E.OBJECT_HALF_SIZE) - D + up])),
                                    yaws=[(cyaw if what == "큐브" else tyaw) + R.SIM_FROM_REAL_YAW], style=style)
         if not ok:
             return {**out, "status": "unreachable", "reason": f"{what} ({x:+.3f}, {y:+.3f}): {why}"}
     zc = float(s.E.OBJECT_HALF_SIZE) - D   # 큐브 중심 높이 (실좌표, 어깨 축 기준). 놓을 때도 큐브 바닥 = 책상
     pc = np.asarray(s.to_sim([cx, cy, zc]))      # 큐브 중심 (sim) — 손가락↔큐브 검사·들고 가는 큐브
-    pt = np.asarray(s.to_sim([tx, ty, zc]))
+    pt = np.asarray(s.to_sim([tx, ty, zc + lift_z]))   # 탑 쌓기면 그 층 높이
     gc, gt = (P.h_grip_target(pc), P.h_grip_target(pt)) if hz else (P.grip_target(pc), P.grip_target(pt))   # 집는 점 목표 = 큐브 중심 + GRIP_ABOVE_CENTER (수평은 H_GRIP_ABOVE)
     ycube = cyaw + R.SIM_FROM_REAL_YAW        # sim yaw (mod 90 만 쓴다)
     yplace = tyaw + R.SIM_FROM_REAL_YAW
@@ -1137,7 +1253,20 @@ def _plan_style(a, P, style, out):
     #    집기 = HOME→큐브 위 길 + 내려가기 의 관절 이동 합이 가장 작은 (큐브 위, 잡는 자세) 가지, 벌린 손가락이 큐브에 안 닿으면 확정
     #    놓기 = 그 큐브 위 자세에서 놓을 자리 위로 + 내려가기 + HOME 으로 의 합이 가장 작은 것, 빠질 때 놓은 큐브에 안 닿으면 확정
     ref_axis = lambda c: P.hand_axis(min(c, key=lambda q: float(np.abs(q - hx).max())))   # noqa: E731  손목 길 시작(HOME 쪽) 자세에 가장 가까운 잡는 자세의 손 축
-    target_pos = np.array([pt[0], pt[1], pc[2]])
+    target_pos = np.array([pt[0], pt[1], pt[2]])   # 놓인 큐브 중심 (탑 쌓기면 그 층)
+
+    def obst_low(fr):   # 다른 큐브와 팔·손 사이 가장 짧은 거리 (없으면 9)
+        return min((P.obstacle_gap(q, f, boxes) for q, f in fr), default=9.0) if boxes else 9.0
+
+    def obst_pen(q):   # 잡는·놓는 자세가 다른 큐브에 닿으면 벌점 (table_penalty 처럼 — 닿지 않는 손 방향을 고르게)
+        # 닫는 중간이 가장 넓다 (벌린 손가락 −60° 가 수평을 지나며 닫힘) → 벌림~쥠 사이 5 단계를 본다
+        return FALLBACK_COST if boxes and min(P.obstacle_gap(q, O + (C - O) * u, boxes) for u in (0.0, 0.25, 0.5, 0.75, 1.0)) < OBST_MARGIN else 0.0
+
+    stack = bool(level or boxes)
+
+    def split(path, at):   # 탑 쌓기: 손목 길을 둘로 (손가락을 탑에서 먼 쪽에서만 벌리고·좁히게). 길이 짧거나 없으면 None
+        k = int(round((len(path) - 1) * at)) if path is not None else 0
+        return (path[:k + 1], path[k:]) if 1 <= k < (len(path) - 1 if path is not None else 0) else None
 
     def pick_part(ap, clean_only):
         """clean_only: 이미 대체(안 깨끗한) 계획이 있으면 길을 못 찾은 후보는 아예 안 푼다 (시간)."""
@@ -1149,7 +1278,7 @@ def _plan_style(a, P, style, out):
         elif clean_only:
             return None
         for qa, qg, d1, up, t1 in t1s:
-            c = P.arc(t1 or [hx, qa]) + P.arc(d1) + (0.0 if t1 else FALLBACK_COST) + (0.0 if hz else P.table_penalty(qg))
+            c = P.arc(t1 or [hx, qa]) + P.arc(d1) + (0.0 if t1 else FALLBACK_COST) + (0.0 if hz else P.table_penalty(qg)) + obst_pen(qg)
             if best is None or c < best[0]:
                 best = (c, qa, qg, t1, d1, up)
         if best is None:
@@ -1162,11 +1291,16 @@ def _plan_style(a, P, style, out):
         i_exit = len(fr) - 1
         if hz:   # 수평: 손목 길 동안 손이 누우며 큐브 가까이 내려온다 → 떠나기 전에 다 벌리고 간다 (지도 _h_yaw_ok 도 다 벌린 손으로 본다)
             fr += P.frames([hx, hx], OX, O, sp, GRIP_S)
-        fr += P.frames(leg(t1, hx, qa, "HOME→큐브 위", fb), O if hz else OX, O, sp)
+        sp1 = split(t1, 0.6) if stack else None
+        if sp1:   # 탑 쌓기: 가는 길 앞 60 % 는 좁게 (탑 옆을 지날 수 있다), 큐브 가까이서 벌림
+            fr += P.frames(sp1[0], OX, OX, sp)
+            fr += P.frames(sp1[1], OX, O, sp)
+        else:
+            fr += P.frames(leg(t1, hx, qa, "HOME→큐브 위", fb), O if hz else OX, O, sp)
         i_above = len(fr) - 1
         fr += P.frames(d1, O, O, sp)
         hit = P.cube_hits(fr, range(len(fr)), pc, ycube)
-        bad = bool(hit or fb or P.below_table(fr) or floor_bad(fr[i_exit:]))
+        bad = bool(hit or fb or P.below_table(fr) or floor_bad(fr[i_exit:]) or obst_low(fr[i_exit:]) < OBST_MARGIN)
         return {"bad": bad, "c": c, "qa": qa, "qg": qg, "d1": d1, "up": up, "frames": fr, "above": i_above, "exit": i_exit, "hit": hit, "ap": ap, "fb": fb}
 
     def place_part(pk, bp, clean_only):
@@ -1181,7 +1315,7 @@ def _plan_style(a, P, style, out):
             return None
         for qb, qp, d2, t2, t3, out2, qo in ts:
             c = (P.arc(t2 or [qa, qb]) + P.arc(d2) + P.arc(out2) + P.arc(t3 or [qo, hx])
-                 + (0.0 if t2 else FALLBACK_COST) + (0.0 if t3 else FALLBACK_COST) + (0.0 if hz else P.table_penalty(qp)))
+                 + (0.0 if t2 else FALLBACK_COST) + (0.0 if t3 else FALLBACK_COST) + (0.0 if hz else P.table_penalty(qp)) + obst_pen(qp))
             if best is None or c < best[0]:
                 best = (c, qb, qp, t2, d2, t3, out2, qo)
         if best is None:
@@ -1204,18 +1338,39 @@ def _plan_style(a, P, style, out):
         add([qp, qp], C, O, "open", GRIP_S)
         add([qp, qp], O, O, "opened", GRIP_HOLD_S)
         add(out2, O, O, "lift2")
-        if len(P.exit) > 1:   # HOME = 0: 손목 길로 나감 경유점까지, 그다음 관절 경유점을 거꾸로 HOME 까지
-            add(leg(t3, qo, hx, "놓을 자리 위→HOME", fb), O, O if hz else OX, "exit_back")
-            if hz:   # 수평: 다 벌린 채 돌아와 책상 위 경유점에서 좁힌다
-                add([hx, hx], O, OX, "exit_back", GRIP_S)
-            fr.extend(P.exit_frames(OX, sp, back=True))
-            mk["home0"] = len(fr) - 1
-        else:
-            add(leg(t3, qo, home0, "놓을 자리 위→HOME", fb), O, OX, "home0")
-        if float(np.abs(home - home0).max()) > 0:
-            add([home0, home], OX, OX, "home")
+        n_tail, mk_tail = len(fr), dict(mk)
+        # 탑 쌓기: 돌아가는 길에서 손가락을 어디서 좁히나 — (길의 몇 할 지점, 그 자리에 서서 좁히나) 후보 중 탑·놓은 큐브에 안 닿는 첫 것
+        opts = [(at, stand) for stand in (False, True) for at in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9)] + [(None, False)]
+        for at, stand in (opts if stack and t3 is not None and len(P.exit) > 1 else ((None, False),)):
+            del fr[n_tail:]
+            mk.clear(); mk.update(mk_tail)
+            sp3 = split(t3, at) if at else None
+            if len(P.exit) > 1:   # HOME = 0: 손목 길로 나감 경유점까지, 그다음 관절 경유점을 거꾸로 HOME 까지
+                if sp3:   # 탑 쌓기: 돌아가는 길을 둘로 — 앞쪽은 벌린 채 (낮게 든 손은 좁히면 뒤따르는 손가락이 놓은 큐브를 스친다), 뒤쪽에서 좁힘
+                    #       (HOME 쪽 경유점으로 내려갈 때 벌린 손가락이 탑에 닿지 않게). 나누는 자리는 탑·놓은 큐브에 안 닿는 첫 값
+                    add(sp3[0], O, O, "away")
+                    if stand:
+                        add([sp3[0][-1], sp3[0][-1]], O, OX, "narrow", GRIP_S)
+                    add(sp3[1], OX if stand else O, OX, "exit_back")
+                else:
+                    add(leg(t3, qo, hx, "놓을 자리 위→HOME", fb), O, O if hz else OX, "exit_back")
+                if hz:   # 수평: 다 벌린 채 돌아와 책상 위 경유점에서 좁힌다
+                    add([hx, hx], O, OX, "exit_back", GRIP_S)
+                fr.extend(P.exit_frames(OX, sp, back=True))
+                mk["home0"] = len(fr) - 1
+            else:
+                add(leg(t3, qo, home0, "놓을 자리 위→HOME", fb), O, OX, "home0")
+            if float(np.abs(home - home0).max()) > 0:
+                add([home0, home], OX, OX, "home")
+            if at is None or not (P.cube_hits(fr, range(n_tail, mk["exit_back"] + 1), target_pos, yplace)
+                                  or obst_low(fr[n_tail:mk["exit_back"] + 1]) < OBST_MARGIN):
+                break
         hit = P.cube_hits(fr, range(mk["opened"], len(fr)), target_pos, yplace)
         bad = bool(hit or len(fb) > len(pk["fb"]) or P.below_table(fr[mk["grasp"]:]) or floor_bad(fr[mk["grasp"]:mk.get("exit_back", mk["lift2"]) + 1]))
+        if boxes and not bad:   # 다른 큐브 (HOME 나가기 경유점 길은 집기 쪽에서 이미 봄 — 같은 길 거꾸로)
+            bad = bool(obst_low(fr[mk["grasp"]:mk.get("exit_back", len(fr) - 1) + 1]) < OBST_MARGIN
+                       or P.carried_cube_gap(qg, pc, ycube, [fr[i][0] for i in range(mk["closed"], mk["above_place"] + 1)], boxes) < OBST_CARRY_MARGIN
+                       or P.carried_cube_gap(qg, pc, ycube, [fr[i][0] for i in range(mk["above_place"], mk["place"] + 1)], boxes) < -5e-4)
         return {"bad": bad, "c": c + pk["c"], "q": (qa, qg, qb, qp), "frames": fr, "marks": mk, "hit": hit, "bp": bp, "fb": fb}
 
     ie = s.arm.index("elbow")
@@ -1275,7 +1430,8 @@ def _plan_style(a, P, style, out):
               "close": "손가락 닫기", "closed": "기다림", "lift": "들기", "above_place": f"놓을 자리 위 (+{hb:g} cm, 수직에서 {bp['tilt_deg']}°)",
               "place": "내려감: 놓는 자세", "open": "손가락 열기", "opened": "기다림", "lift2": "들기",
               "home0": "HOME (shoulder_yaw 만 0)" if "home" in mk else "HOME", "home": "HOME",
-              "exit_out": "HOME 나감 경유점 (팔 돌림 → 어깨 젖히고 팔꿈치 접기 → 책상 위)", "exit_back": "HOME 들어가기 전 경유점 (책상 위)"}
+              "exit_out": "HOME 나감 경유점 (팔 돌림 → 어깨 젖히고 팔꿈치 접기 → 책상 위)", "exit_back": "HOME 들어가기 전 경유점 (책상 위)",
+              "away": "탑에서 멀어짐 (손가락 벌린 채)", "narrow": "서서 손가락 좁힘"}
     if hz:
         labels.update({"above_pick": f"큐브 옆 {ap['push_cm']:g} cm 의 위 (+{ha:g} cm, 손 수평)", "grasp": f"내려와 {ap['push_cm']:g} cm 밀어 넣음: 큐브 잡는 자세", "lift": f"들기 (곧게 위로 {ha:g} cm, 손 수평)",
                        "above_place": f"놓을 자리 위 (+{hb:g} cm, 손 수평)", "lift2": f"옆으로 {bp['push_cm']:g} cm 빠진 뒤 위로"})
@@ -1306,6 +1462,19 @@ def _plan_style(a, P, style, out):
     carry_low = P.carried_cube_low(qg, pc, ycube, [frames[i][0] for i in range(mk["lift"], mk["above_place"] + 1)]) - s.table_z
     spd = np.degrees(np.abs(np.diff(np.array(traj_q), axis=0)).max(axis=0)) / DT
     problems = []
+    obst = None
+    if boxes:   # 다른 큐브: 팔·손(모든 프레임), 들고 가는 큐브(옮길 때 여유, 내려놓을 때 안 파고듦)
+        og = [P.obstacle_gap(q, f, boxes) for q, f in frames]
+        near_ob = [i for i, g in enumerate(og) if g < OBST_MARGIN]
+        cg = P.carried_cube_gap(qg, pc, ycube, [frames[i][0] for i in range(mk["closed"], mk["above_place"] + 1)], boxes)
+        dg = P.carried_cube_gap(qg, pc, ycube, [frames[i][0] for i in range(mk["above_place"], mk["place"] + 1)], boxes)
+        obst = {"arm_min_mm": round(min(og) * 1000, 1), "carry_cube_min_mm": round(cg * 1000, 1), "lower_cube_min_mm": round(dg * 1000, 1)}
+        if near_ob:
+            problems.append(f"팔·손이 다른 큐브에 {OBST_MARGIN * 1000:.0f} mm 보다 가까이 감: 프레임 {near_ob[0]}~{near_ob[-1]} ({len(near_ob)}개), 가장 가까이 {min(og) * 1000:+.1f} mm")
+        if cg < OBST_CARRY_MARGIN:
+            problems.append(f"들고 가는 큐브가 다른 큐브에 {cg * 1000:+.1f} mm (여유 {OBST_CARRY_MARGIN * 1000:.0f} mm 아래)")
+        if dg < -5e-4:
+            problems.append(f"내려놓는 길에서 든 큐브가 다른 큐브를 {-dg * 1000:.1f} mm 파고듦")
     i_tab0, i_tab1 = mk.get("exit_out", 0), mk.get("exit_back", mk["lift2"])   # 손이 책상 위에 있는 구간 (HOME 나가기 경유점 뒤 ~ 들어가기 전)
     if hz:
         fl = [P.hand_floor(q, f) for q, f in frames[i_tab0:i_tab1 + 1]]
@@ -1357,6 +1526,7 @@ def _plan_style(a, P, style, out):
                        "pad_face_deg": {"pick": round(pad_face(qg, ycube), 1), "place": round(pad_face(qp, yplace), 1)},
                        "lowest_finger_above_table_mm": round((min(low) - s.table_z) * 1000, 1),
                        "column_min_mm": round(min(col) * 1000, 1),
+                       **({"obstacles": obst} if obst else {}),
                        "finger_cube_hits": {"pick": len(hit_pick), "place": len(hit_place)},
                        "descent_side_max_mm": {"pick": round(side(mk["above_pick"], mk["grasp"], pc) * 1000, 1),
                                                "place": round(side(mk["above_place"], mk["place"], pt) * 1000, 1)},
@@ -1747,6 +1917,10 @@ def main(argv=None):
                     help=f"책상 높이 = 어깨 축에서 책상 면까지 아래로 (m). 비우면 IK 기본 0.4775, {D_RANGE[0]:g} ~ {D_RANGE[1]:g} 만")
     ap.add_argument("--grasp", choices=GRASP_MODES, default="auto",
                     help="집는 방향: auto = 수직 → 수평 → 기울임 순서로 되는 것, vertical = 손 축 수직(위에서), horizontal = 손 축 수평(옆에서 밀어 넣기)")
+    ap.add_argument("--place-level", type=int, default=0,
+                    help="탑 쌓기: 큐브 바닥을 책상 위 K·5 cm 에 놓는다 (0 = 책상, 기본)")
+    ap.add_argument("--obstacle", type=float, nargs=4, action="append", default=None, metavar=("X", "Y", "YAW", "LEVEL"),
+                    help="다른 큐브 (실좌표 m·°, LEVEL 0 = 책상 위, 1 = 그 위 …). 여러 번 줄 수 있다")
     ap.add_argument("--ik", default=None)
     ap.add_argument("--save", default=None)
     add_run_args(ap)

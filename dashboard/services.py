@@ -18,6 +18,8 @@ Service 필드
   tab       화면 탭: conn(연결) | ik(역기구학) (그 탭에 카드가 그려진다)
   tail      화면에 보이는 로그 줄 수
 """
+import json
+import math
 import os
 import re
 import shlex
@@ -164,6 +166,33 @@ def _vision(p):
     return "exec " + " ".join(shlex.quote(x) for x in a)
 
 
+def _stack_args(p, cx, cy, tx, ty):
+    """탑 쌓기 탭이 주는 stack 칸 (JSON: {"for": [cube x, y, target x, y], "level": K, "target_yaw": °, "obstacles": [[x, y, yaw, 층], …]})
+    → pick_plan.py --place-level/--target-yaw/--obstacle. 칸 값은 실행 사이에 남으므로, "for" 가 이번 큐브·놓을 자리와 같을 때만 쓴다
+    (역기구학 탭·스크립트의 보통 계획이 지난 탑 쌓기 값으로 돌지 않게). 팀 시뮬 계획엔 이 옵션이 없다."""
+    raw = (p.get("stack") or "").strip()
+    if not raw or str(p.get("team_sim") or "").strip().lower() in ("1", "true", "on", "yes"):
+        return []
+    try:
+        d = json.loads(raw)
+        f = [float(v) for v in d["for"]]
+        if len(f) != 4 or max(abs(u - v) for u, v in zip(f, (cx, cy, tx, ty))) > 5e-4:
+            return []
+        lv = int(d.get("level") or 0)
+        obst = [[float(v) for v in o] for o in (d.get("obstacles") or [])]
+        if not 0 <= lv <= 8 or len(obst) > 24 or any(len(o) != 4 or not all(math.isfinite(v) for v in o) or max(abs(o[0]), abs(o[1])) > 1.0
+                                                     or not 0 <= o[3] <= 8 or o[3] != int(o[3]) for o in obst):
+            raise ValueError
+        out = ["--place-level", str(lv)]
+        if d.get("target_yaw") is not None:
+            out += ["--target-yaw", f"{_num(d['target_yaw'], 'target yaw', -360, 360):g}"]
+        for o in obst:
+            out += ["--obstacle", f"{o[0]:g}", f"{o[1]:g}", f"{o[2]:g}", str(int(o[3]))]
+        return out
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("stack: 탑 쌓기 값이 틀림 (탑 쌓기 탭에서 다시)")
+
+
 def _pick_args(p):
     cx = _num(p.get("cube_x"), "cube x", -1.0, 1.0)
     cy = _num(p.get("cube_y"), "cube y", -1.0, 1.0)
@@ -180,6 +209,7 @@ def _pick_args(p):
         if g not in ("vertical", "horizontal"):
             raise ValueError(f"집는 방향: auto / vertical / horizontal ({g!r})")
         a += ["--grasp", g]
+    a += _stack_args(p, cx, cy, tx, ty)
     ik = (p.get("ik") or "").strip()
     if ik:
         if not re.fullmatch(r"[A-Za-z0-9_./~:\\-]{1,200}", ik):
@@ -275,6 +305,7 @@ SERVICES = [
                     Param("max_speed", "max_speed", "30.0", "°/s, arm_control_node 의 max_speed_deg_s 이하"),
                     Param("d", "책상 높이 d (선택)", "", "어깨 축에서 책상 면까지 아래로 m, 비우면 IK 기본 0.4775 · 대시보드 계획은 0.44~0.53"),
                     Param("grasp", "집는 방향", "auto", "auto 자동(수직 → 수평 → 기울임) / vertical 수직(위에서) / horizontal 수평(옆에서 밀어 넣기)"),
+                    Param("stack", "탑 쌓기 (탑 쌓기 탭이 채움)", "", "JSON: 놓는 층·다른 큐브 — 이번 큐브·놓을 자리와 같을 때만 쓴다"),
                     Param("ik", "ik (선택)", "", "team-jax/IK 경로, 비우면 $JAX_IK_DIR·~/IK"),
                     Param("team_sim", "팀 시뮬 계획 (물리)", "", "1 이면 팀 계획 (pick_place, MuJoCo 물리), 비우면 대시보드 해석 IK 계획")]),
     Service("vcan_test", "vcan 시험 (launch_vcan.sh)", _vcan, kind="once", group="시험",

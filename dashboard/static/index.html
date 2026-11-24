@@ -100,6 +100,19 @@
   <!-- 강화학습 탭 끝 -->
   <!-- 휴대폰 카메라 탭: 내용·탭 버튼은 전부 static/phone.js 가 만든다 -->
   <section class="page" id="page-phone" data-tab="phone" hidden></section>
+  <!-- 탑 쌓기 탭 (stack.js + stack_api.py). 탭 버튼·내용은 stack.js 가 만든다 -->
+  <section class="page" id="page-stack" data-tab="stack" hidden>
+    <div class="split">
+      <div class="split-l" id="stack-left"></div>
+      <div class="split-r">
+        <div class="card v3d-card">
+          <h3>3D <span class="legend"><span style="color:#2563eb;font-weight:700">파랑</span> 탑 · <span style="color:#ea580c;font-weight:700">주황</span> 옮길 큐브 · <span style="color:#16a34a;font-weight:700">초록</span> 놓을 자리</span></h3>
+          <div class="v3d" id="v3d-stack"></div>
+          <div id="stack-ctl"></div>
+        </div>
+      </div>
+    </div>
+  </section>
   <details class="foot"><summary>정보</summary><div id="foot"></div></details>
 </main>
 <div class="toasts" id="toasts"></div>
@@ -108,5 +121,6 @@
 <script type="module" src="/static/viewer.js"></script>
 <script src="/static/rl.js"></script><!-- 강화학습 탭 -->
 <script src="/static/phone.js"></script><!-- 휴대폰 카메라 탭 -->
+<script src="/static/stack.js"></script><!-- 탑 쌓기 탭 -->
 </body>
 </html>
