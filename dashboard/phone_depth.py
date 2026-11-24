@@ -303,6 +303,23 @@ def run_dir(cfg):
     return cfg["run_dir"] or os.path.join(cfg["repo_dir"], "phone_stereo", "runs", "dash")
 
 
+def read_frame(cfg, now, max_age_s=None):
+    """폰 프로그램이 마지막으로 저장한 화면 (<결과 폴더>/inference.png, 1초쯤마다) → (BGR 배열, 나이 s, 수정 시각) 또는 (None, 나이 | None, None).
+    ArUco (phone_detect) 에 넣을 프레임 한 장이다. max_age_s (기본 = cfg max_age_s) 보다 오래됐거나 쓰는 중이라 못 읽으면 None.
+    주의: 이 그림에는 폰 프로그램이 객체 테두리·글자를 덧그려서 마커가 가려질 수 있다 — 영상 스트림을 직접 받게 되면 이 함수만 바꾼다."""
+    path = os.path.join(run_dir(cfg), "inference.png")
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return None, None, None
+    age = now - mtime
+    if age > (cfg["max_age_s"] if max_age_s is None else max_age_s):
+        return None, age, None
+    import cv2
+    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    return (img, age, mtime) if img is not None else (None, age, None)
+
+
 def evaluate(cfg, table_d, now, prev=None):
     """지금 inference.json → 화면에 줄 dict: ok, reason / cube{x, y, yaw_deg}, z, cam, dims_mm, yaw_from, warn[], age_s."""
     path = os.path.join(run_dir(cfg), "inference.json")

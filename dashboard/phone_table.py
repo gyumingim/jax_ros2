@@ -118,7 +118,7 @@ def measure_aruco(image_bytes):
     import cv2
     import numpy as np
     out = {"ok": False, "refs": [], "warn": []}
-    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    img = PD.as_image(image_bytes)
     if img is None:
         return {**out, "reason": "사진을 못 읽음 (JPEG·PNG 만)"}
     k = PD.MAX_SIDE / max(img.shape[:2])

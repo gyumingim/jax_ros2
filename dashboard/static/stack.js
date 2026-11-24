@@ -20,15 +20,7 @@
   showTab = function (id) { _showTab(id); if (curTab === "stack") onShow(); };
 
   // ---------- 화면 ----------
-  const pick = (capture) => {
-    const inp = el("input", { type: "file", accept: "image/*", hidden: true });
-    if (capture) inp.setAttribute("capture", "environment");
-    inp.addEventListener("change", () => { if (inp.files[0]) detect(inp.files[0]); inp.value = ""; });
-    return inp;
-  };
-  const cam = pick(true), gal = pick(false);
   const show = (node, text, cls, small) => { node.hidden = false; node.className = "result " + (cls || ""); node.replaceChildren(text, small ? el("small", {}, small) : ""); };
-  ST.bShot = el("button", { class: "btn st-big", onclick: () => cam.click() }, "사진 찍기");
   ST.img = el("img", { class: "st-img", hidden: true, alt: "찾은 큐브" });
   ST.res = el("div", { class: "result", hidden: true });
   ST.list = el("div", { class: "st-list", hidden: true });
@@ -46,7 +38,7 @@
   ST.bReset = el("button", { class: "btn line", onclick: reset }, "처음부터");
   ST.bGo = el("button", { class: "btn st-big", disabled: true, onclick: go }, "탑 쌓기");
   ST.bStop = el("button", { class: "btn red", onclick: () => post(VIRT() ? "/api/ik/stop_virtual" : "/api/ik/stop_real") }, "■ 멈춤");
-  ST.note = el("div", { class: "result" }, "사진을 찍으면 큐브 목록이 나온다");
+  ST.note = el("div", { class: "result" }, "큐브를 알아보면 목록이 나온다 (실시간 인식 준비 중)");
   ST.bPlay = el("button", { class: "btn", onclick: () => { if (!T.traj) return; if (T.frame >= T.traj.positions.length - 1) T.frame = 0; T.playing = !T.playing; T.last = performance.now(); } }, "▶ 재생");
   ST.slider = el("input", { type: "range", min: 0, max: 0, step: 1, value: 0 });
   ST.slider.addEventListener("input", () => { T.frame = parseFloat(ST.slider.value); T.playing = false; draw(); });
@@ -69,10 +61,9 @@
 @media (max-width: 980px) { #page-stack .split-r { order: 1; } }
 @media (max-width: 640px) { #page-stack .frow .field.wide { width: 100%; } }`));
   $("#stack-left").append(
-    el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "사진 찍기"),
-    el("div", { class: "card" }, ST.bShot, cam, gal,
-      el("div", { class: "help", style: "margin:10px 0 0" }, "기준 종이와 큐브 윗면 마커가 다 나오게, 비스듬히 위에서 한 장 (바로 위에서 찍으면 층을 못 가린다). ",
-        el("a", { href: "#", onclick: (e) => { e.preventDefault(); gal.click(); } }, "찍어 둔 사진 고르기")),
+    el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브 인식"),
+    el("div", { class: "card" },
+      el("div", { class: "result warn" }, "실시간 인식 준비 중", el("small", {}, "사진 올리기는 없앴다 — 거치한 폰의 영상에서 큐브들을 계속 알아보는 기능이 들어올 자리")),
       ST.img, ST.res, ST.list),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "탑"),
     el("div", { class: "card" },
@@ -97,27 +88,7 @@
           el("li", {}, "기본 책상 높이에서는 3층까지 (4층째는 팔이 못 닿는다).")))));
   $("#stack-ctl").append(el("div", { class: "tbar" }, ST.bPlay, ST.slider), el("div", { class: "tbar" }, el("span", { class: "spacer" }), ST.num));
 
-  // ---------- 사진 → 큐브 목록 ----------
-  async function shrink(file) {   // phone.js 와 같게: 긴 변 2000 px JPEG
-    try {
-      const bmp = await createImageBitmap(file);
-      const k = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
-      const cv = el("canvas", { width: Math.round(bmp.width * k), height: Math.round(bmp.height * k) });
-      cv.getContext("2d").drawImage(bmp, 0, 0, cv.width, cv.height);
-      return await new Promise((ok) => cv.toBlob((b) => ok(b || file), "image/jpeg", 0.9));
-    } catch (e) { return file; }
-  }
-  async function detect(file) {
-    if (ST.busy) return;
-    ST.busy = true;
-    show(ST.res, "큐브 찾는 중…", "run");
-    let r;
-    try {
-      r = await (await fetch("/api/stack/detect", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: await shrink(file) })).json();
-    } catch (e) { r = { ok: false, reason: "서버 연결 실패" }; }
-    ST.busy = false;
-    setDet(r, true);
-  }
+  // ---------- 인식 결과 → 큐브 목록 (사진 올리기는 없앴다. 결과는 서버의 /api/stack/last — 실시간 인식이 채울 자리) ----------
   function setDet(r, fresh) {
     ST.det = r; ST.grasp = {}; ST.step = null;
     if (fresh) { ST.needPhoto = false; ST.played = false; ST.sawRun = false; }
@@ -426,8 +397,6 @@
       show(ST.note, `${ST.head}: 재생 끝 — 사진을 다시 찍기`, "warn", (pb.reason ? `마지막: ${pb.reason} · ` : "") + "놓인 자리와 탑 높이를 사진으로 확인한 뒤 다음 큐브로 간다");
     }
     const st = ST.step;
-    ST.bShot.disabled = ST.busy || !!pb.running;
-    ST.bShot.textContent = ST.busy ? "찾는 중…" : ST.det ? "사진 다시 찍기" : "사진 찍기";
     ST.bGo.disabled = !st || !st.ok || st.done || ST.going || !!pb.running || ST.needPhoto || !!listed() || (!ST.lock && ST.spotOk === false);
     if (ST.mapD !== tableD()) mapLoad();
     ST.bGo.textContent = pb.running ? `재생 중 ${pb.frame}/${pb.frames - 1}` : ST.going ? "계획 중…" : ST.needPhoto ? "사진을 다시 찍기" : st && st.ok && st.done ? "탑 완성"

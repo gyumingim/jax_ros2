@@ -24,6 +24,21 @@ DEFAULT_CFG = {"x": -0.05, "y": -0.32, "rot_deg": 0.0, "cube_h": 0.05}   # 종�
 MAX_SIDE = 2000   # 이보다 큰 사진은 줄여서 찾는다
 
 
+def as_image(image):
+    """사진 바이트 (JPEG·PNG) 또는 이미 풀린 그림 (BGR numpy 배열 — 영상 프레임) → BGR 배열 (못 읽으면 None).
+    detect·detect_cubes·phone_table.measure_aruco 가 둘 다 받게 하는 한 곳. 배열은 복사한다 (부른 쪽 프레임에 안 그린다)."""
+    import cv2
+    import numpy as np
+    if isinstance(image, np.ndarray):
+        if image.ndim == 2:
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        return image[:, :, :3].copy() if image.ndim == 3 and image.shape[2] >= 3 and image.dtype == np.uint8 else None
+    try:
+        return cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+    except (TypeError, ValueError, cv2.error):
+        return None
+
+
 def _dictionary(cv2):
     return cv2.aruco.Dictionary_get(getattr(cv2.aruco, DICT_NAME))
 
@@ -75,7 +90,7 @@ def detect(image_bytes, cfg=None):
     import numpy as np
     cfg = {**DEFAULT_CFG, **(cfg or {})}
     out = {"ok": False, "refs": [], "cube_seen": False, "warn": [], "cfg": cfg}
-    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    img = as_image(image_bytes)
     if img is None:
         return {**out, "reason": "사진을 못 읽음 (JPEG·PNG 만)"}
     k = MAX_SIDE / max(img.shape[:2])
@@ -152,7 +167,7 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     import numpy as np
     cfg = {**DEFAULT_CFG, **(cfg or {})}
     out = {"ok": False, "refs": [], "cubes": [], "warn": [], "cfg": cfg}
-    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    img = as_image(image_bytes)
     if img is None:
         return {**out, "reason": "사진을 못 읽음 (JPEG·PNG 만)"}
     k = MAX_SIDE / max(img.shape[:2])

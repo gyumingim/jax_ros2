@@ -10,7 +10,8 @@
 #page-phone .frow .field { width: 84px; }
 #page-phone .frow .field input { font-size: 16px; }   /* iOS 가 입력 때 화면을 확대하지 않게 */
 #page-phone ol.help { padding-left: 20px; margin: 10px 0 0; line-height: 1.6; }
-#page-phone .ph-sw { display: flex; margin-bottom: 4px; }
-#page-phone .ph-sw button { flex: 1; justify-content: center; min-height: 44px; }
+#page-phone .ph-src { display: block; font-size: 14.5px; margin-top: 4px; }   /* 결과 한 줄 아래: 어느 것을 썼나 (ArUco / 뎁스) */
+#page-phone .ph-stat { margin: 10px 0 0; }
+#page-phone .ph-h3 { font-size: 14px; color: var(--sub); margin: 16px 0 8px; }
 #page-phone .frow .field.ph-wide { width: 100%; }
 #page-phone .ph-cmd { display: block; margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: var(--fill); font-size: 12.5px; overflow-wrap: anywhere; user-select: all; }

@@ -1,22 +1,26 @@
-"""대시보드 '휴대폰 카메라' 탭의 서버 쪽: 휴대폰 사진 → 큐브 자리 (phone_detect.py, ArUco). 팔은 여기서 안 움직인다.
+"""대시보드 '휴대폰 카메라' 탭의 서버 쪽: 큐브 자리 = 거치한 폰의 프레임에서 ArUco (phone_detect.py) + 폰 뎁스 (phone_depth.py) 를
+있는 대로 합친 것 (phone_fuse.py). 모드도 사진 올리기도 없다 (2026-11-24 뺌 — 인식은 폰 스테레오 프로그램의 프레임으로만). 팔은 여기서 안 움직인다.
 
 server.py 는 install(app, log_dir) 한 줄만 가진다. 계획·재생은 화면(phone.js)이 원래 있던 경로
 (/api/svc/pick_dry/start → 역기구학 탭의 재생 버튼과 같은 확인창)를 그대로 쓴다.
 
-    POST /api/phone/detect   본문 = 사진 바이트 (JPEG/PNG, multipart 아님)  → {ok, cube{x,y,yaw_deg}, refs, warn, image(data URL), …}
+    GET  /api/phone/live?d=<책상 높이>    화면이 1초마다 읽는 것. 지금 프레임 (phone_depth.read_frame) + 지금 뎁스 결과 → phone_fuse.find
+                             → {ok, cube{x,y,yaw_deg}, used 'aruco'|'depth', sources, text '출처: …', blocked, block, check, warn, note, reason,
+                                aruco{…}, depth{…}, image (data URL, 마커를 그린 프레임 — 마커가 보일 때), depth_image_mtime, fresh, pipeline}
+                             프레임·결과 파일이 안 바뀌었으면 직전 계산을 그대로 준다.
     GET  /api/phone/config   기준 종이가 놓인 자리 {x, y, rot_deg, cube_h}
     POST /api/phone/config   {x, y, rot_deg, cube_h} 저장 (logs/phone_cam.json)
     GET  /api/phone/sheet    인쇄물 PDF (dashboard/phone_markers/phone_markers.pdf)
 
-'세그먼트(폰 뎁스)' 모드 (phone_depth.py: 폰 스테레오 프로그램 SteroDepthSeg 의 inference.json 을 읽는다):
-    GET  /api/phone/depth?d=<책상 높이>   지금 결과 {ok, cube{x,y,yaw_deg}, warn, age_s, pipeline{alive, …}, image_mtime, …}
+폰 뎁스 (phone_depth.py: 폰 스테레오 프로그램 SteroDepthSeg 의 inference.json·inference.png 를 읽는다):
+    GET  /api/phone/depth?d=<책상 높이>   뎁스만의 지금 결과 {ok, cube, warn, age_s, pipeline{alive, …}, image_mtime, …} (화면은 안 씀)
     GET  /api/phone/depth/image           그 프로그램이 저장한 inference.png
     GET  /api/phone/depth/config, POST    {repo_dir, run_dir, camera_to_robot[6], yaw_manual_deg, …} (logs/phone_depth.json)
     POST /api/phone/depth/start, /stop    폰 스테레오 프로그램 켜기·끄기 (venv_ffs, --headless; 끌 때 Ctrl+C 와 같은 SIGINT)
 
 '책상 높이 재기' (phone_table.py: 거치대의 폰이 CAD 자리에 있다고 보고 책상 높이 d 를 잰다 — 보정 없음):
-    POST /api/phone/table_height          본문 = 사진 바이트 (기준 종이가 보이게; 비우면 뎁스만) → {ok, d, source, text, in_range, tilt_deg,
-                                          aruco{…}, depth{…}, diff_mm, warn, image}. 뎁스 = <결과 폴더>/rgbd/rgbd.npz 가 새것일 때만
+    POST /api/phone/table_height          본문 없음. 지금 프레임의 기준 종이 (ArUco) 와 뎁스 맵 (<결과 폴더>/rgbd/rgbd.npz 가 새것일 때) 으로
+                                          → {ok, d, source, text, in_range, tilt_deg, aruco{…}, depth{…}, diff_mm, warn, image}
 """
 import asyncio
 import base64
@@ -34,11 +38,11 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import phone_depth as DP
 import phone_detect as PD
+import phone_fuse as PF
 import phone_table as PT
 
 HERE = Path(__file__).resolve().parent
 SHEET = HERE / "phone_markers" / "phone_markers.pdf"
-MAX_BYTES = 25 << 20
 LIMITS = {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "rot_deg": (-180.0, 180.0), "cube_h": (0.0, 0.3)}
 
 
@@ -66,21 +70,34 @@ def _jpeg(r):
     return r
 
 
-def _run(data, cfg):
-    return _jpeg(PD.detect(data, cfg))
+def _find(image, cam_cfg, depth):
+    """PF.find (프레임 배열 | None + 방금 읽은 뎁스 결과) 를 화면에 줄 모양으로: 마커를 그린 그림은 image (data URL)."""
+    r = PF.find(image, cam_cfg, depth)
+    if r["aruco"] is not None:
+        if r["aruco"].get("refs"):
+            _jpeg(r["aruco"])
+        r["aruco"].pop("annotated", None)
+        if "image" in r["aruco"]:
+            r["image"] = r["aruco"].pop("image")
+        r["aruco"].pop("cfg", None)
+    return r
 
 
-def _table_height(data, depth_cfg):
-    """사진이 있으면 ArUco 로, 폰 뎁스 맵이 새것이면 그것으로도 재서 한 줄로 (phone_table.combine)."""
+def _table_height(image, depth_cfg):
+    """프레임 (BGR 배열 | None) 의 기준 종이로, 폰 뎁스 맵이 새것이면 그것으로도 재서 한 줄로 (phone_table.combine)."""
     try:
         import hand_ik
         PT.D_RANGE = tuple(hand_ik.D_RANGE)     # 계획이 받는 범위 한 곳
     except Exception:
         pass
-    aruco = _jpeg(PT.measure_aruco(data)) if data else None
+    aruco = _jpeg(PT.measure_aruco(image)) if image is not None else None
     depth = PT.measure_depth(DP.run_dir(depth_cfg), time.time())
-    if aruco is not None and not depth["ok"] and (depth.get("missing") or depth.get("stale")):
-        depth = None                            # 사진으로 재는 중이고 폰 뎁스는 안 켜져 있음 — 말할 것 없음
+    if aruco is None and depth.get("missing"):
+        return {"ok": False, "warn": [], "reason": "폰 프로그램의 새 프레임이 없음 — 폰 프로그램을 켜고 (거치한 폰이 책상의 기준 종이를 보게) 다시"}
+    if aruco is not None and aruco["ok"] and not depth["ok"] and (depth.get("missing") or depth.get("stale")):
+        depth = None                            # 프레임으로 쟀고 뎁스 맵은 안 켜져 있음 — 말할 것 없음
+    if aruco is not None and not aruco["ok"] and depth["ok"]:
+        aruco = None                            # 종이가 안 보여 뎁스 맵으로만
     r = PT.combine(aruco, depth)
     if aruco is not None and "image" in aruco:
         r["image"] = aruco.pop("image")
@@ -187,16 +204,6 @@ def install(app, log_dir):
     _install_depth(app, log_dir)
     cfg_file = Path(log_dir) / "phone_cam.json"
 
-    @app.post("/api/phone/detect")
-    async def _detect(req: Request):
-        data = await req.body()
-        if not data or len(data) > MAX_BYTES:
-            return JSONResponse({"ok": False, "reason": "사진이 없거나 너무 큼 (25 MB 까지)"}, status_code=400)
-        try:
-            return JSONResponse(await asyncio.to_thread(_run, data, _load(cfg_file)))
-        except Exception as e:
-            return JSONResponse({"ok": False, "reason": f"찾는 중 오류: {type(e).__name__}: {e}"})
-
     @app.get("/api/phone/config")
     def _get():
         return JSONResponse({"ok": True, "cfg": _load(cfg_file), "default": PD.DEFAULT_CFG, "sheet": SHEET.is_file(),
@@ -217,12 +224,11 @@ def install(app, log_dir):
         return JSONResponse({"ok": True, "cfg": cfg, "msg": "기준 종이 자리 저장"})
 
     @app.post("/api/phone/table_height")
-    async def _table(req: Request):
-        data = await req.body()
-        if len(data) > MAX_BYTES:
-            return JSONResponse({"ok": False, "reason": "사진이 너무 큼 (25 MB 까지)"}, status_code=400)
+    async def _table():
         try:
-            return JSONResponse(await asyncio.to_thread(_table_height, data, DP.load_cfg(Path(log_dir) / "phone_depth.json")))
+            dcfg = DP.load_cfg(Path(log_dir) / "phone_depth.json")
+            frame = DP.read_frame(dcfg, time.time())[0]
+            return JSONResponse(await asyncio.to_thread(_table_height, frame, dcfg))
         except Exception as e:
             return JSONResponse({"ok": False, "reason": f"재는 중 오류: {type(e).__name__}: {e}"})
 
@@ -235,17 +241,18 @@ def install(app, log_dir):
 
 def _install_depth(app, log_dir):
     cfg_file = Path(log_dir) / "phone_depth.json"
+    cam_cfg_file = Path(log_dir) / "phone_cam.json"
     pipe = Pipeline(log_dir)
     prev = {"pos": None, "t": 0.0}     # 직전에 고른 자리 (3초 지나면 잊음) — 후보가 여럿일 때 프레임마다 바뀌지 않게
 
-    @app.get("/api/phone/depth")
-    def _depth(d: str = ""):
-        try:
-            td = float(d) if d.strip() else 0.4775
-            if not (math.isfinite(td) and 0.2 <= td <= 0.8):
-                raise ValueError
-        except ValueError:
-            return JSONResponse({"ok": False, "reason": "책상 높이 d 숫자 (0.2~0.8 m)"}, status_code=400)
+    def _td(d):
+        td = float(d) if d.strip() else 0.4775
+        if not (math.isfinite(td) and 0.2 <= td <= 0.8):
+            raise ValueError
+        return td
+
+    def _eval(td):
+        """지금 뎁스 결과 + 그림 시각 + 폰 프로그램 상태."""
         cfg = DP.load_cfg(cfg_file)
         now = time.monotonic()
         r = DP.evaluate(cfg, td, time.time(), prev["pos"] if now - prev["t"] <= 3.0 else None)
@@ -257,7 +264,51 @@ def _install_depth(app, log_dir):
             r["image_mtime"] = None
         pid = pipe.pid()
         r["pipeline"] = {"alive": pid is not None, "pid": pid, "log": pipe.tail() if pid is None else pipe.tail(3)}
-        return JSONResponse(r)
+        return r
+
+    @app.get("/api/phone/depth")
+    def _depth(d: str = ""):
+        try:
+            td = _td(d)
+        except ValueError:
+            return JSONResponse({"ok": False, "reason": "책상 높이 d 숫자 (0.2~0.8 m)"}, status_code=400)
+        return JSONResponse(_eval(td))
+
+    live = {"key": None, "r": None, "lock": threading.Lock()}
+
+    def _live(td):
+        """지금 프레임 + 지금 뎁스 결과를 합친다. 파일·설정·높이가 그대로면 직전 계산을 돌려준다 (나이·프로그램 상태만 새로)."""
+        cfg, now = DP.load_cfg(cfg_file), time.time()
+        cam_cfg = _load(cam_cfg_file)
+        try:
+            jm = os.stat(os.path.join(DP.run_dir(cfg), "inference.json")).st_mtime
+        except OSError:
+            jm = None
+        with live["lock"]:
+            frame, _, fm = DP.read_frame(cfg, now)
+            key = (jm, fm, td, json.dumps(cfg, sort_keys=True), json.dumps(cam_cfg, sort_keys=True))
+            dep = _eval(td)
+            pl = dep.pop("pipeline")
+            fresh = dep["age_s"] is not None and not dep.get("stale")
+            if fresh and live["key"] == key and live["r"] is not None:
+                r = dict(live["r"])
+                if r.get("depth"):
+                    r["depth"] = {**r["depth"], "age_s": dep["age_s"]}
+            else:
+                r = _find(frame, cam_cfg, dep)
+                live.update(key=key, r=r)
+            return {**r, "pipeline": pl, "fresh": fresh, "depth_image_mtime": dep["image_mtime"] if fresh else None}
+
+    @app.get("/api/phone/live")
+    async def _live_get(d: str = ""):
+        try:
+            td = _td(d)
+        except ValueError:
+            return JSONResponse({"ok": False, "reason": "책상 높이 d 숫자 (0.2~0.8 m)"}, status_code=400)
+        try:
+            return JSONResponse(await asyncio.to_thread(_live, td))
+        except Exception as e:
+            return JSONResponse({"ok": False, "reason": f"찾는 중 오류: {type(e).__name__}: {e}", "warn": [], "pipeline": {}})
 
     @app.get("/api/phone/depth/image")
     def _image():
@@ -287,6 +338,7 @@ def _install_depth(app, log_dir):
         cfg_file.parent.mkdir(parents=True, exist_ok=True)
         cfg_file.write_text(json.dumps(saved, ensure_ascii=False, indent=1))
         prev["pos"] = None
+        live["key"] = None
         return JSONResponse({"ok": True, "cfg": DP.load_cfg(cfg_file), "msg": "폰 뎁스 설정 저장"})
 
     @app.post("/api/phone/depth/start")

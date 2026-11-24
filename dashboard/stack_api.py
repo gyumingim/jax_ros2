@@ -1,10 +1,10 @@
-"""대시보드 '탑 쌓기' 탭의 서버 쪽: 휴대폰 사진 → 큐브 여러 개 (phone_detect.detect_cubes, 큐브마다 다른 ArUco) → 다음에 옮길 큐브 한 걸음.
+"""대시보드 '탑 쌓기' 탭의 서버 쪽: 프레임 → 큐브 여러 개 (phone_detect.detect_cubes, 큐브마다 다른 ArUco) → 다음에 옮길 큐브 한 걸음.
+사진 올리기 (POST /api/stack/detect) 는 없앴다 (2026-11-24) — 인식은 detect_frame(프레임 배열, 종이 자리) 을 부르는 쪽 (실시간 인식, 준비 중) 이 한다.
 팔은 여기서 안 움직인다 — 계획·재생은 화면(static/stack.js)이 원래 있던 경로를 그대로 쓴다:
 계획 = POST /api/svc/pick_dry/start (역기구학 탭의 계획, stack 칸으로 놓는 층·다른 큐브를 넘김), 재생 = 그 탭의 재생 버튼(확인창·검사 그대로).
 server.py 는 install(app, log_dir) 한 줄만 가진다.
 
-    POST /api/stack/detect   본문 = 사진 바이트 (JPEG/PNG) → {ok, cubes: [{id, x, y, yaw_deg, level, top_cm}], refs, warn, image, t}
-    GET  /api/stack/last     마지막 detect 결과 (폰으로 찍고 PC 화면에서도 보게). 없으면 {ok: false}
+    GET  /api/stack/last     마지막 detect_frame 결과 {ok, cubes: [{id, x, y, yaw_deg, level, top_cm}], refs, warn, image, t}. 없으면 {ok: false, none: true}
     POST /api/stack/next     {cubes, base: {x, y, yaw_deg, id?}, order: [id…]} → 한 걸음 (아래 next_step)
     POST /api/stack/spot     {x, y, yaw_deg, levels, d} → 그 자리에 levels 층까지 놓을 수 있나 (계획기 point_check, 손 수직) {ok, text, levels: [{level, ok, why}]}
     GET  /api/stack/map?d=   놓을 수 있는 곳 지도 (2 cm 칸마다 바닥부터 몇 층까지 놓을 수 있나, 처음 한 번 계산 20~40초 → 책상 높이마다 기억)
@@ -23,7 +23,6 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
-import phone_api
 import phone_detect as PD
 
 HERE = Path(__file__).resolve().parent
@@ -182,37 +181,28 @@ def next_step(cubes, base, order):
             "text": f"다음: 큐브 {nxt['id']} → {level + 1}층" + (f" (큐브 {top['id']} 위)" if top else " (탑 자리 바닥)")}
 
 
-def install(app, log_dir):
-    cfg_file = Path(log_dir) / "phone_cam.json"
+def detect_frame(image, cfg=None, keep=True):
+    """프레임 한 장 (BGR numpy 배열; JPEG·PNG 바이트도 됨) → 화면에 줄 dict {ok, cubes, refs, warn, image (data URL), t}.
+    keep 이면 /api/stack/last 가 돌려줄 마지막 결과로 둔다. cfg = 기준 종이 자리 (logs/phone_cam.json, phone_api._load)."""
+    import base64
 
-    def run(data):
-        import base64
-
-        import cv2
-        r = PD.detect_cubes(data, phone_api._load(cfg_file))
-        vis = r.pop("annotated", None)
-        if vis is not None:
-            k = 1280 / max(vis.shape[:2])
-            if k < 1:
-                vis = cv2.resize(vis, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
-            ok, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if ok:
-                r["image"] = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
-        r["t"] = time.time()
-        return r
-
-    @app.post("/api/stack/detect")
-    async def _detect(req: Request):
-        data = await req.body()
-        if not data or len(data) > phone_api.MAX_BYTES:
-            return JSONResponse({"ok": False, "reason": "사진이 없거나 너무 큼 (25 MB 까지)"}, status_code=400)
-        try:
-            r = await asyncio.to_thread(run, data)
-        except Exception as e:
-            return JSONResponse({"ok": False, "reason": f"찾는 중 오류: {type(e).__name__}: {e}"})
+    import cv2
+    r = PD.detect_cubes(image, cfg)
+    vis = r.pop("annotated", None)
+    if vis is not None:
+        k = 1280 / max(vis.shape[:2])
+        if k < 1:
+            vis = cv2.resize(vis, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            r["image"] = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
+    r["t"] = time.time()
+    if keep:
         LAST["r"] = r
-        return JSONResponse(r)
+    return r
 
+
+def install(app, log_dir):
     @app.get("/api/stack/last")
     def _last():
         return JSONResponse(LAST["r"] or {"ok": False, "none": True})

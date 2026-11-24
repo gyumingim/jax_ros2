@@ -298,11 +298,46 @@ API: `GET /api/ik/graspmap?grasp=auto|vertical|horizontal&yaw=°`, `POST /api/ik
 2. calibration 확인(verified=true) 전에는 AK45 를 크게 움직이지 않는다. hand_roll 범위(서보 0~180 → sim ±90 vs 시뮬 ±120) 정리 필요 — pick_place 궤적이 −113° 를 쓴다.
 3. (직접 CAN 에서 됨) STOP = 지금 자리 홀드, 힘 빼기는 따로. ROS 모드의 정지는 여전히 노드 종료(팔 떨어짐).
 
-## 휴대폰 카메라 탭 (사진 한 장 → 큐브 집기)
+## 휴대폰 카메라 탭 (거치한 폰의 화면 → 큐브 집기)
 
-폰으로 책상을 찍으면 서버가 큐브 자리 (x, y, yaw) 를 찾고, 역기구학 탭과 **같은 계획·재생**으로 집으러 간다.
-파일: `phone_detect.py`(ArUco 로 자리 계산) · `phone_api.py`(`/api/phone/*`) · `static/phone.js`·`phone.css`(탭 화면).
-`server.py`·`index.html` 에는 연결 한 줄씩만 있고 `app.js` 는 안 고쳤다.
+로봇에 거치한 폰(Galaxy S25)의 화면에서 서버가 큐브 자리 (x, y, yaw) 를 찾고, 역기구학 탭과 **같은 계획·재생**으로 집으러 간다.
+**찾는 흐름은 하나다 (2026-11-24): ArUco / 세그먼트 모드 스위치도, 사진 올리기도 없다.** 폰 스테레오 프로그램이 켜져 있으면 화면이 1초마다
+`GET /api/phone/live` 를 읽고, 서버는 그 프로그램의 지금 프레임에서 ArUco 를, 지금 `inference.json` 에서 뎁스 큐브를 찾아 합친다.
+결과 줄에 어느 것을 썼는지 적힌다 (`출처: ArUco + 뎁스 (…4 mm · 0° 차이로 맞음)` / `출처: ArUco 만` / `출처: 뎁스 만`).
+
+파일: `phone_fuse.py`(합치기) · `phone_detect.py`(프레임의 ArUco → 자리) · `phone_depth.py`(뎁스 결과·프레임 읽기·좌표 변환) · `phone_table.py`(책상 높이)
+· `phone_api.py`(`/api/phone/*`, 폰 프로그램 켜기·끄기) · `static/phone.js`·`phone.css`(탭 화면). `server.py`·`index.html` 에는 연결 한 줄씩만.
+
+**합치는 규칙** (`phone_fuse.fuse`, 시험 `tools/test_phone_fuse.py`):
+
+| 있는 것 | 쓰는 것 | 집으러 가기 |
+|---|---|---|
+| ArUco + 뎁스, 서로 맞음 (자리 2 cm · 각 15° 안) | ArUco 의 x·y·yaw (더 정확, 각이 정확) | 됨 |
+| ArUco + 뎁스, 안 맞음 | ArUco 값을 보여 주되 경고 (얼마나 다른지, 뎁스 값) | **막음** — 다음 프레임에서 맞으면 풀림 |
+| ArUco 만 (뎁스가 큐브를 못 찾음·결과 없음) | ArUco | 됨 |
+| 뎁스만 (프레임에 기준 종이·큐브 마커가 없음) | 뎁스 (각은 근삿값) | 됨 |
+| 둘 다 없음 | — | 무엇을 할지 안내 (폰 프로그램 켜기 / 큐브가 보이게) |
+
+- 그대로 둔 검사: **뎁스가 큐브 높이를 책상 위 0~5 cm 밖으로 재면 막는다** — ArUco 가 같이 있어도 막는다 (거치 자세나 책상 높이 d 가 틀렸다는 뜻이고,
+  d 가 틀리면 ArUco 자리로 가도 손이 책상을 누른다). 인식 경고 (기준 마커 1개, 큐브 마커 크기, 거치 자세 미보정, 폰 프로그램 경고) 는 결과 줄에 그대로,
+  그 자리를 집을 수 있는지 (`/api/ik/graspable`, 지금 책상 높이 d·집는 방향) 도 그대로.
+- 각 비교는 90° 마다 같은 것으로 보고, 뎁스 각이 믿을 만할 때만 (옆면·윗면으로 추정) 한다 — 못 구했거나 두 면이 섞였거나 직접 넣은 값이면 자리만 본다.
+- 뎁스의 자리는 큐브 중심이 아니라 **보이는 면의 가운데**다 (옆면이면 중심에서 2.5 cm) → 거치 자세를 큐브 중심 좌표로 보정해 두지 않으면 2 cm 검사에 걸린다.
+- 3초 넘게 안 바뀐 결과·프레임은 안 쓴다. 뎁스 후보가 여럿이고 점수가 비슷하면 '헷갈림' 으로 안 고른다 (큐브만 보이게 치우기).
+- **프레임 = 지금은 폰 프로그램이 1초마다 저장하는 `inference.png`** (`phone_depth.read_frame`). 이 그림에는 그 프로그램이 객체 테두리·글자를 덧그려서
+  마커가 가려질 수 있다 (**실제 폰 화면으로는 확인 안 함**). 합치기·찾기 함수는 전부 '프레임 배열 + 그때의 뎁스 결과' 를 받는다
+  (`phone_fuse.find(image, cam_cfg, depth)`, `phone_detect.detect / detect_cubes`, `phone_table.measure_aruco`, `stack_api.detect_frame`) —
+  영상 스트림을 직접 받게 되면 `read_frame` 만 바꾸면 된다.
+
+화면: ① 큐브 찾기 — 폰 프로그램이 꺼져 있으면 큰 [폰 프로그램 켜기] 하나, 켜져 있으면 그림 (마커가 보이면 마커를 그린 프레임, 아니면 폰 프로그램 그림) +
+결과 한 줄 (x·y·yaw, 출처, 세부·경고) + 집을 수 있는지. ② 집으러 가기 — 역기구학 탭의 큐브 칸을 채우고 ▶ 계획 돌려 보기(`pick_dry`)를 돌린 뒤 지금 모드의
+원래 재생 버튼을 누른다 (확인창·검사·force 확인은 전부 원래 것, 놓을 자리는 역기구학 탭의 값). 책상 높이 카드. 접힌 **준비** — 인쇄물·기준 종이 자리,
+폰 프로그램 켜기·끄기, '뎁스 맵 저장', 거치 자세, 큐브 각 직접 넣기, 폴더.
+
+없앤 것: `POST /api/phone/detect`(사진 올리기), 모드 스위치(`ph_mode`), 책상 높이의 사진 올리기, 탑 쌓기 탭의 `POST /api/stack/detect`.
+`GET /api/phone/depth`(뎁스만의 결과) 는 남겼다 (화면은 안 씀).
+
+### ArUco 준비 (기준 종이 · 큐브 마커)
 
 1. **인쇄** `dashboard/phone_markers/phone_markers.pdf` (A4 가로 2쪽, **실제 크기 100%** — 1쪽의 100 mm 선을 자로 확인).
    다시 만들기: `python3 dashboard/tools/make_phone_markers.py`.
@@ -311,33 +346,23 @@ API: `GET /api/ik/graspmap?grasp=auto|vertical|horizontal&yaw=°`, `POST /api/ik
      다른 자리에 붙였으면 탭 아래 '준비' 에서 종이 가운데 (x, y)·돌아간 각을 넣고 저장 (`logs/phone_cam.json`).
    - 2쪽 = 큐브 윗면 마커 (ID 10, 40 mm). 50 mm 선으로 오려 큐브 윗면에 붙인다.
 2. **폰에서 열기**: 서버를 `--host 0.0.0.0` 으로 띄우고 폰 브라우저에서 `http://<노트북 IP>:<포트>/#phone`.
-   (암호가 없다 — 같은 네트워크 누구나 팔을 움직일 수 있으니 시험할 때만.) 카메라는 `<input type=file capture>` 라 http 로도 된다.
-3. **사진 찍기** → 찾은 마커가 그려진 사진, 큐브 x·y·yaw, 그 자리를 집을 수 있는지(`/api/ik/graspable`, 지도와 같은 판정)가 나온다.
-   기준 종이 마커가 2개 이상 + 큐브 마커가 보이게, 너무 낮지 않게(위쪽에서) 찍는다.
-4. **집으러 가기** → 역기구학 탭의 큐브 칸을 채우고 ▶ 계획 돌려 보기(`pick_dry`)를 돌린 뒤, 지금 모드의 원래 재생 버튼
-   (가상 팔로 재생 / 실물로 재생)을 누른다 — 확인창·검사·force 확인은 전부 원래 것. 놓을 자리는 역기구학 탭의 값.
+   (암호가 없다 — 같은 네트워크 누구나 팔을 움직일 수 있으니 시험할 때만.)
+3. 거치한 폰의 화면에 기준 종이 마커 2개 이상 + 큐브 마커가 보이면 ArUco 자리가 나온다.
 
-큐브 윗면은 책상보다 5 cm 높아서, 기준 마커로 카메라 자세를 구해 그 높이 평면에 쏜다 (비스듬한 사진에서 5~7 cm 보정).
+큐브 윗면은 책상보다 5 cm 높아서, 기준 마커로 카메라 자세를 구해 그 높이 평면에 쏜다 (비스듬한 화면에서 5~7 cm 보정).
 초점거리는 모르므로 훑어서 고른다. 확인값 = '큐브 마커 한 변' 이 40 mm 근처로 나오는지 (10% 넘게 다르면 경고).
-시험: `python3 dashboard/tools/test_phone_detect.py` (가짜 사진 3장, 위치 1 cm·yaw 3° 안).
+시험: `python3 dashboard/tools/test_phone_detect.py` (가짜 프레임 3장, 위치 1 cm·yaw 3° 안).
 
-### 세그먼트(폰 뎁스) 모드 — 표시지 없이, 거치한 S25 의 두 렌즈 깊이로 큐브 찾기 (2026-11-24)
+### 폰 뎁스 — 거치한 S25 의 두 렌즈 깊이 (2026-11-24)
 
-탭 맨 위 스위치 **ArUco(표시지) / 세그먼트(폰 뎁스)**. 세그먼트 모드는 팀 폰 스테레오 프로그램
-([team-jax/SteroDepthSeg](https://github.com/team-jax/SteroDepthSeg): Galaxy S25 렌즈 2·5 → FFS 깊이 → YOLO seg + `lib_blobs` 가 책상 위로
+팀 폰 스테레오 프로그램 ([team-jax/SteroDepthSeg](https://github.com/team-jax/SteroDepthSeg): Galaxy S25 렌즈 2·5 → FFS 깊이 → YOLO seg + `lib_blobs` 가 책상 위로
 튀어나온 덩어리를 찾음) 이 1초쯤마다 덮어쓰는 `<결과 폴더>/inference.json`·`inference.png` 를 읽는다. 큐브 고르기와 카메라 → 로봇 좌표 변환은
 팀 `jax_ros2` `vision-select` 의 `vision_node` (`camera_result.py` 의 `select_cube`·`camera_to_robot`, `tools/solve_camera_to_robot.py`) 를
-ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 결과 (x, y, yaw) 는 ArUco 모드와 똑같이 '집으러 가기' 로 간다 (확인창·검사 그대로).
-파일: `phone_depth.py`(읽기·고르기·변환·각) · `phone_api.py`(`/api/phone/depth*`, 프로그램 켜기·끄기) · `tools/solve_phone_mount.py`(거치 자세 풀기)
-· `tools/test_phone_depth.py`(시험).
+ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 거치 자세 풀기 `tools/solve_phone_mount.py`, 시험 `tools/test_phone_depth.py`.
 
-화면: 결과 한 줄 (큐브 x·y·yaw, 몇 초 전, 크기, 책상 위 높이, 각을 어떻게 구했나, 카메라 좌표, 경고) + 폰 프로그램이 저장한 그림 + 집을 수 있는지.
-- 3초 넘게 안 바뀐 결과는 안 쓴다. 후보가 여럿이고 점수가 비슷하면 '헷갈림' 으로 안 고른다 (큐브만 보이게 치우기).
-- **큐브 높이가 책상 위 0~5 cm 로 안 나오면** (거치 자세·책상 높이가 안 맞음) '집으러 가기' 를 막는다.
 - **각(yaw)은 근삿값**이다. 폰 프로그램의 yaw 는 '보이는 면이 카메라에 대해 돌아선 각'이라 그대로 못 쓰고, 그 면의 법선을 로봇 좌표로 돌려
   구한다 (옆면이 보이면 법선의 수평 방향, 윗면이면 면 안 모서리 방향). 큐브는 90° 마다 같아 −45~45° 로만 나온다. 작은 큐브에서는 10° 안팎
-  틀릴 수 있고 두 면이 섞여 잡히면 더 틀린다 — 틀려 보이면 '준비' 에서 각을 직접 넣는다.
-- 자리 (x, y) 는 큐브 중심이 아니라 **보이는 면의 가운데**다 (옆면이면 중심에서 2.5 cm). 아래 거치 자세 보정을 큐브 중심 좌표로 하면 대부분 흡수된다.
+  틀릴 수 있고 두 면이 섞여 잡히면 더 틀린다 — ArUco 가 같이 보이면 ArUco 각을 쓰고, 뎁스만일 때 틀려 보이면 '준비' 에서 각을 직접 넣는다.
 
 **실험실에서 할 일** (이 노트북에는 2026-11-24 기준 저장소만 받아 둠 — `venv_ffs`·FFS 가중치·`adb` 없음, GPU RTX 4060 은 켜져 있음):
 
@@ -346,7 +371,7 @@ ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 결과 (x, y, yaw) 는
    YOLO seg 가중치는 처음 실행 때 내려받는다. 확인: `./venv_ffs/bin/python z_ffs_smoke.py`.
 2. 폰: Galaxy S25 (SM-S931N, `calib_phone_pair.json` 이 이 폰 전용) 를 USB 로 연결, USB 디버깅 허용. 앱이 없으면 한 번
    `./venv/bin/python z_phone_stereo.py --install --list` (그 저장소 README; JDK 필요). 폰을 로봇 거치대에 끼우고 잠금(PIN)을 푼다.
-3. 켜기: 탭의 **폰 프로그램 켜기** (서버가 아래 명령을 `--headless` 로 띄움, 기록 `logs/phone_depth.log`), 또는 터미널에서 직접
+3. 켜기: 탭의 **폰 프로그램 켜기** (꺼져 있으면 ① 카드에 크게, 끄기는 '준비'; 서버가 아래 명령을 `--headless` 로 띄움, 기록 `logs/phone_depth.log`), 또는 터미널에서 직접
    ```bash
    cd ~/Documents/SteroDepthSeg
    ./venv_ffs/bin/python z_phone_stereo.py --physical 2 5 --calib-stereo calib_phone_pair.json --yolo seg --out phone_stereo/runs/dash
@@ -355,7 +380,7 @@ ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 결과 (x, y, yaw) 는
    (정지한 쌍 3개, 0.6 m 이상 떨어진 질감 있는 장면) 객체에 `rectification_unverified` 경고가 붙는다 — 거치한 채로 경고가 안 없어지면
    폰을 잠깐 빼서 방을 비춘 뒤 다시 끼운다.
 4. **거치 자세 보정 (꼭)**: 처음 값은 팀 `camera.yaml` 의 CAD 임시값이라 화면에 경고가 뜬다. 큐브를 로봇 좌표를 아는 자리 3곳 이상
-   (일렬이 아니게, 집는 범위에 넓게) 에 놓고, 놓을 때마다 결과 줄의 '카메라 좌표' 를 적어
+   (일렬이 아니게, 집는 범위에 넓게) 에 놓고, 놓을 때마다 결과 줄의 '뎁스: … 카메라 좌표' 를 적어
    ```bash
    python3 dashboard/tools/solve_phone_mount.py --d 0.4775 --save \
        --point "cx,cy,cz:-0.05,-0.33" --point "cx,cy,cz:0.05,-0.30" --point "cx,cy,cz:-0.10,-0.38"
@@ -374,14 +399,15 @@ ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 결과 (x, y, yaw) 는
 
 탭 아래 **책상 높이** 카드의 [책상 높이 재기] → 결과 한 줄 (`책상 높이 d = 0.474 m (ArUco) · 뎁스 0.476 m · 차이 2 mm`) → [역기구학 탭에 넣기] 가
 역기구학 탭의 '책상 높이' 칸을 채운다 (자동으로는 안 넣는다 — d 가 크게 틀리면 손이 책상을 누르므로 사람이 보고 누른다).
-범위 0.44 ~ 0.53 m (`hand_ik.D_RANGE`) 밖이면 값만 보여 주고 넣지 않는다. 코드 `dashboard/phone_table.py`, `POST /api/phone/table_height`.
+범위 0.44 ~ 0.53 m (`hand_ik.D_RANGE`) 밖이면 값만 보여 주고 넣지 않는다. 코드 `dashboard/phone_table.py`, `POST /api/phone/table_height` (본문 없음).
 
 - **폰이 로봇 거치대(CAD 자리)에 끼워져 있어야 한다.** 보정 단계가 없고 정우 `CAMERA.md` (JaxIsaacLab `artifacts/deploy_2026-11-05`, CAD 2026-11-12) 의
   거치 사양을 그대로 믿는다: 카메라 = 프로파일 중심선 앞 117.7 mm, 어깨 피치축 − 7 mm (= 어깨 roll 축 − 12 mm), 앞을 보고 45° 아래.
-  손에 들고 찍은 사진은 엉뚱한 값이 나온다.
-- **ArUco 모드**: 기준 종이(인쇄물 1쪽, 100 % 인쇄)를 책상에 평평하게 두고 마커 6개가 다 나오게 한 장. 종이 자리는 아무 데나 (평면만 쓴다).
-  **세그먼트 모드**: 준비의 '뎁스 맵 저장' 을 켜고 폰 프로그램을 다시 켠 뒤 누른다 (프로그램을 `--rgbd-viewer` 로 띄워 5초마다 `rgbd/rgbd.npz` 를
-  저장하게 함 — 그 점들에 평면을 맞춘다). 사진을 올릴 때 새 뎁스 맵이 있으면 둘 다 재서 차이를 보여 준다.
+  거치대에서 빠진 폰의 화면은 엉뚱한 값이 나온다.
+- **모드·사진 올리기 없음**: 버튼을 누르면 거치한 폰의 지금 프레임 (`phone_depth.read_frame`) 과 뎁스 맵 중 있는 것으로 잰다 — 둘 다면 ArUco 값 + 뎁스 값 + 차이.
+  ArUco: 기준 종이(인쇄물 1쪽, 100 % 인쇄)를 책상에 평평하게 두고 마커가 화면에 3개 이상 (6개 다 나오게). 종이 자리는 아무 데나 (평면만 쓴다).
+  뎁스: 준비의 '뎁스 맵 저장' 을 켜고 폰 프로그램을 다시 켠다 (프로그램을 `--rgbd-viewer` 로 띄워 5초마다 `rgbd/rgbd.npz` 를 저장하게 함 — 그 점들에 평면을 맞춘다).
+  프레임에 종이가 안 보이면 뎁스로만, 뎁스 맵이 없으면 ArUco 로만 잰다.
 - **재는 법**: 광학 좌표에서 책상 평면을 구해 카메라~평면 **수직 거리** h 를 재고 d = h + 0.012 (카메라가 어깨 roll 축보다 12 mm 아래).
   책상이 수평이면 h 는 폰 기울기와 무관해서 거치 각 45° 가 틀려도 d 는 안 변한다. 대신 잰 평면이 CAD 자세의 '위' 와 이루는 각을 **기울기**로
   보여 주고 2° 넘으면 경고한다 (폰이 덜 끼워졌거나 거치 각이 다름). 사진이 90°·180° 돌아가 있어도 된다 (가장 가까운 방향으로 본다).
@@ -398,6 +424,11 @@ ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 결과 (x, y, yaw) 는
   실제 rgbd.npz (`--rgbd-viewer` 를 `--headless` 와 같이 켠 적 없음 — 코드로만 확인).
 
 ## 탑 쌓기 탭 (사진 한 장 → 큐브 여러 개 → 우리 IK 계획으로 한 큐브씩 쌓기) (2026-11-24)
+
+> **2026-11-24 바뀜: 사진 올리기를 없앴다.** 탭의 ① 카드는 지금 "실시간 인식 준비 중" 만 보여 주고 `POST /api/stack/detect` 는 없다 — 새 인식 결과가
+> 들어올 길이 없어서 **지금은 이 탭으로 쌓을 수 없다** (거치한 폰 영상으로 계속 알아보는 기능이 다음 작업). 서버 쪽은 프레임 배열을 받는
+> `stack_api.detect_frame(프레임, 종이 자리)` 로 남겼고 (결과는 `/api/stack/last` → 화면이 탭을 열 때 읽음), 계획·놓을 수 있는 곳·다음 한 걸음은 그대로다.
+> 아래 '사진 찍기' 설명은 그 전 방식이다.
 
 큐브마다 다른 ArUco 를 붙이고, 폰 사진으로 큐브들을 찾아, **역기구학 탭과 같은 계획기**(강화학습 아님)로 한 번에 한 큐브씩 탑 자리에 쌓는다.
 파일: `stack_api.py`(`/api/stack/*`) · `static/stack.js`(탭 화면) · `phone_detect.detect_cubes` · `pick_plan.py --place-level/--obstacle`.

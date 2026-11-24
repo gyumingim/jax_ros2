@@ -84,7 +84,8 @@ def multi(save):
     cfg = dict(PD.DEFAULT_CFG)
     for k, (name, cubes, cam, f) in enumerate(MULTI):
         ok, buf = cv2.imencode(".jpg", render(cfg, None, cam, f, cubes), [cv2.IMWRITE_JPEG_QUALITY, 90])
-        r = PD.detect_cubes(buf.tobytes(), cfg)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)   # 프레임 배열로 넣는다 (사진 올리기는 없앴다)
+        r = PD.detect_cubes(frame, cfg)
         if save:
             (save / f"stack_case{k}.jpg").write_bytes(buf.tobytes())
             cv2.imwrite(str(save / f"stack_case{k}_found.jpg"), r["annotated"])
@@ -103,6 +104,12 @@ def multi(save):
             line.append(f"{mid}: {dpos:.1f} mm, {dyaw:.1f}°, 층 {c['level']} (참 {lv}), 마커 {c['marker_mm']} mm")
         bad += not good
         print(f"{'✓' if good else '✗'} {name}: " + " · ".join(line) + f" · 초점 {r['camera']['f_px']} (참 {f}) {r['warn'] or ''}")
+    # 탑 쌓기 탭의 서버 쪽 (stack_api.detect_frame): 같은 프레임 → 화면에 줄 모양 (그림은 data URL, /api/stack/last 로 남음)
+    import stack_api
+    s = stack_api.detect_frame(frame, cfg)
+    good = s["ok"] and len(s["cubes"]) == len(r["cubes"]) and s["image"].startswith("data:image/jpeg") and "annotated" not in s and stack_api.LAST["r"] is s
+    bad += not good
+    print(f"{'✓' if good else '✗'} stack_api.detect_frame(프레임 배열): 큐브 {len(s.get('cubes', []))}개, 그림 {len(s.get('image', '')) // 1024} kB")
     return bad
 
 
@@ -114,7 +121,7 @@ def main():
     for k, (name, over, cube, cam, f) in enumerate(CASES):
         cfg = {**PD.DEFAULT_CFG, **over}
         ok, buf = cv2.imencode(".jpg", render(cfg, cube, cam, f), [cv2.IMWRITE_JPEG_QUALITY, 90])
-        r = PD.detect(buf.tobytes(), cfg)
+        r = PD.detect(cv2.imdecode(buf, cv2.IMREAD_COLOR), cfg)
         if save:
             save.mkdir(parents=True, exist_ok=True)
             (save / f"phone_case{k}.jpg").write_bytes(buf.tobytes())

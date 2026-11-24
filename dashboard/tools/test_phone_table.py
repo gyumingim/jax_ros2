@@ -60,7 +60,7 @@ def photo(d, pitch=45.0, sheet=(0.0, 0.0, 0.0), f=1250, rot180=False, roll_deg=0
     img = TD.render(cfg, None, cam, f, cubes=[], target=hit)
     if rot180:
         img = cv2.rotate(img, cv2.ROTATE_180)
-    return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
+    return cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1], cv2.IMREAD_COLOR)   # 프레임 배열 (JPEG 로 한 번 뭉갠 것)
 
 
 CASES = [   # (이름, d, photo 인자, 기울기 한계 °)
@@ -75,7 +75,7 @@ for k, (name, d, kw, tilt_max) in enumerate(CASES):
     r = PT.measure_aruco(buf)
     if SAVE:
         SAVE.mkdir(parents=True, exist_ok=True)
-        (SAVE / f"table_case{k}.jpg").write_bytes(buf)
+        cv2.imwrite(str(SAVE / f"table_case{k}.jpg"), buf)
         cv2.imwrite(str(SAVE / f"table_case{k}_found.jpg"), r["annotated"])
     if not r["ok"]:
         check(f"ArUco {name}", False, r.get("reason")); continue
@@ -85,7 +85,7 @@ for k, (name, d, kw, tilt_max) in enumerate(CASES):
           f"초점 {r['f_px']} (참 {kw.get('f', 1250)}) · 재투영 {r['reproj_px']} px · CAD 회전으로 읽으면 {r['d_cad_rot']:.4f} · 마커 {len(r['refs'])}개")
 c = PT.combine(PT.measure_aruco(photo(0.56)), None)
 check("범위 밖 (d 0.56) 은 값은 주고 넣지 않음", c["ok"] and not c["in_range"] and abs(c["d"] - 0.56) < 0.004 and "범위" in c.get("reason", ""), f"d {c.get('d')}")
-r = PT.measure_aruco(cv2.imencode(".jpg", np.full((600, 800, 3), 128, np.uint8))[1].tobytes())
+r = PT.measure_aruco(np.full((600, 800, 3), 128, np.uint8))
 check("마커 없는 사진 → 이유", not r["ok"] and "마커" in r["reason"])
 
 
