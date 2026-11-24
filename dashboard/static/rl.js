@@ -222,7 +222,7 @@
     const r = LQ.r, on = curTab === "rl" && R.src === "live" && !!r && !r.stale && r.mode !== "virtual";
     if (on === R.imgOn) return;
     R.imgOn = on; R.img.hidden = !on;
-    if (on) R.img.src = "/api/live/stream.mjpg?t=" + Date.now(); else R.img.removeAttribute("src");
+    streamSet(R.img, on);
   }
   function liveSpot() {   // 영상 인식이면 큐브 칸 = 지금 큐브 (정우 님 틀 dx, dy cm · 각은 90° 마다 같아 틀 회전만큼 돌려 −45~45)
     if (R.src !== "live") { R.liveNote.hidden = true; R.liveOk = true; setBusy(R.busy); mapDraw(); return; }
