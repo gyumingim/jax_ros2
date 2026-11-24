@@ -614,3 +614,44 @@ ROS 없이 그대로 옮긴 것이다 (`phone_depth.py`). 거치 자세 풀기 `
 놓인 큐브 자리는 사진이 정하므로 사진 오차(가짜 사진 2 mm, 실제는 더 큼)가 그대로 다음 층에 간다. 팔이 사진에 들어오면 마커가 가려진다 — HOME 으로 돌아온 뒤 찍는다.
 기존 `phone_markers.pdf` 2쪽의 닫힌 50 mm 네모 선은 오린 뒤 남으면 ArUco 가 그 네모를 후보로 잡아 마커를 못 찾을 수 있다 (인쇄 그림 그대로는 못 찾음, 선을 지우면 찾음)
 → 탑 쌓기 인쇄물은 모서리 표시만 그렸다. '집을 수 있는 곳' 지도처럼 탑 자리 지도도 기둥은 안 본다.
+
+## 실행 기록 (`run_record.py`, `static/record.js`) — 실물 재생마다 전부 남김 (2026-11-24)
+
+사용자: "실물로 할 때 모든 정보 다 로깅되게, 영상이나 그런 것들". **실물 재생(역기구학 · HOME · 탑 쌓기 · 강화학습)이 시작되면 자동으로** 기록을 시작하고,
+재생이 끝나면(끝까지 · STOP · 고장) 2초 더 찍고 닫는다. 가상 모드 재생도 기록한다(끌 수 있음, 영상 없음). 화면: 위 칩 `기록 중 ● runs/…`,
+연결 탭 맨 아래 접힌 **기록** 칸 = 최근 20개(종류 · 길이 · 끝난 이유 · 크기 · **zip** 받기), '재생마다 자동 기록' · '가상 모드도' 체크, 손으로 **기록 시작 / 끝**
+(재생 없이 원점 잡기 · 손으로 움직이기 같은 자유 시간; 그 사이 재생은 같은 폴더에 `plan_2.json` … 로 붙음, 30분이면 자동 끝). 주소 `/?rec=1#conn` = 기록 칸 펼침.
+
+폴더 `logs/runs/<YYYYmmdd_HHMMSS>_<kind>/` (kind = ik · home · stack · rl · manual; `JAX_DASH_LOGS` 를 따름):
+
+| 파일 | 내용 · 빈도 |
+|---|---|
+| `video_live.mp4` + `video_live_ts.csv` | 폰 프로그램 `live.jpg` (live_api `LIVE.raw_jpeg`, 약 10 Hz) — mp4v 10 fps. 프레임이 늦게 오면 앞 프레임을 되풀이해 **영상 시간 = 실제 시간** (3초 넘는 끊김은 메우지 않음). ts.csv = 새 프레임마다 영상 프레임 번호 · 받은 시각 · 파일 시각 · 되풀이 수 |
+| `video_infer.mp4` + `_ts.csv` | `inference.png` (뎁스 · 세그, 1~3 Hz) 가 바뀔 때, 4 fps 같은 방식 |
+| `joints.csv` | **제어 루프 50 Hz 한 줄씩**: 재생 프레임 번호, AK45 마다 명령 · 목표 · 측정 (모터 °) · 속도 (ERPM) · 전류 · 온도 · 에러 코드 · 원점 오프셋 · 이 틱에 보낸 값 · 관절 ° (sim), 서보마다 보낸 각 (서보 °) · 관절 °. 가상 = 20 Hz, 모터 °를 JSON 으로 |
+| `cubes.csv` | 인식 결과 새 프레임마다 큐브 한 줄 (id · x · y · yaw · level · tilt · source · age · stale), 안 보이면 `(없음)` 한 줄. 가상 = 장면이 바뀔 때 |
+| `plan.json` | 재생한 궤적 그대로 + 계획 칸 값 (큐브 · 놓을 자리 · d · grasp · stack · 강화학습 정보) + force · 검사 문제 · 속도 |
+| `events.log` | `direct.log` 줄 (시작 직전 몇 줄부터: 재생 시작/끝 · STOP · 힘 빼기 · 고장 · 원점 · 보정), 기록 시작/끝/이유, **화면에서 누른 POST 전부** (경로 + 몸통 300자 + 응답 코드: 보정 · 핀 · 보내기 …), CAN 버스 상태 바뀜 |
+| `meta.json` · `config/` | 시작/끝 · 모드 · git 커밋 (+dirty) · 버전 · 팔 설정 · 원점 오프셋 · 책상 높이 · 줄 수 · 영상 장수 · 크기. `config/` = calibration.json · homing.json · phone_cam/phone_depth/phone_table.json 사본 |
+
+- **제어 루프 영향**: `real_arm._ctrl_loop` 에 한 줄 (`rec = self.rec; if rec: rec(self, now)`, 잠금 안) — 숫자 약 40개를 리스트로 deque 에 넣을 뿐, 변환 · 파일 쓰기 · 영상은
+  `run-record` 스레드 (20 Hz) 가 한다. 플랜 저장은 줄마다 dumps (큰 JSON 한 번이면 GIL 을 수십 ms 잡음), git 해시는 서버 시작 때 한 번.
+- **보관**: 최근 50개 또는 5 GB 중 작은 쪽 (`JAX_DASH_RUNS_KEEP`, `JAX_DASH_RUNS_MAX_GB`), 기록이 끝날 때마다 오래된 것부터 지움. 화면에 전체 크기 · 디스크 남은 곳.
+  크기: 실물 1분 ≈ 관절 1 MB + 영상 3.5 MB + 뎁스 영상 1 MB.
+- API: `GET /api/record/status`, `POST /api/record/start {kind?}`, `POST /api/record/stop`, `POST /api/record/settings {auto?, virtual?}`, `GET /api/record/zip/<폴더>`.
+- 훅: `direct_api.play_real` · `server._go_home` · `server._play_virtual` 에서 재생이 시작되면 `run_record.REC.on_play(traj, params, arm, …)` 한 줄. 끝은 기록 스레드가
+  `arm.play["running"]` 을 보고 안다. ROS 모드 재생은 기록 안 함.
+
+**확인** (2026-11-24, `--fake-hw` / `--virtual` 서버 8197, `JAX_DASH_LOGS` 따로)
+
+- `tools/try_record_fake.py` (가짜 AK45 · STM32, 팔꿈치 왕복 8초씩 기록 끔/켬): 틱 50.0 Hz · 간격 평균 20.0 ms · p99 20.04 ms 둘 다 같음, 잠금 안 시간 평균 166 → 216 µs
+  (p99 502 → 519 µs), joints.csv 50.0 줄/초. `tools/try_direct_fake.py` 39/39.
+- fake-hw 서버: 역기구학 계획 (2490 프레임) 실물 재생 → `…_ik/` 57.3초, joints 2865줄 (50.0 Hz), 폰 영상 553장 (9.7 Hz, 실행 중인 폰 프로그램 live.jpg 읽기만),
+  뎁스 영상 17장, cubes 553줄, events 에 재생 시작/끝 · POST. 재생 중 STOP → 끝난 이유 `stopped`, 2초 뒤 닫힘, zip 내려받기 (mp4 는 압축 안 함).
+- 가상 서버: HOME 재생 → `…_home/` (virtual, 20 Hz, 가상 장면 큐브).
+- 영상: 10초 손 기록 → `video_live.mp4` 100 프레임 (10 fps = 10초, 새 프레임 53장 — 그때 폰이 5 Hz) cv2.VideoCapture 로 끝까지 읽힘. 프레임당 디코드 + mp4v 인코드 3.3 ms
+  (640×480) → 10 Hz 에서 한 코어의 약 3 %, inference.png 읽기 8 ms.
+- 보관: 개수 5 · 크기 3 MB 로 낮춰 오래된 것부터 지워지는 것.
+
+**안 한 것**: 실물 can0 · 실제 폰 큐브 장면으로 긴 시간 (수십 분) 은 안 돌렸다. 서버 안에서는 다른 스레드 (인식 등) 때문에 2865 틱 중 1번 31 ms 늦은 틱이 있었다
+(기록 켬/끔을 서버 안에서 비교하지는 못함 — 따로 잰 try_record_fake 에서는 차이 없음). 영상은 mp4v 라 브라우저에서 바로 안 열릴 수 있다 (VLC · cv2 는 됨).
