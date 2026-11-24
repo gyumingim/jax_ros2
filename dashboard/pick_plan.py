@@ -77,7 +77,7 @@ ELBOW_BRANCH = 1            # 계획·지도가 쓰는 팔꿈치 가지 (elbow �
 # 책상 면 + 41.6 mm 이상): elbow −120 이면 이동이 10° 짧지만 여유 21~25 mm 라 이것. elbow −130 은 한계 ±135 에 5° 남음 (실물 끝 간섭 미확인, calibration note).
 CUBE_EDGE_IN = 0.01          # 큐브(놓을 자리 포함)는 책상 발자국 안쪽으로 반 변 + 이만큼 (env CUBE_X_MAX 와 같은 1 cm, 2026-11-21)
 HOME_STRAIGHT_DEG = 5.0
-HOME_EXIT_MID_DEG = {"shoulder_roll": 0.0, "upper_arm_roll": 0.0, "elbow": 90.0, "wrist_pitch": 0.0, "wrist_yaw": 90.0, "hand_roll": 0.0}
+HOME_EXIT_MID_DEG = {"shoulder_roll": 0.0, "upper_arm_roll": 0.0, "elbow": 90.0, "wrist_pitch": 0.0, "wrist_yaw": 0.0, "hand_roll": 0.0}   # 2026-11-24 사용자: 손목 U자(90) 말고 ㄴ자(0) — 책상 여유 63 → 43 mm, 기둥 52 mm 그대로
 # ↑ 2026-11-23 사용자: 어깨만 먼저 젖히지 말고 위팔 비틀기로 — ① HOME_EXIT_PRE_DEG 위팔 +90·팔꿈치 90·어깨 −30 을 한꺼번에 (팔꿈치가 옆으로 접혀
 #   손이 책상 위를 안 지남, 어깨 부담 작음) → ② 여기: 위팔 0 으로 되돌려 손을 책상 위 172 mm 에서 앞으로 → ③ 책상 위 손목 자리 (79 mm). 기둥 52 mm
 # ↑ 2026-11-23 사용자 자세 (팔꿈치 ±100): 어깨 뒤로 −45 + 팔꿈치 90 + 손목 굽힘 90 = 손이 책상 위 224 mm·모서리 바깥. 그 전에 곧은 팔로 어깨만 −45 (HOME_EXIT_PRE_DEG)
