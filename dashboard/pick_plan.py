@@ -105,7 +105,17 @@ HOME_EXIT_LIFT = 0.0        # 그 경유점 손목 높이 = z_clear + 이만큼.
 MAP_SLACK = 0.0003       # m 지도 판정의 책상 여유 덤: hand_roll 만 돌린 근사·중간 프레임 차이 (계획은 덤 없이 TABLE_MARGIN)
 MAP_TILTS = (15, 30)        # 지도가 보는 비스듬한 내려가기 (수직에서 °, APPROACH_TILTS 의 앞쪽). 계획은 45·60 도 보지만 지도는 시간 때문에 여기까지
 # 집는 방향 (2026-11-24): 자동 = 수직 → 수평 → 기울임(예전 방식: 손목이 되는 만큼 아래) 순서로 되는 것, 수직·수평 = 그것만
-GRASP_MODES = ("auto", "vertical", "horizontal")
+GRASP_MODES = ("auto", "vertical", "horizontal", "tilted")   # tilted = 기울임(어제 방식, 2026-11-24 사용자): 손목 ±90 안에서 예전 기울여 집기만
+TILT_WRIST = ("wrist_pitch", "wrist_yaw", "hand_roll")   # 기울임 모드에서 ±90 으로 묶는 관절 (11-23 실물에서 성공한 계획과 같은 한계)
+
+
+def tilt_ranges(ranges):
+    """기울임(어제 방식) 모드의 관절 한계: 손목 3 관절을 ±90 안으로 (보낼 수 있는 범위와 겹치는 부분). 나머지는 그대로."""
+    out = {k: list(v) for k, v in (ranges or {}).items()}
+    for n in TILT_WRIST:
+        lo, hi = out.get(n, [-90.0, 90.0])
+        out[n] = [max(float(lo), -90.0), min(float(hi), 90.0)]
+    return out
 STYLE_KO = {"vertical": "수직", "horizontal": "수평", "tilted": "기울임", "auto": "자동"}
 VERT_MAX_TILT = 5.0         # ° 수직: 잡는 자세와 내려가기·들기 내내 손 축이 수직에서 이 안
 H_TOL = 5.0                 # ° 수평: 손 축이 밀어 넣는 방향(큐브 면 법선, 수평)에서 이 안 + 손가락 닫히는 축이 수평에서 이 안
@@ -1100,7 +1110,10 @@ def plan(a):
         import hand_ik
         return {"planner": "analytic", "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": float(a.d)},
                 "status": "unreachable", "reason": d_range_text(a.d, hand_ik._map_d(ik_dir))}
-    P = Planner(ik_dir, _cmd_ranges(cal_file), d=a.d, grasp=grasp)
+    rng = _cmd_ranges(cal_file)
+    if grasp == "tilted":   # 어제(11-23 20:22) 실물에서 성공한 계획과 같게: 손목 ±90, 기울여 집기만
+        rng = tilt_ranges(rng)
+    P = Planner(ik_dir, rng, d=a.d, grasp=grasp)
     out = {"planner": "analytic",
            "real": {"cube": [float(v) for v in a.cube], "target": [float(v) for v in a.target], "d": P.table_d, "grasp": grasp}}
     level, obst_real, _ = _stack_args(a, P)   # 탑 쌓기 (--place-level, --obstacle): 안 주면 0, [] — 예전과 똑같다

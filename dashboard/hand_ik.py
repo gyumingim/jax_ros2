@@ -50,7 +50,7 @@ ARM_RADIUS = 0.03             # 팔 기준점(팔꿈치·손목) 둘레 링크 �
 # IK 모델(sim)은 어깨가 고정이라 d 가 다르면 책상 면을 옮긴다: table_z = TABLE_SURFACE_Z + (MAP_D − d). 책상 기준 높이(큐브 중심·집는 점·
 # 옮겨 가는 높이·손가락/큐브 책상 여유·'책상 위 cm')가 모두 이 값을 따른다 (_Solver.set_table_d). 요청마다 "d" 로 받고, 없으면 기본.
 D_RANGE = (0.44, 0.53)        # 받는 범위 (m), 밖은 거절. 2026-11-23 지도 초록 칸(1 cm): 0.43 = 0 (0.42 는 HOME 나가기 경유점도 안 풀림), 0.44 = 20, 0.45 = 45, 0.4775 = 124, 0.50 = 223, 0.53 = 360 — 책상이 높을수록(d 작을수록) 좁다
-GRASP_MODES = ("auto", "vertical", "horizontal")   # 집는 방향 (2026-11-24, pick_plan.GRASP_MODES 와 같은 값): 자동 / 수직(위에서) / 수평(옆에서 밀어 넣기)
+GRASP_MODES = ("auto", "vertical", "horizontal", "tilted")   # 집는 방향 (2026-11-24, pick_plan.GRASP_MODES 와 같은 값): 자동 / 수직(위에서) / 수평(옆에서 밀어 넣기)
 GRASP_TILT_TOL = 3.0         # 집을 수 있음: 손 축을 수직 아래 이 각(°) 안으로 돌릴 수 있어야 (3° = 집는 점이 옆으로 약 1.3 cm 안)
 
 
@@ -1003,6 +1003,10 @@ class _Solver:
         grasp = b.get("grasp") or "auto"
         if grasp not in GRASP_MODES:
             raise ValueError(f"집는 방향은 {' / '.join(GRASP_MODES)} 중 하나 ({grasp!r})")
+        if grasp == "tilted" and not b.get("_tilt_clipped"):   # 기울임(어제 방식): 손목 ±90 한계로 판정 (계획과 같게)
+            import pick_plan
+            b["ranges_deg"] = pick_plan.tilt_ranges(b.get("ranges_deg"))
+            b["_tilt_clipped"] = True
         yaw = b.get("yaw")
         return grasp, (None if yaw in (None, "") else [float(yaw) + self.R.SIM_FROM_REAL_YAW])
 
@@ -1112,8 +1116,8 @@ class _Solver:
     def graspcheck(self, b):
         """op graspcheck: 한 점 (x, y) — 격자와 같은 판정 + MuJoCo FK 검증."""
         t0 = time.time()
+        grasp, yaws = self._grasp_req(b)   # 먼저: 기울임이면 ranges_deg 를 손목 ±90 으로
         S = self.grasp_setup(b.get("ranges_deg"), float(b.get("shoulder_yaw") or 0.0))
-        grasp, yaws = self._grasp_req(b)
         self.last_why = None
         c, tilt, ns = self.grasp_eval(S, float(b["x"]), float(b["y"]), verify=True, grasp=grasp, yaws=yaws)
         why = getattr(self, "last_why", None) or ("팔이 안 닿음" if c == 0 else "집을 수 있음" if c == 2 else "못 집음")

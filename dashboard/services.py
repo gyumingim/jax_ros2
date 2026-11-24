@@ -206,8 +206,8 @@ def _pick_args(p):
         a += ["--d", f"{_num(d, 'd', 0.0, 2.0):g}"]
     g = (p.get("grasp") or "").strip()   # 집는 방향 (대시보드 계획만 — 팀 시뮬 계획은 이 옵션이 없다)
     if g and g != "auto" and str(p.get("team_sim") or "").strip().lower() not in ("1", "true", "on", "yes"):
-        if g not in ("vertical", "horizontal"):
-            raise ValueError(f"집는 방향: auto / vertical / horizontal ({g!r})")
+        if g not in ("vertical", "horizontal", "tilted"):
+            raise ValueError(f"집는 방향: auto / vertical / horizontal / tilted ({g!r})")
         a += ["--grasp", g]
     a += _stack_args(p, cx, cy, tx, ty)
     ik = (p.get("ik") or "").strip()

@@ -488,7 +488,7 @@ function buildPick(s) {
   const teamBox = el("label", { class: "help", style: "display:inline-flex;gap:6px;align-items:center;margin:8px 0 0",
     title: "끄면(기본) 지도와 같은 해석 IK 로 경유점을 풀어 계획 — 물리·쥐기 시뮬 없음. 켜면 팀 계획(team-jax/IK motion1 MuJoCo 물리 시뮬, 자기 IK)" },
     c.fields.team_sim, "팀 시뮬 계획 (물리)");
-  c.fields.grasp = el("select", {}, el("option", { value: "auto" }, "자동"), el("option", { value: "vertical" }, "수직"), el("option", { value: "horizontal" }, "수평"));
+  c.fields.grasp = el("select", {}, el("option", { value: "auto" }, "자동"), el("option", { value: "vertical" }, "수직"), el("option", { value: "horizontal" }, "수평"), el("option", { value: "tilted" }, "기울임 (어제 방식, 손목 ±90)"));
   c.fields.grasp.value = /^(vertical|horizontal)$/.test((P0.grasp || {}).value || "") ? P0.grasp.value : "auto";
   c.bStart = el("button", { class: "btn", onclick: () => post(`/api/svc/${s.id}/start`, { params: params() }) }, "▶ 계획 돌려 보기");
   c.bStop = el("button", { class: "btn red", onclick: () => post(`/api/svc/${s.id}/stop`) }, "■ 중단");
@@ -626,7 +626,7 @@ function graspQ() {
   const g = graspMode(), y = M.c ? parseFloat(M.c.fields.cube_yaw.value) : NaN;
   return g === "horizontal" && Number.isFinite(y) ? { grasp: g, yaw: y } : { grasp: g };
 }
-const GRASP_KO = { auto: "자동", vertical: "수직", horizontal: "수평" };
+const GRASP_KO = { auto: "자동", vertical: "수직", horizontal: "수평", tilted: "기울임" };
 function mapVals() {
   const c = M.c; if (!c) return {};
   const n = (k) => { const v = parseFloat(c.fields[k] && c.fields[k].value); return Number.isFinite(v) ? v : null; };
