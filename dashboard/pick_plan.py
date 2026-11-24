@@ -37,8 +37,9 @@ REPO = HERE.parent
 sys.path[:0] = [str(HERE), str(REPO / "arm_control"), str(REPO / "stm_bridge")]   # pick_place 로컬 실행과 같게
 from hand_ik import GRIP_ABOVE_CENTER, D_RANGE, d_range_text   # noqa: E402  집는 점 = 큐브 중심 + 이것 (지도·계획·IK 탭 한 값), 책상 높이 범위
 
-ABOVE_CM = (9.0, 7.0, 5.0, 3.0)   # 큐브·놓을 자리 위 경유점: 집는 점을 이만큼 (3.25 cm 미만이면 벌린 손가락 끝이 큐브 윗면보다 낮다:
+ABOVE_CM = (9.0, 7.0, 5.0, 4.0, 3.0)   # 큐브·놓을 자리 위 경유점: 집는 점을 이만큼 (3.25 cm 미만이면 벌린 손가락 끝이 큐브 윗면보다 낮다:
                                   # 그때는 손가락이 큐브 양옆으로 곧게 내려가야 한다 — 손가락↔큐브 검사가 본다)
+                                  # 4.0 (2026-11-24): 3층 놓을 자리는 위로 4~5.5 cm 까지만 빠진다 — 5 가 안 되면 3 (손끝이 놓은 큐브 윗면 아래) 대신 4
 APPROACH_TILTS = (0, 15, 30, 45, 60)   # 그 경유점 방향: 수직에서 기울기(°) × 방위 45° 마다
 APPROACH_AZ = 45
 STEP_TRANSIT = 0.01         # 옮겨 가는 길: 손목 중앙 1 cm 마다 IK
@@ -1121,16 +1122,21 @@ def plan(a):
     if level or obst_real:
         side_m = 2.0 * float(P.s.E.OBJECT_HALF_SIZE)
         out["real"].update(place_level=level, obstacles=obst_real, target_yaw=float(a.cube[2] if a.target_yaw is None else a.target_yaw))
-        # 옮겨 가는 높이 하한(z_clear)은 큐브 한 층 기준. 그 높이로 탑에 걸리면 한 번 더: 가장 높은 큐브(다른 큐브들·이번에 놓고 난 탑) 윗면 기준으로
-        # 올려서 (올리면 팔이 못 닿는 자리가 늘어 먼저 낮게 해 본다)
-        top = max([(o[3] + 1) * side_m for o in obst_real] + [(level + 1) * side_m])
-        if top > side_m + 1e-9:
-            lifts.append(top - side_m)
+        # 옮겨 가는 높이 하한(z_clear)은 큐브 한 층 기준. 그 높이로 탑에 걸리면 한 번 더 (올리면 팔이 못 닿는 자리가 늘어 먼저 낮게 해 본다):
+        # ① 다른 큐브들(이미 있는 탑) 윗면 기준 ② 이번에 놓고 난 탑 윗면 기준. 2026-11-24: 예전엔 ② 만 — 3층(놓고 난 탑 15 cm)이면 +10 cm 라
+        # 큐브 위로 손목을 못 올려 거절되고, 낮은 길(+0)의 결과(HOME 경유점 옆에서 든 큐브가 2층 탑을 −15 mm 파고듦)가 나왔다
+        for top in (max([(o[3] + 1) * side_m for o in obst_real], default=0.0), (level + 1) * side_m):
+            if top > side_m + 1e-9 and all(abs(top - side_m - v) > 1e-9 for v in lifts):
+                lifts.append(top - side_m)
         P.stack_standoff = (0.20, 0.16, 0.12, 0.08)
     z0 = P.z_clear
     tried, r, first = {}, None, None
     for lift in lifts:
         P.z_clear = z0 + lift
+        if len(lifts) > 1:
+            # HOME 나가기·들어가기 경유점(손목 높이 z_clear + HOME_EXIT_LIFT)도 같이 올린다. 예전엔 계획기를 만들 때의 높이 그대로라
+            # z_clear 를 올려도 오가는 길이 그 낮은 경유점(탑 자리 바로 앞)을 지나 탑에 걸렸다. 못 풀면 exit_ok False → 그 높이는 거절
+            P._home_exit()
         tried = {}
         for style in (("vertical", "horizontal", "tilted") if grasp == "auto" else (grasp,)):
             r = _plan_style(a, P, style, out)
