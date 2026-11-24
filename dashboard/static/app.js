@@ -95,6 +95,19 @@ function streamSync(img) {
 function streamSet(img, on) { img.dataset.stream = on ? "1" : ""; streamSync(img); }
 function streamSyncAll() { document.querySelectorAll("img[data-stream]").forEach(streamSync); }
 document.addEventListener("visibilitychange", streamSyncAll);
+// 폰 영상 보기 180° (폰이 거치대에 뒤집혀 끼워짐 — 보기만 돌림, 인식 계산은 안 바뀜). 영상을 누르면 켜고 끔, 기본 켬, 브라우저에 기억
+(function camFlip() {
+  let on = true;
+  try { on = localStorage.getItem("jaxdash.camflip") !== "0"; } catch (e) { /* 없어도 됨 */ }
+  document.head.append(el("style", {}, "body.camflip img[data-stream] { transform: rotate(180deg); } img[data-stream] { cursor: pointer; }"));
+  document.body.classList.toggle("camflip", on);
+  document.addEventListener("click", (ev) => {
+    if (!(ev.target instanceof HTMLImageElement) || !("stream" in ev.target.dataset)) return;
+    on = !on; document.body.classList.toggle("camflip", on);
+    try { localStorage.setItem("jaxdash.camflip", on ? "1" : "0"); } catch (e) { /* 없어도 됨 */ }
+  });
+  document.addEventListener("mouseover", (ev) => { const t = ev.target; if (t instanceof HTMLImageElement && "stream" in t.dataset) t.title = "누르면 영상 180° 돌리기 (보기만)"; });
+})();
 (function buildTabs() {
   const nav = $("#tabs");
   for (const [id, label, sub] of TABS) {
