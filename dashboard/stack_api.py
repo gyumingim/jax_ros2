@@ -30,6 +30,8 @@ SHEET = HERE / "phone_markers" / "stack_markers.pdf"
 TOWER_R = 0.025       # 탑 자리에서 이 안(m)에 보이는 큐브 = 탑의 맨 위 큐브 (놓인 큐브가 사진마다 몇 mm 씩 달리 보이고, 층마다 조금씩 어긋나도)
 OVERLAP_R = 0.08      # 탑 자리에서 이 안인데 탑은 아닌 큐브 = 탑 자리와 겹침 (큐브 한 변 5 cm + 손가락 자리)
 NEAR_M = 0.15         # 집을 큐브에서 이 안에 다른 큐브가 있으면 알림 (벌린 손가락이 닫히며 큐브 중심에서 12 cm 쯤까지 나온다)
+OFF_TOL = 0.02        # 놓은 큐브가 계획 자리에서 이보다 멀면 멈춤 (m)
+TILT_TOL = 15.0       # 놓은 큐브 윗면이 이보다 기울면 멈춤 (°, ArUco 마커 한 장으로 잰 값이라 몇 도 흔들린다)
 MAX_LEVELS = 3        # 2026-11-24 사용자: 탑은 3층까지만 (순서는 바닥 큐브 포함 3개까지, 4층째는 계획하지 않음)
 REACH_LEVELS = 3      # 기본 책상 높이(어깨 아래 0.4775 m)에서 팔이 놓을 수 있는 층 수 (4층째 = 책상 위 15 cm 에 놓기는 어디서도 안 됨, README)
 LAST = {"r": None}
@@ -118,21 +120,50 @@ def _f3(v):
     return f"{float(v):.3f}"
 
 
-def next_step(cubes, base, order):
+def check_placed(cs, placed):
+    """방금 놓은 큐브 (placed = {id, x, y, yaw_deg, level}: 계획한 놓을 자리) 가 지금 인식에서 그 자리·층에 반듯이 있나 → (큐브, None) 또는 (None, 이유)."""
+    i = int(placed["id"])
+    c = next((c for c in cs if c["id"] == i), None)
+    if c is None:
+        return None, f"방금 놓은 큐브 {i} 가 안 보임 — 떨어졌거나 가려짐. 확인하고 '처음부터'"
+    lv = int(placed["level"])
+    if c["level"] != lv:
+        return None, f"방금 놓은 큐브 {i} 가 {c['level'] + 1}층으로 보임 (놓은 곳은 {lv + 1}층) — 떨어졌거나 기울어짐. 멈춤"
+    off = math.hypot(c["x"] - float(placed["x"]), c["y"] - float(placed["y"]))
+    if off > OFF_TOL:
+        return None, f"방금 놓은 큐브 {i} 가 계획 자리에서 {off * 100:.1f} cm 어긋남 (허용 {OFF_TOL * 100:.0f} cm) — 멈춤"
+    if (c.get("tilt_deg") or 0.0) > TILT_TOL:
+        return None, f"방금 놓은 큐브 {i} 가 {c['tilt_deg']:.0f}° 기울어짐 (허용 {TILT_TOL:.0f}°) — 멈춤"
+    return c, None
+
+
+def next_step(cubes, base, order, placed=None):
     """사진에서 찾은 큐브들 + 탑 자리(base) + 쌓는 순서(order = 이 탑에 쓰는 큐브 ID 전부, 바닥 큐브 포함) → 다음 한 걸음.
 
     탑의 높이는 사진이 정한다: base 자리(3 cm 안)에 보이는 큐브 중 가장 높은 것이 맨 위 (그 아래 큐브는 가려서 안 보인다).
     안 보이는 order 의 큐브 = 탑 속에 깔린 것으로 본다 → 그 수와 사진의 탑 높이가 안 맞으면 (마커를 못 찾음·큐브가 떨어짐) 멈춘다.
+    placed (실시간 인식 2026-11-24) = 방금 놓은 큐브 {id, x, y, yaw_deg, level} — 주면 먼저 check_placed (어긋남·기울기·층) 로 보고, 맞으면
+    탑 자리를 그 큐브의 실제 자리로 바꾼다 (다음 큐브는 실제로 놓인 맨 위 큐브 위에, 각은 그 큐브와 90° 마다 맞춤). 안 맞으면 {ok: false, stop: true}.
     돌려주는 것: {ok, done, text, height(지금 탑 층 수), cube(다음에 집을 것), level(놓을 층, 0 = 책상), target, params(pick_dry 칸), warn}."""
     out = {"ok": False, "done": False, "warn": []}
     try:
         bx, by, byaw = float(base["x"]), float(base["y"]), float(base.get("yaw_deg") or 0.0)
         order = [int(i) for i in order]
-        cs = [{"id": int(c["id"]), "x": float(c["x"]), "y": float(c["y"]), "yaw_deg": float(c["yaw_deg"]), "level": int(c["level"])} for c in cubes]
+        cs = [{"id": int(c["id"]), "x": float(c["x"]), "y": float(c["y"]), "yaw_deg": float(c["yaw_deg"]), "level": int(c["level"]),
+               "tilt_deg": c.get("tilt_deg")} for c in cubes if c.get("id") is not None]
         if not all(math.isfinite(v) for v in (bx, by, byaw)) or len(order) != len(set(order)) or not 1 <= len(order) <= 12:
             raise ValueError
     except (KeyError, TypeError, ValueError):
         return {**out, "text": "탑 자리·순서·큐브 값이 틀림"}
+    if placed:
+        try:
+            pc, why = check_placed(cs, placed)
+        except (KeyError, TypeError, ValueError):
+            return {**out, "text": "placed 값이 틀림"}
+        if why:
+            return {**out, "stop": True, "text": why}
+        bx, by, byaw = pc["x"], pc["y"], pc["yaw_deg"]
+        out["placed"] = pc
     tower = [c for c in cs if math.hypot(c["x"] - bx, c["y"] - by) <= TOWER_R]
     top = max(tower, key=lambda c: c["level"]) if tower else None
     height = top["level"] + 1 if top else 0
@@ -165,7 +196,8 @@ def next_step(cubes, base, order):
             return {**out, "text": "쌓을 큐브가 사진에 없음 — 순서의 큐브가 책상 위에 보이게 다시 찍기"}
         return {**out, "ok": True, "done": True, "text": f"탑 완성: {height}층 (맨 위 큐브 {top['id']})"}
     level = height
-    tx, ty, tyaw = (top["x"], top["y"], top["yaw_deg"]) if top else (bx, by, byaw)   # 실제로 놓인 맨 위 큐브 위에 (없으면 탑 자리)
+    tx, ty, tyaw = (top["x"], top["y"], top["yaw_deg"]) if top else (bx, by, byaw)
+    tyaw = (tyaw + 45.0) % 90.0 - 45.0   # 큐브는 90° 마다 같다   # 실제로 놓인 맨 위 큐브 위에 (없으면 탑 자리)
     obst = [[round(tx, 4), round(ty, 4), round(tyaw, 1), k] for k in range(height)]
     obst += [[round(c["x"], 4), round(c["y"], 4), round(c["yaw_deg"], 1), 0] for c in loose if c is not nxt]
     obst += [[round(c["x"], 4), round(c["y"], 4), round(c["yaw_deg"], 1), k] for c in odd for k in range(c["level"] + 1)]
@@ -211,7 +243,7 @@ def install(app, log_dir):
     async def _next(req: Request):
         try:
             b = await req.json()
-            return JSONResponse(next_step(b.get("cubes") or [], b.get("base") or {}, b.get("order") or []))
+            return JSONResponse(next_step(b.get("cubes") or [], b.get("base") or {}, b.get("order") or [], b.get("placed")))
         except Exception:
             return JSONResponse({"ok": False, "text": "요청 값이 틀림"}, status_code=400)
 
