@@ -15,3 +15,4 @@
 #page-phone .ph-h3 { font-size: 14px; color: var(--sub); margin: 16px 0 8px; }
 #page-phone .frow .field.ph-wide { width: 100%; }
 #page-phone .ph-cmd { display: block; margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: var(--fill); font-size: 12.5px; overflow-wrap: anywhere; user-select: all; }
+#page-phone .ph-map { display: block; width: 100%; max-width: 460px; margin: 12px auto 0; border-radius: 12px; background: var(--fill); touch-action: none; cursor: crosshair; }

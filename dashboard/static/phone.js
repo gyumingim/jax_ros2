@@ -1,10 +1,13 @@
 // 휴대폰 카메라 탭: 큐브 자리를 서버가 찾고 (phone_api.py) → 역기구학 탭과 같은 계획·재생으로 집으러 간다.
-// 찾는 흐름은 하나고 사진 올리기는 없다: 로봇에 거치한 S25 의 폰 스테레오 프로그램이 켜져 있으면 서버가 그 프레임의 ArUco 와 뎁스 결과를
-// 합쳐 (phone_fuse.py: 둘 다면 ArUco 자리 + 뎁스로 맞춰 봄, 안 맞으면 막음) 1초마다 준다 (GET /api/phone/live). 결과 줄에 어느 것을 썼는지 적힌다.
+// 찾는 흐름은 하나고 사진 올리기는 없다: 로봇에 거치한 S25 의 폰 스테레오 프로그램이 켜져 있으면 서버 스레드(live_api.py)가 새 프레임마다
+// ArUco 와 뎁스 결과를 합쳐 (phone_fuse.py: 둘 다면 ArUco 자리 + 뎁스로 맞춰 봄, 안 맞으면 막음) 두고, 화면은 live.js 가 0.5초마다 받는
+// GET /api/live/cubes 의 pick 을 쓴다. 프레임이 1.5초 넘게 안 오면 '영상 없음' 으로 막는다. 가상 모드는 카메라를 안 쓰고 가상 큐브만 (지도에서 놓기).
 // 폰 프로그램이 꺼져 있으면 큰 '폰 프로그램 켜기' 버튼 하나만 보인다. 끄기와 설정은 아래 접힌 '준비' 에 있다.
 // app.js·direct.js 는 안 고친다: 탭 버튼도 여기서 단다. 계획 = POST /api/svc/pick_dry/start (역기구학 탭 칸 그대로, 큐브 칸만 바꿈),
 // 재생 = 역기구학 탭의 원래 버튼(가상 팔로 재생 / 실물로 재생)을 그대로 누른다 → 확인창·검사·force 확인이 전부 원래 것.
 "use strict";
+// 지도 (탑 쌓기 지도와 같은 범위·방향): 큐브들 + 로봇 쪽. 가상 모드면 빈 곳 = 큐브 놓기, 끌기 = 옮기기
+const PH_BOX = [-0.27, 0.23, -0.45, -0.13];
 const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, block: "", last: null, d: null };
 
 (function phInstall() {
@@ -24,7 +27,12 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
   PH.thRes = el("div", { class: "result", hidden: true });
   PH.bOn = el("button", { class: "btn ph-big", hidden: true, onclick: phPipe }, "폰 프로그램 켜기");
   PH.dStat = el("div", { class: "help ph-stat" });
-  PH.img = el("img", { class: "ph-img", hidden: true, alt: "찾은 큐브" });
+  PH.img = el("img", { class: "ph-img", hidden: true, alt: "지금 프레임" });
+  PH.map = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  PH.map.setAttribute("class", "ph-map");
+  PH.map.setAttribute("viewBox", `0 0 ${(PH_BOX[1] - PH_BOX[0]) * 1000} ${(PH_BOX[3] - PH_BOX[2]) * 1000}`);
+  lvMapAttach(PH.map, { box: PH_BOX, redraw: phMapDraw, edit: () => LQ.virtual(), onCube: () => { PH.cube = null; } });
+  PH.src = el("div", { class: "lv-src" });
   PH.res = el("div", { class: "result", hidden: true });
   PH.grasp_el = el("div", { class: "result", hidden: true });
   PH.bGo = el("button", { class: "btn ph-big", disabled: true, onclick: phGo }, "집으러 가기");
@@ -40,16 +48,16 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
   page.append(
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "1"), "큐브 찾기"),
     el("div", { class: "card" },
-      PH.bOn, PH.dStat, PH.img, PH.res, PH.grasp_el,
-      el("div", { class: "help", style: "margin:10px 0 0" }, "로봇에 거치한 폰의 화면에서 1초마다 찾는다. 기준 종이와 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다. 마커가 없으면 뎁스만 쓴다.")),
+      PH.bOn, PH.dStat, PH.img, PH.src, PH.map, lvTools(), PH.res, PH.grasp_el,
+      PH.help = el("div", { class: "help", style: "margin:10px 0 0" }, "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 기준 종이와 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다. 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.")),
     el("h2", { class: "sec" }, el("span", { class: "snum" }, "2"), "집으러 가기"),
     el("div", { class: "card" },
       PH.bGo,
       el("div", { class: "ph-row" }, PH.bStop, el("a", { class: "btn line", href: "#ik" }, "역기구학 탭에서 보기")),
       PH.goNote, PH.target,
       el("div", { class: "help", style: "margin:6px 0 0" }, "계획(역기구학 탭과 같은 것)을 돌린 뒤, 지금 모드의 팔로 재생할지 확인창이 묻는다.")),
-    el("h2", { class: "sec" }, "책상 높이"),
-    el("div", { class: "card" },
+    PH.thH = el("h2", { class: "sec" }, "책상 높이"),
+    PH.thCard = el("div", { class: "card" },
       el("div", { class: "ph-row", style: "margin-top:0" }, PH.bTh, PH.bThFill),
       PH.thImg, PH.thRes,
       el("div", { class: "help", style: "margin:10px 0 0" }, "거치한 폰의 화면으로 잰다 (폰 프로그램이 켜져 있어야 한다): 기준 종이 마커가 보이면 ArUco 로, 뎁스 맵이 새것이면 뎁스로도 재서 차이를 보여 준다.",
@@ -81,9 +89,8 @@ const PH = { cube: null, grasp: null, going: false, dp: null, dBusy: false, bloc
         el("div", { class: "help", style: "margin:10px 0 0" }, "터미널에서 직접 켤 때:"), PH.cmd)));
   fetch("/api/phone/config").then((r) => r.json()).then((d) => { for (const k in PH.f) PH.f[k].value = d.cfg[k]; }).catch(() => {});
   phLoadDepthCfg();
-  phLive();
+  LQ.on(phLive);
   setInterval(phTick, 500);
-  setInterval(() => { if (curTab === "phone" && !document.hidden) phLive(); }, 1000);
   if (location.hash === "#phone" && curTab && curTab !== "phone") showTab("phone");   // 첫 화면이 이 파일보다 먼저 그려졌을 때
 })();
 
@@ -98,15 +105,36 @@ function phShow(node, text, cls, small) {
 }
 
 const PH_YAW_FROM = { side: "옆면 방향으로 추정", top: "윗면 모서리로 추정", mixed: "추정(두 면이 섞임)", manual: "직접 넣은 값" };
-// 1초마다: 서버가 지금 프레임의 ArUco + 지금 뎁스를 합친 결과 (GET /api/phone/live, phone_fuse.py) → 결과 줄·그림·폰 프로그램 상태
-async function phLive() {
-  if (PH.dBusy) return;
-  PH.dBusy = true;
+function phMapDraw() {
+  const px = (x) => (x - PH_BOX[0]) * 1000, py = (y) => (PH_BOX[3] - y) * 1000;
+  const g = [LV_SVG("circle", { cx: px(0), cy: py(-0.145), r: 7, fill: "#64748b" }), LV_SVG("text", { x: px(0) + 12, y: py(-0.145) + 5, "font-size": 15, fill: "#64748b" }, "로봇 쪽")];
+  g.push(...lvDrawCubes(px, py, { empty: [-0.02, -0.30], emptyText: LQ.virtual() ? "눌러서 가상 큐브 놓기" : "보이는 큐브 없음" }));
+  PH.map.replaceChildren(...g);
+}
+// 새 인식 결과마다 (live.js, GET /api/live/cubes): pick = 집을 큐브 하나 (phone_fuse 결과 / 가상 큐브) → 결과 줄·그림·폰 프로그램 상태
+function phLive(all) {
+  if (curTab !== "phone") return;
   const d = tableD();
-  let r;
-  try { r = await (await fetch("/api/phone/live?d=" + encodeURIComponent(d))).json(); } catch (e) { r = { ok: false, reason: "서버 연결 실패", warn: [] }; }
-  PH.dBusy = false;
+  const virt = all.mode === "virtual";
+  const r = Object.assign({}, all.pick || { ok: false, reason: all.reason, warn: [] });
+  r.pipeline = all.pipeline || {}; r.fresh = !all.stale;
   PH.dp = r;
+  phMapDraw();
+  PH.src.textContent = lvSrcText(all);
+  if (virt) PH.bOn.hidden = PH.dStat.hidden = true;
+  PH.thH.hidden = PH.thCard.hidden = virt;
+  PH.help.textContent = virt ? "가상 모드: 카메라는 안 쓴다. 지도의 빈 곳을 누르면 가상 큐브를 놓고, 끌어서 옮기고, 누르면 그 큐브를 집는다. 가상 팔로 끝까지 재생하면 큐브가 놓을 자리로 옮겨진다."
+    : "로봇에 거치한 폰의 영상에서 새 프레임마다 찾는다. 기준 종이와 큐브 윗면 마커가 보이면 ArUco 자리를 쓰고 뎁스로 맞춰 본다. 마커가 없으면 뎁스만 쓴다. 지도에서 큐브를 누르면 그 큐브를 집는다.";
+  if (virt) {
+    PH.img.hidden = true;
+    if (!r.ok) { PH.cube = null; PH.grasp = null; PH.block = ""; PH.last = null; PH.grasp_el.hidden = true; phShow(PH.res, "가상 큐브 없음", "", r.reason || ""); return; }
+    PH.last = r; PH.block = r.blocked ? r.block : "";
+    phShow(PH.res, el("span", {}, el("span", { class: "ph-xy" }, `큐브  x ${r.cube.x.toFixed(3)}  y ${r.cube.y.toFixed(3)} m  yaw ${r.cube.yaw_deg.toFixed(0)}°`), el("b", { class: "ph-src" }, r.text)),
+      r.blocked ? "bad" : "", (r.warn || []).join(" · "));
+    const c0 = PH.cube;
+    if (!c0 || Math.hypot(c0.x - r.cube.x, c0.y - r.cube.y) > 0.003 || Math.abs(c0.yaw_deg - r.cube.yaw_deg) > 2 || PH.d !== d) { PH.d = d; phGrasp(r.cube, " — 큐브를 옮기기"); }
+    return;
+  }
   const pl = r.pipeline || {}, fresh = !!r.fresh;
   PH.bPipe.textContent = pl.alive ? "폰 프로그램 끄기" : "폰 프로그램 켜기";
   PH.bPipe.classList.toggle("red", !!pl.alive); PH.bPipe.classList.toggle("line", !pl.alive);
@@ -115,13 +143,13 @@ async function phLive() {
     : fresh ? "결과가 들어오는 중 (다른 곳에서 켠 프로그램)" : "폰 프로그램 꺼짐" + ((PH.missing || []).length ? " — 이 PC 에 없는 것: " + PH.missing.join(" / ") : "") + ((pl.log || []).length > 1 ? " · 마지막 기록: " + pl.log.slice(-1)[0] : "");
   PH.dStat.hidden = fresh;
   PH.dStat.textContent = pl.alive ? "폰 프로그램 켜는 중 — 폰 잠금을 풀고 몇 초 가만히 (끄기는 아래 준비)" : PH.pipeNote.textContent;
-  const src = !fresh ? "" : r.image || (r.depth_image_mtime ? "/api/phone/depth/image?t=" + r.depth_image_mtime : "");
+  const src = !fresh || all.frame_n == null ? "" : "/api/live/frame.jpg?n=" + all.frame_n;
   PH.img.hidden = !src;
   if (src && PH.imgSrc !== src) { PH.imgSrc = src; PH.img.src = src; }
   const tail = (r.note || []).concat(r.warn || []).join(" · ");
   if (!r.ok) {
     PH.cube = null; PH.grasp = null; PH.block = ""; PH.last = null; PH.grasp_el.hidden = true;
-    phShow(PH.res, fresh ? "큐브를 못 찾음" : "결과 없음", fresh ? "bad" : "", (r.reason || "") + (tail ? " · " + tail : ""));
+    phShow(PH.res, fresh ? "큐브를 못 찾음" : "영상 없음 — 집기 막음", "bad", (r.reason || "") + (tail ? " · " + tail : ""));
     return;
   }
   const a = r.aruco && r.aruco.ok ? r.aruco : null, p = r.depth && r.depth.ok ? r.depth : null;
@@ -206,7 +234,7 @@ async function phSaveDepthCfg() {
   const c2r = [0, 1, 2, 3, 4, 5].map((i) => parseFloat(PH.df["c" + i].value));
   const yaw = PH.df.yaw.value.trim();
   const r = await post("/api/phone/depth/config", { camera_to_robot: c2r, yaw_manual_deg: yaw === "" ? null : parseFloat(yaw), repo_dir: PH.df.repo_dir.value, run_dir: PH.df.run_dir.value, save_rgbd: PH.df.save_rgbd.checked });
-  if (r.ok) { await phLoadDepthCfg(); phLive(); }
+  if (r.ok) { await phLoadDepthCfg(); lvPoll(); }
 }
 
 async function phPipe() {
@@ -214,7 +242,7 @@ async function phPipe() {
   PH.bPipe.disabled = true;
   await post(on ? "/api/phone/depth/stop" : "/api/phone/depth/start");
   PH.bPipe.disabled = false;
-  phLive();
+  lvPoll();
 }
 
 const phSleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
