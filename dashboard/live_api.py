@@ -3,7 +3,7 @@
 사진 올리기는 없다. 두 모드:
 
     실물 (직접 CAN / ROS)  서버 스레드(Live)가 거치한 폰의 폰 스테레오 프로그램(SteroDepthSeg z_phone_stereo.py)의 결과 폴더를 20 Hz 로 보고
-                           새 프레임이 생길 때마다 인식한다 — 프레임의 ArUco (phone_detect.detect_cubes: ID 10~15 + 층 + 기울기;
+                           새 프레임이 생길 때마다 인식한다 — 프레임의 ArUco (phone_detect.detect_cubes: 4x4 ID 0~4 + 층 + 기울기;
                            기준 종이가 안 보이면 CAD 거치 자세 + 폰 보정값 + 책상 높이 d 로)
                            + 그때의 뎁스 결과 (phone_depth.evaluate) → phone_fuse 로 합친 '집을 큐브 하나' (휴대폰 탭) 와 큐브 목록.
                            프레임:  <결과 폴더>/live.jpg   — 손대지 않은 왼쪽 렌즈 그림 (그 프로그램에 --live-jpg 를 넣은 판, README) ≥ 5 Hz
@@ -43,7 +43,8 @@ STALE_MAX_S = 3.0        # inference.png (1초쯤 간격) 일 때 늘려 주는 
 POLL_S = 0.05            # 결과 폴더를 보는 간격
 LIVE_JPG_FRESH_S = 3.0   # live.jpg 가 이보다 새것이면 그것을 쓴다 (아니면 inference.png)
 DEPTH_POS_TOL = 0.03     # 뎁스 큐브가 ArUco 큐브와 이 안이면 같은 큐브 (source 'aruco+depth')
-CUBE_IDS = tuple(range(10, 16))
+import phone_detect as PD   # noqa: E402
+CUBE_IDS = PD.CUBE_IDS   # 큐브 = 4x4 ID 0~4 (phone_detect 한 곳)
 STACK_R = 0.03           # 가상 장면: 이 안(m)이면 같은 자리 (그 위에 쌓임)
 JITTER_M, JITTER_DEG = 0.01, 5.0
 TD_DEFAULT = 0.4775
@@ -284,11 +285,11 @@ class Live:
         dep = DP.evaluate(dcfg, td, time.time(), self.prev["pos"] if now - self.prev["t"] <= 3.0 else None)
         if dep.get("ok"):
             self.prev.update(pos=dep.pop("pos"), t=now)
-        fused = PF.find(img, cam_cfg, dep)            # 휴대폰 탭: 큐브 하나 (ID 10 + 뎁스)
+        fused = PF.find(img, cam_cfg, dep)            # 휴대폰 탭: 큐브 하나 (4x4 ID 0 + 뎁스)
         if fused.get("aruco") is not None:
             for k in ("annotated", "cfg"):
                 fused["aruco"].pop(k, None)
-        multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (ID 10~15, 층, 기울기)
+        multi = PD.detect_cubes(img, cam_cfg)          # 큐브 여러 개 (4x4 ID 0~4, 층, 기울기)
         vis = multi.pop("annotated", None)
         multi.pop("cfg", None)
         cubes = []
@@ -336,11 +337,11 @@ class Live:
 
 # ---------------------------------------------------------------- 응답
 def _pick_camera(res, stale, pick_id):
-    """휴대폰 탭이 집을 큐브 하나 (phone_fuse 모양): ID 를 고르지 않았거나 10 이면 ArUco 10 + 뎁스를 합친 것, 다른 ID 면 그 ArUco 큐브."""
+    """휴대폰 탭이 집을 큐브 하나 (phone_fuse 모양): ID 를 고르지 않았거나 PD.CUBE_ID (0) 면 ArUco 0 + 뎁스를 합친 것, 다른 ID 면 그 ArUco 큐브."""
     if res is None or stale:
         return {"ok": False, "stale": True, "warn": [], "note": [], "sources": [],
                 "reason": "영상 없음 — 폰 프로그램이 꺼져 있거나 프레임이 멈춤 (새 프레임이 들어와야 집는다)"}
-    if pick_id is not None and pick_id != 10:
+    if pick_id is not None and pick_id != PD.CUBE_ID:
         c = next((c for c in res["cubes"] if c["id"] == pick_id), None)
         if c is None:
             return {"ok": False, "warn": [], "note": [], "sources": [], "reason": f"큐브 {pick_id} 가 지금 프레임에 안 보임"}
@@ -354,11 +355,11 @@ def _pick_camera(res, stale, pick_id):
             out["warn"].insert(0, f"큐브 {pick_id} 는 {c['level'] + 1}층 — 휴대폰 탭은 책상 위 큐브만 집는다 (탑 쌓기 탭)")
         return out
     f = dict(res["fused"])
-    f["id"] = 10 if f.get("used") == "aruco" else None
-    c10 = next((c for c in res["cubes"] if c.get("id") == 10), None)
+    f["id"] = PD.CUBE_ID if f.get("used") == "aruco" else None
+    c10 = next((c for c in res["cubes"] if c.get("id") == PD.CUBE_ID), None)
     if f.get("ok") and not f.get("blocked") and c10 and (res.get("level_unsure") or c10.get("unsure") or c10["level"] > 0):
         f.update(blocked=True, block="쌓인 큐브" if c10["level"] > 0 and not c10.get("unsure") and not res.get("level_unsure") else "층이 확실하지 않음",
-                 warn=["큐브 10 이 쌓여 있거나 층이 확실하지 않아 막음 (휴대폰 탭은 책상 위 큐브만)"] + list(f.get("warn") or []))
+                 warn=[f"큐브 {PD.CUBE_ID} 이 쌓여 있거나 층이 확실하지 않아 막음 (휴대폰 탭은 책상 위 큐브만)"] + list(f.get("warn") or []))
     return f
 
 

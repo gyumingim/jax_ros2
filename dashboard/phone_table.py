@@ -13,8 +13,8 @@
     회전: DEFAULT_C2R 의 뒤 3개 (IMU 로 잰 값, 폰이 뒤집혀 끼워짐) = 아래 R_CAD × 광축 둘레 180° 에서 1.4° 다르다.
 
 재는 법: 책상 평면을 광학 좌표에서 구한다 (법선 n, 카메라에서 평면까지 수직 거리 h).
-    ArUco  = 기준 종이 마커 (ID 0~5, 32 mm) 꼭짓점으로 solvePnP. 초점거리는 모르므로 재투영 오차가 가장 작은 값으로 맞춘다.
-    큐브   = 큐브 윗면 마커 (ID 10~15, 40 mm) 하나하나로 solvePnP (초점거리 = 폰 보정 파일) → CAD 자세로 마커 높이 − cube_h (measure_cubes).
+    ArUco  = 기준 종이 마커 (5x5 ID 0~5, 32 mm) 꼭짓점으로 solvePnP. 초점거리는 모르므로 재투영 오차가 가장 작은 값으로 맞춘다.
+    큐브   = 큐브 윗면 마커 (4x4 ID 0~4, 40 mm) 하나하나로 solvePnP (초점거리 = 폰 보정 파일) → CAD 자세로 마커 높이 − cube_h (measure_cubes).
              기준 종이가 없어도 된다. 이쪽은 CAD 회전으로 z 를 읽으므로 거치 각 1° 에 약 8 mm 틀린다 (마커 법선 값 d_normal 로 확인).
     뎁스   = 폰 스테레오 프로그램이 저장한 rgbd/rgbd.npz (--rgbd-viewer) 의 점들에 평면 맞추기 (RANSAC).
     d = h − CAM_POS z = h + 0.012.   책상이 수평이면 수직 거리 h 는 폰이 얼마나 기울었든 같다 → 45° 가 1° 틀려도 d 는 안 변한다
@@ -131,11 +131,9 @@ def measure_aruco(image_bytes, intr=None):
     h, w = img.shape[:2]
     prm = cv2.aruco.DetectorParameters_create()
     prm.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    corners, ids, _ = cv2.aruco.detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), PD._dictionary(cv2), parameters=prm)
-    ids = [] if ids is None else [int(i) for i in ids.ravel()]
-    found = {i: c.reshape(4, 2).astype(np.float64) for i, c in zip(ids, corners)}
     sheet = PD.ref_corners_real({"x": 0.0, "y": 0.0, "rot_deg": 0.0})     # 종이 좌표 (m) — 평면만 필요해 놓인 자리는 안 쓴다
-    refs = sorted(i for i in found if i in sheet)
+    found, _ = PD.split_markers(cv2, np, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), prm, set(sheet), set(PD.CUBE_IDS))   # 기준 (5x5) 만, 큐브 (4x4) 와 겹친 것은 뺀다
+    refs = sorted(found)
     vis = img.copy()
     lw = max(2, w // 400)
     for i in refs:
@@ -387,7 +385,7 @@ def cad_camera(cv2, np, found, intr, w, h, td, ids, q_cfg=None):
 
 
 def measure_cubes(image, intr, cube_h=None, q_cfg=None):
-    """사진 (거치대의 폰) 의 큐브 윗면 마커 (ID 10~15, 40 mm) → dict(ok, d, n, ids, d_pm_mm, tilt_deg, d_normal, warn, annotated …).
+    """사진 (거치대의 폰) 의 큐브 윗면 마커 (4x4 ID 0~4, 40 mm) → dict(ok, d, n, ids, d_pm_mm, tilt_deg, d_normal, warn, annotated …).
     큐브가 쌓여 있으면 마커 높이 차이로 층을 나눠 뺀다. 여러 개면 중앙값."""
     import cv2
     import numpy as np
@@ -403,16 +401,13 @@ def measure_cubes(image, intr, cube_h=None, q_cfg=None):
     prm = cv2.aruco.DetectorParameters_create()
     prm.minMarkerDistanceRate = 0.02                # detect_cubes 와 같은 이유 (흰 네모와 마커가 둘 다 남게)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    corners, ids, _ = cv2.aruco.detectMarkers(gray, PD._dictionary(cv2), parameters=prm)
-    ids = [] if ids is None else [int(i) for i in ids.ravel()]
+    _, raw = PD.split_markers(cv2, np, gray, prm, set(PD.REF_MM), set(PD.CUBE_IDS))   # 큐브 (4x4) 만, 기준 (5x5) 와 겹친 것은 뺀다
     found = {}
-    for i, c in zip(ids, corners):
-        if i not in PD.CUBE_IDS:
-            continue
-        # 꼭짓점 다듬기 창 = 마커 칸 하나 (한 변 / 7). 기본 창 (5 px) 은 20 px 마커에서 꼭짓점을 안쪽으로 끌어 마커가 3 % 작게
-        # → 3 % 멀게 → d 가 7 mm 크게 나왔다 (합성 영상). 칸 크기 창이면 0.2 % 안
-        c = c.reshape(4, 2).astype(np.float32)
-        win = int(max(2, min(5, round(float(np.mean([np.linalg.norm(c[j] - c[(j + 1) % 4]) for j in range(4)])) / 7))))
+    for i, c in raw.items():
+        # 꼭짓점 다듬기 창 = 마커 칸 하나 (한 변 / (CUBE_BITS + 2) = 4x4 는 6). 기본 창 (5 px) 은 20 px 마커에서 꼭짓점을 안쪽으로 끌어 마커가 3 % 작게
+        # → 3 % 멀게 → d 가 7 mm 크게 나왔다 (합성 영상, 5x5 때). 칸 크기 창이면 0.2 % 안
+        c = c.astype(np.float32)
+        win = int(max(2, min(5, round(float(np.mean([np.linalg.norm(c[j] - c[(j + 1) % 4]) for j in range(4)])) / (PD.CUBE_BITS + 2)))))
         cv2.cornerSubPix(gray, c, (win, win), (-1, -1), (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01))
         found[i] = c.astype(np.float64)
     vis = img.copy()
@@ -421,7 +416,7 @@ def measure_cubes(image, intr, cube_h=None, q_cfg=None):
         cv2.polylines(vis, [c.astype(np.int32)], True, (0, 140, 255), lw)
     out.update(ids=sorted(found), annotated=vis, size=[w, h])
     if not found:
-        return {**out, "reason": f"큐브 윗면 마커 (ID {PD.CUBE_IDS[0]}~{PD.CUBE_IDS[-1]}) 가 안 보임"}
+        return {**out, "reason": f"큐브 윗면 마커 (4x4 ID {PD.CUBE_IDS[0]}~{PD.CUBE_IDS[-1]}) 가 안 보임"}
     if not intr:
         return {**out, "reason": "폰 보정값 (초점거리) 없음 — 보정 파일이 없거나 표에 없는 폰 모델 (phone_api.CALIB_MODELS) 이라 큐브 마커로는 못 잼. 기준 종이나 뎁스로"}
     sk = scaled_K(np, intr, w, h)

@@ -3,8 +3,8 @@
 
     /usr/bin/python3 dashboard/tools/make_phone_markers.py
 
-1쪽 = 기준 종이 (ArUco 5x5 ID 0~5, 32 mm): 책상에 붙인다.  2쪽 = 큐브 윗면 마커 (ID 10, 40 mm) 6장.
-탑 쌓기용 stack_markers.pdf (1쪽, 큐브마다 다른 마커 ID 10~15) 도 같이 만든다 (--stack-only 면 그것만).
+1쪽 = 기준 종이 (ArUco 5x5 ID 0~5, 32 mm): 책상에 붙인다.  2쪽 = 큐브 윗면 마커 (ArUco 4x4 ID 0, 40 mm) 6장.
+탑 쌓기용 stack_markers.pdf (1쪽, 큐브마다 다른 마커 4x4 ID 0~4) 도 같이 만든다 (--stack-only 면 그것만).
 크기·자리는 phone_detect.py 의 상수 그대로 (여기서 숫자를 따로 두지 않는다). 인쇄는 꼭 '실제 크기 100%'.
 """
 import sys
@@ -18,11 +18,11 @@ A4 = (297.0, 210.0)
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 
 
-def _marker(mid, mm, dpi):
+def _marker(mid, mm, dpi, dict_name=PD.REF_DICT_NAME):
     import cv2
     from PIL import Image
     px = round(mm / 25.4 * dpi)
-    return Image.fromarray(cv2.aruco.drawMarker(PD._dictionary(cv2), mid, px))
+    return Image.fromarray(cv2.aruco.drawMarker(PD._dictionary(cv2, dict_name), mid, px))
 
 
 def _font(mm, dpi):
@@ -72,11 +72,11 @@ def cube_image(dpi=300):
     im, d = _page(dpi)
     k = dpi / 25.4
     P = lambda x, y: (round((A4[0] / 2 + x) * k), round((A4[1] / 2 - y) * k))   # noqa: E731
-    d.text(P(0, 90), f"JAX 휴대폰 카메라 — 큐브 윗면 마커 (ArUco 5x5, ID {PD.CUBE_ID}, {PD.CUBE_MARKER_MM:.0f} mm)", fill=0, font=_font(5.5, dpi), anchor="mm")
+    d.text(P(0, 90), f"JAX 휴대폰 카메라 — 큐브 윗면 마커 (ArUco 4x4, ID {PD.CUBE_ID}, {PD.CUBE_MARKER_MM:.0f} mm)", fill=0, font=_font(5.5, dpi), anchor="mm")
     d.text(P(0, 80), "바깥 네모(50 mm)를 따라 오려 큐브 윗면에 반듯하게 붙인다. 한 장만 쓰면 된다 (나머지는 여분).", fill=110, font=_font(4.2, dpi), anchor="mm")
     for j, cy in enumerate((30, -45)):
         for i, cx in enumerate((-80, 0, 80)):
-            m = _marker(PD.CUBE_ID, PD.CUBE_MARKER_MM, dpi)
+            m = _marker(PD.CUBE_ID, PD.CUBE_MARKER_MM, dpi, PD.CUBE_DICT_NAME)
             x, y = P(cx, cy)
             im.paste(m, (x - m.width // 2, y - m.height // 2))
             d.rectangle([P(cx - 25, cy + 25), P(cx + 25, cy - 25)], outline=150, width=max(1, round(0.25 * k)))
@@ -84,19 +84,21 @@ def cube_image(dpi=300):
 
 
 def stack_image(dpi=300):
-    """탑 쌓기 쪽: 큐브마다 다른 마커 6장 (ID PD.CUBE_IDS = 10~15, 40 mm, 50 mm 선을 따라 오린다). 번호는 오리는 선 밖에 적는다."""
+    """탑 쌓기 쪽: 큐브마다 다른 마커 (4x4 ID PD.CUBE_IDS = 0~4, 6칸 중 앞 5칸, 40 mm, 50 mm 선을 따라 오린다). 번호는 오리는 선 밖에 적는다."""
     im, d = _page(dpi)
     k = dpi / 25.4
     P = lambda x, y: (round((A4[0] / 2 + x) * k), round((A4[1] / 2 - y) * k))   # noqa: E731
     ids = list(PD.CUBE_IDS)
-    d.text(P(0, 92), f"JAX 탑 쌓기 — 큐브 윗면 마커 (ArUco 5x5, ID {ids[0]}~{ids[-1]}, {PD.CUBE_MARKER_MM:.0f} mm)", fill=0, font=_font(5.5, dpi), anchor="mm")
+    d.text(P(0, 92), f"JAX 탑 쌓기 — 큐브 윗면 마커 (ArUco 4x4, ID {ids[0]}~{ids[-1]}, {PD.CUBE_MARKER_MM:.0f} mm)", fill=0, font=_font(5.5, dpi), anchor="mm")
     d.text(P(0, 83), "큐브마다 다른 번호 한 장씩. 모서리 표시(50 mm 네모)에 맞춰 오려 큐브 윗면에 반듯하게 붙인다. 기준 종이는 phone_markers.pdf 1쪽 그대로.",
            fill=110, font=_font(4.2, dpi), anchor="mm")
     lw = max(1, round(0.25 * k))
     for j, cy in enumerate((38, -32)):
         for i, cx in enumerate((-80, 0, 80)):
+            if j * 3 + i >= len(ids):
+                continue
             mid = ids[j * 3 + i]
-            m = _marker(mid, PD.CUBE_MARKER_MM, dpi)
+            m = _marker(mid, PD.CUBE_MARKER_MM, dpi, PD.CUBE_DICT_NAME)
             x, y = P(cx, cy)
             im.paste(m, (x - m.width // 2, y - m.height // 2))
             for sx in (-1, 1):   # 50 mm 네모는 모서리 표시(ㄱ자 8 mm)만: 닫힌 네모 선이 오린 뒤에도 남으면 ArUco 가 그 네모를 후보로 잡아 안쪽 마커를 버린다

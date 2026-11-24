@@ -1,7 +1,8 @@
 """휴대폰 사진 한 장 → 큐브 자리 (x, y, yaw) — ArUco 만 쓴다 (OpenCV 4.5 옛 API: Dictionary_get / detectMarkers).
 
-    기준 종이 (A4 가로, dashboard/phone_markers/phone_markers.pdf 1쪽): ArUco 5x5 ID 0~5, 한 변 32 mm. 책상에 붙인다.
-    큐브 윗면: ArUco 5x5 ID 10, 한 변 40 mm (같은 PDF 2쪽).
+    기준 종이 (A4 가로, dashboard/phone_markers/phone_markers.pdf 1쪽): ArUco 5x5 (DICT_5X5_50) ID 0~5, 한 변 32 mm. 책상에 붙인다.
+    큐브 윗면: ArUco 4x4 (DICT_4X4_50) ID 0~4, 한 변 40 mm (같은 PDF 2쪽 = ID 0, 탑 쌓기 stack_markers.pdf = ID 0~4).
+    두 사전의 ID 가 겹치므로 (0~4) 사전마다 따로 찾고 (split_markers), 같은 자리를 두 사전이 다 읽으면 둘 다 버린다.
 
 좌표 = 로봇 실좌표 (pick_plan 과 같음): 원점 = 어깨 roll 축, +x = 로봇 왼쪽, +y = 뒤 (책상은 −y), 위에서 본 yaw 반시계.
 종이 좌표 (mm): 원점 = 종이 한가운데 십자, +x = 종이 오른쪽, +y = 종이 위쪽 ('로봇 쪽' 화살표). 종이를 로봇과 나란히 놓으면
@@ -17,12 +18,14 @@ cfg 의 'intr' (폰 보정값 K·dist) 과 'td' (책상 높이 d, m) 로 놓고 
 """
 import math
 
-DICT_NAME = "DICT_5X5_50"
+REF_DICT_NAME = "DICT_5X5_50"    # 기준 종이
+CUBE_DICT_NAME = "DICT_4X4_50"   # 큐브 윗면 (4X4_50/100/250/1000 은 ID 0~4 무늬가 같다)
+CUBE_BITS = 4                    # 큐브 마커 안쪽 칸 수 (테두리 포함 한 변 = CUBE_BITS + 2 칸)
 REF_SIZE_MM = 32.0
 REF_MM = {0: (-122.0, 78.0), 1: (122.0, 78.0), 2: (122.0, 0.0), 3: (122.0, -78.0), 4: (-122.0, -78.0), 5: (-122.0, 0.0)}   # 마커 중심 (종이 mm)
-CUBE_ID = 10
+CUBE_ID = 0
 CUBE_MARKER_MM = 40.0
-CUBE_IDS = tuple(range(10, 16))   # 탑 쌓기: 큐브마다 다른 마커 (ID 10~15, 같은 40 mm) — detect_cubes
+CUBE_IDS = tuple(range(0, 5))     # 탑 쌓기: 큐브마다 다른 마커 (4x4 ID 0~4, 같은 40 mm) — detect_cubes
 MAX_LEVELS = 5                    # detect_cubes 가 보는 층 수 (윗면 높이 = 층 × cube_h)
 DEFAULT_CFG = {"x": -0.05, "y": -0.32, "rot_deg": 0.0, "cube_h": 0.05}   # 종이 가운데 (실좌표 m), 종이 돌아간 각, 큐브 높이
 MAX_SIDE = 2000   # 이보다 큰 사진은 줄여서 찾는다
@@ -45,8 +48,27 @@ def as_image(image):
         return None
 
 
-def _dictionary(cv2):
-    return cv2.aruco.Dictionary_get(getattr(cv2.aruco, DICT_NAME))
+def _dictionary(cv2, name=REF_DICT_NAME):
+    return cv2.aruco.Dictionary_get(getattr(cv2.aruco, name))
+
+
+def _quad_hit(cv2, np, a, b):
+    """두 꼭짓점 4x2 가 같은 자리인가 (한쪽 가운데가 다른 쪽 안)."""
+    return (cv2.pointPolygonTest(b.astype(np.float32), tuple(float(v) for v in a.mean(axis=0)), False) >= 0
+            or cv2.pointPolygonTest(a.astype(np.float32), tuple(float(v) for v in b.mean(axis=0)), False) >= 0)
+
+
+def split_markers(cv2, np, gray, prm, ref_ids=None, cube_ids=None):
+    """사진 (회색) → (기준 {id: 4x2}, 큐브 {id: 4x2}). 기준 = 5x5 사전, 큐브 = 4x4 사전 — 사전마다 detectMarkers 를 따로 부른다
+    (ID 0~4 가 두 사전에 다 있다). ids 를 주면 그 안의 것만. 한 마커를 두 사전이 다 읽으면 (오검출) 어느 쪽인지 몰라 둘 다 버린다."""
+    def one(name, keep):
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, _dictionary(cv2, name), parameters=prm)
+        ids = [] if ids is None else [int(i) for i in ids.ravel()]
+        return {i: c.reshape(4, 2).astype(np.float64) for i, c in zip(ids, corners) if keep is None or i in keep}
+    refs, cubes = one(REF_DICT_NAME, ref_ids), one(CUBE_DICT_NAME, cube_ids)
+    bad_r = {i for i, a in refs.items() if any(_quad_hit(cv2, np, a, b) for b in cubes.values())}
+    bad_c = {i for i, b in cubes.items() if any(_quad_hit(cv2, np, a, b) for a in refs.values())}
+    return ({i: c for i, c in refs.items() if i not in bad_r}, {i: c for i, c in cubes.items() if i not in bad_c})
 
 
 def ref_corners_real(cfg):
@@ -122,16 +144,14 @@ def detect(image_bytes, cfg=None):
     h, w = img.shape[:2]
     prm = cv2.aruco.DetectorParameters_create()
     prm.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    corners, ids, _ = cv2.aruco.detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), _dictionary(cv2), parameters=prm)
-    ids = [] if ids is None else [int(i) for i in ids.ravel()]
-    found = {i: c.reshape(4, 2).astype(np.float64) for i, c in zip(ids, corners)}
+    real = ref_corners_real(cfg)
+    rf, found = split_markers(cv2, np, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), prm, set(real), {CUBE_ID})   # rf = 기준, found = 큐브
     vis = img.copy()
     lw = max(2, w // 400)
-    real = ref_corners_real(cfg)
-    refs = sorted(i for i in found if i in real)
+    refs = sorted(rf)
     for i in refs:
-        cv2.polylines(vis, [found[i].astype(np.int32)], True, (60, 200, 60), lw)
-        cv2.putText(vis, str(i), tuple(int(v) for v in found[i].mean(axis=0)), cv2.FONT_HERSHEY_SIMPLEX, w / 900, (60, 200, 60), lw)
+        cv2.polylines(vis, [rf[i].astype(np.int32)], True, (60, 200, 60), lw)
+        cv2.putText(vis, str(i), tuple(int(v) for v in rf[i].mean(axis=0)), cv2.FONT_HERSHEY_SIMPLEX, w / 900, (60, 200, 60), lw)
     out.update(refs=refs, cube_seen=CUBE_ID in found, annotated=vis, size=[w, h])
     if CUBE_ID in found:
         cv2.polylines(vis, [found[CUBE_ID].astype(np.int32)], True, (0, 140, 255), lw)
@@ -149,7 +169,7 @@ def detect(image_bytes, cfg=None):
         out["warn"].append("기준 마커가 1개만 보임 — 정확도가 떨어진다 (2개 이상 나오게)")
 
     obj = np.vstack([real[i] for i in refs])
-    pix = np.vstack([found[i] for i in refs])
+    pix = np.vstack([rf[i] for i in refs])
     H, _ = cv2.findHomography(pix, obj)   # 사진 → 책상 평면 (실좌표 m)
     if H is None:
         return {**out, "reason": "기준 마커로 책상 평면을 못 구함"}
@@ -195,7 +215,7 @@ def _finish_one(cv2, out, vis, lw, top, side, cpix):
 
 
 def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
-    """탑 쌓기: 사진 한 장 → 큐브 여러 개 (마커 ID 가 ids 안인 것 모두). detect() 는 그대로 (ID 10 하나).
+    """탑 쌓기: 사진 한 장 → 큐브 여러 개 (마커 ID 가 ids 안인 것 모두). detect() 는 그대로 (ID CUBE_ID 하나).
 
     돌려주는 것: {ok, cubes: [{id, x, y, yaw_deg, level, top_cm, marker_mm}], refs, warn, annotated, …}.
     level = 그 큐브 밑에 깔린 큐브 수 (0 = 책상 위, 1 = 한 층 위 …), top_cm = 윗면 높이 (= (level + 1) × cube_h).
@@ -219,16 +239,14 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
     # 큐브 윗면의 흰 네모(50 mm)도 네모 후보로 잡힌다 — 기본값(0.05)이면 그 안의 마커(40 mm)와 '너무 가까운 후보'로 묶여 마커 쪽이 버려진다
     # (어두운 책상·큐브 옆면 위에서 12 장 중 6 장을 놓쳤다). 가까운 후보도 둘 다 남긴다
     prm.minMarkerDistanceRate = 0.02
-    corners, mids, _ = cv2.aruco.detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), _dictionary(cv2), parameters=prm)
-    mids = [] if mids is None else [int(i) for i in mids.ravel()]
-    found = {i: c.reshape(4, 2).astype(np.float64) for i, c in zip(mids, corners)}
+    real = ref_corners_real(cfg)
+    rf, found = split_markers(cv2, np, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), prm, set(real), set(ids))   # rf = 기준 (5x5), found = 큐브 (4x4)
     vis = img.copy()
     lw = max(2, w // 400)
-    real = ref_corners_real(cfg)
-    refs = sorted(i for i in found if i in real)
-    seen = sorted(i for i in found if i in ids)
+    refs = sorted(rf)
+    seen = sorted(found)
     for i in refs:
-        cv2.polylines(vis, [found[i].astype(np.int32)], True, (60, 200, 60), lw)
+        cv2.polylines(vis, [rf[i].astype(np.int32)], True, (60, 200, 60), lw)
     out.update(refs=refs, annotated=vis, size=[w, h], seen=seen)
     if not seen:
         return {**out, "reason": f"큐브 마커(ID {min(ids)}~{max(ids)})가 하나도 안 보임 — 큐브 윗면이 보이게 다시" + (f" (기준 마커는 {len(refs)}개 보임)" if refs else "")}
@@ -237,7 +255,7 @@ def detect_cubes(image_bytes, cfg=None, ids=CUBE_IDS):
         if len(refs) < 2:
             out["warn"].append("기준 마커가 1개만 보임 — 정확도가 떨어진다 (2개 이상 나오게)")
         obj = np.vstack([real[i] for i in refs])
-        pix = np.vstack([found[i] for i in refs])
+        pix = np.vstack([rf[i] for i in refs])
         cams = _cameras(cv2, np, obj, pix, w, h)
         if not cams:
             return {**out, "reason": "기준 마커로 카메라 자세를 못 구함 — 큐브 높이를 알 수 없다. 기준 종이가 더 크게·또렷하게 나오게 다시"}
