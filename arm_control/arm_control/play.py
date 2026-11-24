@@ -26,10 +26,16 @@ COMMAND_TOPIC = "/arm_control/joint_command"
 NEVER = ("not delivered", "unreachable")
 
 
-def schedule(traj, max_speed_deg_s):
-    """(seconds between frames, slow-down factor, peak joint speed of the sim in deg/s)."""
+AK_JOINTS = ("shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow")
+
+
+def schedule(traj, max_speed_deg_s, servo_x=1.0):
+    """(seconds between frames, slow-down factor, peak joint speed of the sim in deg/s).
+    servo_x > 1: joints that are not AK45 (wrist/finger servos) may go servo_x times max speed (2026-11-24 dashboard)."""
     q, dt = traj["positions"], traj["dt"]
-    peak = max((abs(degrees(b - a)) / dt for prev, cur in zip(q, q[1:]) for a, b in zip(prev, cur)),
+    names = traj.get("joint_names") or []
+    w = [1.0 if (k >= len(names) or names[k] in AK_JOINTS) else 1.0 / servo_x for k in range(len(q[0]) if q else 0)]
+    peak = max((abs(degrees(b - a)) * w[k] / dt for prev, cur in zip(q, q[1:]) for k, (a, b) in enumerate(zip(prev, cur))),
                default=0.0)
     slow = max(1.0, peak / max_speed_deg_s)
     return dt * slow, slow, peak

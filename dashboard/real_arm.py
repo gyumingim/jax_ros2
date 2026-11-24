@@ -40,6 +40,7 @@
   피드백 = 확장 ID (0x29 << 8) | id: pos int16×0.1°, spd int16×10 ERPM, cur int16×0.01 A, temp int8, err uint8
   서보 = 표준 ID 5, [motor_id][angle×10 H][L]  (stm_bridge.protocol.servo_frame). STM32 쪽은 피드백 없음.
 """
+from pick_plan_speed import SERVO_PLAN_X  # noqa: E402
 import math
 import os
 import struct
@@ -68,7 +69,7 @@ AK45_MODE_BRAKE = 2
 
 DEFAULTS = {
     "max_speed": 30.0,        # °/s  AK45 램프 속도 상한
-    "servo_speed_x": 2.0,     # 서보 램프 속도 = max_speed × 이것 (2026-11-23 사용자: 서보 2배)
+    "servo_speed_x": 4.0,     # 서보 램프 속도 = max_speed × 이것 (2026-11-23 사용자: 서보 2배, 11-24: 손목 아직 느림 → 4배)
     "max_acc": 90.0,          # °/s² 사다리꼴 가속 (robot_arm AK_ACC)
     "max_step": 3.0,          # °    한 제어 스텝 최대 이동 (robot_arm)
     "carrot": 30.0,           # °    명령을 측정 위치 ± 이 안으로 (robot_arm 45 → 보수적으로 30)
@@ -1000,7 +1001,7 @@ class RealArm:
         speed = min(float(max_speed), self.p["max_speed"])
         if not speed > 0:
             return {"ok": False, "error": f"속도 {max_speed} °/s — 0 보다 커야"}
-        period, slow, peak = P.schedule(traj, speed)     # play.play 는 안 쓴다(아래 play_loop)
+        period, slow, peak = P.schedule(traj, speed, servo_x=SERVO_PLAN_X)     # play.play 는 안 쓴다(아래 play_loop)
         n = len(traj["positions"])
         motors = [(k, self.joints[nm]) for k, nm in enumerate(names) if self.joints[nm].motor == "ak45"]
         tracker = TrackingWatch(max_error)

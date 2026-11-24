@@ -177,7 +177,7 @@ def main():
     time.sleep(0.2)
     first = dict(fake.servo)
     arm.joint_command(["wrist_pitch"], [rad(40)])
-    time.sleep(0.4)
+    time.sleep(0.12)   # 서보 램프 120 °/s (servo_speed_x 4, 11-24) — 30° 는 0.25 s
     jw, jh = arm.joints["wrist_pitch"], arm.joints["hand_roll"]      # 기대값은 보정(영점·핀)에서 — 보정이 바뀌어도 시험이 맞게
     iw, ih = jw.id, jh.id
     a10, a40, h20 = round(jw.to_motor(10)[0], 1), round(jw.to_motor(40)[0], 1), round(jh.to_motor(-20)[0], 1)
@@ -185,7 +185,7 @@ def main():
     time.sleep(1.2)
     check("서보: 첫 명령 바로, 다음은 램프", first.get(iw) == a10 and first.get(ih) == h20 and mid is not None
           and min(a10, a40) < mid < max(a10, a40) and fake.servo.get(iw) == a40,
-          f"{jw.name}(id {iw}) 첫 명령 {s0.get(iw)}→{first.get(iw)}°(바로), {a40}° 로 램프 중 0.4 s 에 {mid}°, 끝 {fake.servo.get(iw)}° · {jh.name} {first.get(ih)}°")
+          f"{jw.name}(id {iw}) 첫 명령 {s0.get(iw)}→{first.get(iw)}°(바로), {a40}° 로 램프 중 0.12 s 에 {mid}°, 끝 {fake.servo.get(iw)}° · {jh.name} {first.get(ih)}°")
 
     # 12. 궤적 재생 + 추종 감시
     names = ["shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow"]

@@ -21,6 +21,7 @@
 가상 전원 끄기/켜기(power): AK45 4개의 피드백이 끊기고 힘이 빠진다. 다시 켜면 엔코더 영점이 15~40° 틀어진다
 (단일 엔코더가 영점을 잃는 경우 흉내) — homing_guard 가 원점을 지우고 제자리 홀드를 보내는지 볼 수 있다.
 """
+from pick_plan_speed import SERVO_PLAN_X  # noqa: E402
 import json
 import math
 import random
@@ -512,7 +513,7 @@ class VirtualArm:
                 if not_homed:
                     return {"ok": False, "error": "(가상) 원점 없는 AK45: " + ", ".join(not_homed) +
                             " — 각도 제어 탭에서 '전부 원점 잡기' 먼저 (원점 없으면 guard 가 AK45 명령을 막아 서보만 움직인다)"}
-            period, slow, peak = P.schedule(traj, max_speed)
+            period, slow, peak = P.schedule(traj, max_speed, servo_x=SERVO_PLAN_X)
             n = len(traj["positions"])
             self._play_stop.clear()
             import play_phase

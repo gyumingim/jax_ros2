@@ -193,12 +193,15 @@ def _stack_args(p, cx, cy, tx, ty):
         raise ValueError("stack: 탑 쌓기 값이 틀림 (탑 쌓기 탭에서 다시)")
 
 
+Z_OFF_DEFAULT_CM = -8.0   # 11-24 사용자: 실물은 ArUco 큐브보다 8 cm 아래를 집어야 함 (칸을 안 보낸 계획도 이 값)
+
+
 def plan_d(p):
     """계획에 쓸 책상 높이 (글자, 빈 값 = 기본): 칸 d (비면 0.4775) − z_off/100. z_off = '집는 높이 보정' cm (11-24, −8 이면 8 cm 아래로 집음).
     카메라 큐브 위치(live_api)에는 안 쓴다 — 계획만."""
     d = str(p.get("d") or "").strip()
     z = str(p.get("z_off") or "").strip()
-    zo = _num(z, "집는 높이 보정 (cm)", -30, 30) if z else 0.0
+    zo = _num(z, "집는 높이 보정 (cm)", -30, 30) if z else Z_OFF_DEFAULT_CM   # 칸이 없는(새로고침 안 한) 화면도 기본 보정
     if not zo:
         return f"{_num(d, 'd', 0.0, 2.0):g}" if d else ""
     return f"{round((_num(d, 'd', 0.0, 2.0) if d else 0.4775) - zo / 100, 4):g}"

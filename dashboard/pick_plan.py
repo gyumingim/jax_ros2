@@ -56,6 +56,8 @@ GRIP_S = 0.8                 # 손가락 닫기·열기 시간 (팀: 한 스텝 
 GRIP_HOLD_S = 0.2            # 닫은/연 뒤 기다림
 YAW_TOL = 2.0                # 손 yaw 가 큐브 면에서 이 각(°) 안
 TIP_TOL = 0.005              # 집는 점 오차 5 mm (지도와 같은 TOL_POS)
+AK_JOINTS = {"shoulder_roll", "shoulder_yaw", "upper_arm_roll", "elbow"}   # AK45 (나머지 손목·손가락 = 서보)
+from pick_plan_speed import SERVO_PLAN_X as SERVO_SPEED_X   # noqa: E402  서보 관절 속도 배수 (재생 schedule 과 같은 값)
 TRACK_LAG_DEG = 2.0          # 실물 램프(real_arm)가 순항 중 늦게 따라가는 각 상한 → 순항 속도 √(2·max_acc·이것) = 19 °/s (max_acc 90)
 try:   # 실물 램프 가속(°/s²) — real_arm.DEFAULTS 한 곳에서 읽는다 (계획 프레임을 실물이 따라갈 수 있게)
     from real_arm import DEFAULTS as _REAL
@@ -1004,8 +1006,14 @@ class Planner:
         둘 다 안 넘는다 (꺾은선 모서리에선 관절별 방향이 바뀌어 순간 가속이 더 클 수 있다: 1 cm 마다라 작다). min_s 보다 짧으면 늘인다.
         첫 프레임 뺀 (q, f) 목록."""
         np = self.np
-        fmove = float(np.abs(fb - fa).max())
-        segs = [float(np.abs(b - a).max()) for a, b in zip(qs, qs[1:])]
+        # 11-24 사용자 (손목 느림): 서보(손목 3·손가락)는 AK45 보다 SERVO_SPEED_X 배 빨리 가도 되게 — 길이를 셀 때 서보 이동을 그만큼 줄여 센다
+        # (실물 서보 램프 = max_speed × real_arm servo_speed_x 라 따라감). AK45 관절 속도·가속 한도는 그대로.
+        w = getattr(self, "_speed_w", None)
+        if w is None or len(w) != len(qs[0]):
+            names = list(self.s.arm)
+            w = self._speed_w = np.array([1.0 if n in AK_JOINTS else 1.0 / SERVO_SPEED_X for n in names][:len(qs[0])])
+        fmove = float(np.abs(fb - fa).max()) / SERVO_SPEED_X
+        segs = [float((np.abs(b - a) * w).max()) for a, b in zip(qs, qs[1:])]
         L = sum(segs)
         Lt = math.degrees(max(L, fmove))
         acc = MAX_ACC
