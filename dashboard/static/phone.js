@@ -144,9 +144,10 @@ function phLive(all) {
     : fresh ? "결과가 들어오는 중 (다른 곳에서 켠 프로그램)" : "폰 프로그램 꺼짐" + ((PH.missing || []).length ? " — 이 PC 에 없는 것: " + PH.missing.join(" / ") : "") + ((pl.log || []).length > 1 ? " · 마지막 기록: " + pl.log.slice(-1)[0] : "");
   PH.dStat.hidden = fresh;
   PH.dStat.textContent = pl.alive ? "폰 프로그램 켜는 중 — 폰 잠금을 풀고 몇 초 가만히 (끄기는 아래 준비)" : PH.pipeNote.textContent;
-  const src = !fresh || all.frame_n == null ? "" : "/api/live/frame.jpg?n=" + all.frame_n;
+  // 영상: MJPEG 스트림 하나를 열어 둔다 (새 프레임마다 바로 보임, 최대 15 Hz). 끊기면(영상 없음) 닫았다가 다시 열기
+  const src = !fresh || all.frame_n == null ? "" : "/api/live/stream.mjpg";
   PH.img.hidden = !src;
-  if (src && PH.imgSrc !== src) { PH.imgSrc = src; PH.img.src = src; }
+  if (PH.imgSrc !== src) { PH.imgSrc = src; PH.img.src = src ? src + "?t=" + Date.now() : ""; }
   // 뎁스·세그 결과 (폰 프로그램의 inference.png: 객체 세그 + 뎁스 색) — 원본 영상 아래 (2026-11-24 사용자)
   if (!PH.inf) { PH.inf = el("img", { class: "ph-img", alt: "뎁스·세그", title: "폰 프로그램의 뎁스·세그 결과 (1초쯤마다)" }); PH.img.after(PH.inf); }
   PH.inf.hidden = !src;

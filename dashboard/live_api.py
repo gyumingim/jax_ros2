@@ -33,7 +33,7 @@ from collections import deque
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import phone_depth as DP
 
@@ -428,6 +428,24 @@ def install(app, log_dir, mode):
         if j is None or LIVE.mode() == "virtual":
             return Response(status_code=404)
         return Response(j, media_type="image/jpeg", headers={"cache-control": "no-store"})
+
+    @app.get("/api/live/stream.mjpg")
+    async def _stream(req: Request):
+        """마지막 프레임을 MJPEG 로 계속 (브라우저 <img> 가 그대로 영상으로 보임, 최대 15 Hz). 2026-11-24 사용자: 웹 프레임이 너무 낮음
+        (전엔 0.5 s 마다 한 장씩 다시 불러 최대 2 Hz). 새 프레임이 생길 때만 보낸다."""
+        import asyncio
+        if LIVE.mode() == "virtual":
+            return Response(status_code=404)
+
+        async def gen():
+            last = None
+            while not await req.is_disconnected():
+                j = LIVE.jpeg
+                if j is not None and j is not last:
+                    last = j
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(j)).encode() + b"\r\n\r\n" + j + b"\r\n"
+                await asyncio.sleep(1 / 15)
+        return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"cache-control": "no-store"})
 
     @app.get("/api/live/inference.png")
     def _inference():
