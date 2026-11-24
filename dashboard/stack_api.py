@@ -10,7 +10,7 @@ server.py 는 install(app, log_dir) 한 줄만 가진다.
     POST /api/stack/placed   {level, id} — 이 화면이 놓은 기록 (힌트만, steps 의 placed)
     POST /api/stack/spot     {x, y, yaw_deg, levels, d} → 그 자리에 levels 층까지 놓을 수 있나 (계획기 point_check, 손 수직) {ok, text, levels: [{level, ok, why}]}
     GET  /api/stack/map?d=   놓을 수 있는 곳 지도 (2 cm 칸마다 바닥부터 몇 층까지 놓을 수 있나, 처음 한 번 계산 20~40초 → 책상 높이마다 기억)
-    GET  /api/stack/sheet    큐브 마커 인쇄물 (phone_markers/stack_markers.pdf, ID 10~15)
+    GET  /api/stack/sheet    큐브 마커 인쇄물 (phone_markers/stack_markers.pdf, 4x4 ID 0~4, 40 mm)
 
 기준 종이 자리·큐브 높이는 휴대폰 카메라 탭의 설정(logs/phone_cam.json)을 같이 쓴다.
 """

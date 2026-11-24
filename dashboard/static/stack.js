@@ -85,7 +85,7 @@
       el("div", { class: "help", style: "margin:8px 0 0" }, "버튼 하나 = 큐브 하나: 계획(역기구학 탭과 같은 IK, 손은 수직) → 지금 모드의 팔로 재생할지 확인창. 다음 층 버튼은 카메라가 아래 층을 탑 자리에서 알아봐야 켜진다 (놓인 큐브 어긋남 2 cm · 기울기 15° · 층 확인). 언제든 이어서 누르면 된다.")),
     el("details", { class: "adv" }, el("summary", {}, "준비 — 인쇄물 · 놓는 법"),
       el("div", { class: "card" },
-        el("a", { class: "btn line", href: "/api/stack/sheet", target: "_blank" }, "큐브 마커 PDF 열기 (ID 10~15)"),
+        el("a", { class: "btn line", href: "/api/stack/sheet", target: "_blank" }, "큐브 마커 PDF 열기 (4x4 ID 0~4, 40 mm)"),
         el("ol", { class: "help" },
           el("li", {}, "실제 크기 100% 로 인쇄해 큐브마다 다른 번호를 윗면에 붙인다. 기준 종이는 없어도 된다 (쓰면 휴대폰 카메라 탭의 것·자리 설정 그대로)."),
           el("li", {}, "큐브끼리 15 cm 이상 띄운다 — 벌린 손가락이 닫히며 큐브 중심에서 12 cm 쯤까지 나온다."),
@@ -160,7 +160,7 @@
   }
   function chosen() {   // 지금 고른 탑 자리·순서. 틀리면 { error }
     const seq = ST.order.value.split(/[\s,]+/).filter(Boolean).map(Number);
-    if (seq.some((i) => !Number.isInteger(i)) || new Set(seq).size !== seq.length) return { error: "순서는 큐브 번호를 쉼표로 (예: 12, 10, 11), 같은 번호는 한 번만 — 비우면 보이는 큐브 아무거나" };
+    if (seq.some((i) => !Number.isInteger(i)) || new Set(seq).size !== seq.length) return { error: "순서는 큐브 번호를 쉼표로 (예: 2, 0, 1), 같은 번호는 한 번만 — 비우면 보이는 큐브 아무거나" };
     const x = parseFloat(ST.sx.value), y = parseFloat(ST.sy.value), yaw = parseFloat(ST.syaw.value) || 0;
     if (!Number.isFinite(x) || !Number.isFinite(y)) return { error: "탑 자리 x, y 숫자 (m)" };
     return { base: { x, y, yaw_deg: yaw }, order: seq };
