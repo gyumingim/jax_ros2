@@ -50,6 +50,7 @@
   R.bLive = el("button", { onclick: () => setSrc("live") }, "영상 인식");
   R.bMap = el("button", { onclick: () => setSrc("map") }, "지도로 고르기");
   R.liveNote = el("div", { class: "note" });
+  R.img = el("img", { class: "rl-cam", alt: "폰 카메라 실시간 영상", hidden: true });   // 영상 인식일 때 폰 영상 (MJPEG, 탑 쌓기 탭과 같은 스트림)
   R.bCube = el("button", { onclick: () => setMode("cube") }, el("i", { class: "sw cube" }), "큐브 자리");
   R.bPlace = el("button", { onclick: () => setMode("place") }, el("i", { class: "sw tgt" }), "놓을 자리");
   R.map = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -62,13 +63,14 @@
   document.head.append(el("style", {}, `
 #page-rl .rl-map { display: block; width: 100%; max-width: 460px; margin: 10px auto 0; border-radius: 12px; background: var(--fill); touch-action: manipulation; cursor: crosshair; }
 #page-rl .rl-seg { margin-top: 4px; }
+#page-rl .rl-cam { display: block; width: 100%; max-width: 460px; margin: 10px auto 0; border-radius: 12px; background: #000; }
 #page-rl .rl-seg i.sw.tgt { border-color: #1d4ed8; }`));
   R.card = el("div", { class: "card" },
     el("h3", {}, "정책 돌려보기"),
     el("p", { class: "help" }, "팀원이 학습한 집기 정책 ", (R.policy = el("b", {}, "grasp_lift_25550")), " 을 MuJoCo 시뮬에서 돌린다. 팔은 아래 재생 버튼을 눌러야만 움직인다."),
     el("div", { class: "modesw seg rl-seg", role: "group", "aria-label": "큐브 자리를 어디서" }, R.bLive, R.bMap),
     el("div", { class: "modesw seg rl-seg", role: "group", "aria-label": "지도를 누르면 옮길 것" }, R.bCube, R.bPlace),
-    R.map, lvTools(), R.mapNote, R.liveNote,
+    R.img, R.map, lvTools(), R.mapNote, R.liveNote,
     el("div", { class: "frow" },
       el("label", { class: "field", style: "width:auto" }, "미리 정한 자리", R.preset),
       el("label", { class: "field", title: "기준 자리에서 앞뒤. − = 책상 안쪽(로봇에서 멀리)" }, "x (cm)", R.x),
@@ -210,11 +212,17 @@
     R.bLive.classList.toggle("on", m === "live"); R.bMap.classList.toggle("on", m === "map");
     for (const i of [R.x, R.y, R.yaw, R.preset]) i.disabled = m === "live";
     if (m === "live") { setMode("cube"); lvPoll(); }
-    liveSpot();
+    camShow(); liveSpot();
   }
   function liveCube() {   // 영상 인식의 큐브: 고른 번호, 없으면 책상 위의 가장 작은 번호 (뎁스만 보인 큐브도 됨)
     const cs = LQ.cubes().filter((c) => c.level === 0 && LQ.isTop(c));
     return (LQ.sel != null && cs.find((c) => c.id === LQ.sel)) || cs.slice().sort((a, b) => (a.id ?? 99) - (b.id ?? 99))[0] || null;
+  }
+  function camShow() {   // 영상 인식 + 실물 + 영상 있음이면 스트림을 한 번 걸고, 바뀔 때만 다시 (가상 모드는 카메라 안 씀)
+    const r = LQ.r, on = curTab === "rl" && R.src === "live" && !!r && !r.stale && r.mode !== "virtual";
+    if (on === R.imgOn) return;
+    R.imgOn = on; R.img.hidden = !on;
+    if (on) R.img.src = "/api/live/stream.mjpg?t=" + Date.now(); else R.img.removeAttribute("src");
   }
   function liveSpot() {   // 영상 인식이면 큐브 칸 = 지금 큐브 (정우 님 틀 dx, dy cm · 각은 90° 마다 같아 틀 회전만큼 돌려 −45~45)
     if (R.src !== "live") { R.liveNote.hidden = true; R.liveOk = true; setBusy(R.busy); mapDraw(); return; }
@@ -235,7 +243,7 @@
     }
     setBusy(R.busy);
   }
-  LQ.on(() => { if (curTab === "rl") { liveSpot(); show(); } });
+  LQ.on(() => { camShow(); if (curTab === "rl") { liveSpot(); show(); } });
 
   // ---------- 서버 ----------
   async function get(url) {
